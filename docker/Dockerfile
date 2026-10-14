@@ -80,10 +80,12 @@ COPY --from=frontend-builder /app/dist ./dist
 
 # Build the Rust backend in release mode (with BuildKit cache)
 WORKDIR /app/src-tauri
+ARG RUN_TESTS=false
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/src-tauri/target \
-    cargo build --release --bin antigravity-tools && \
+    if [ "$RUN_TESTS" = "true" ]; then cargo test --locked --release --lib user_token && cargo test --locked --release --lib proxy::monitor::tests; fi && \
+    cargo build --locked --release --bin antigravity-tools && \
     cp target/release/antigravity-tools /tmp/antigravity-tools
 
 # --- Final Runtime Stage ---
