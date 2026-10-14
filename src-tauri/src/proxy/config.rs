@@ -812,8 +812,8 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub upstream_proxy: UpstreamProxyConfig,
 
-    /// 是否只在 /v1/models 中暴露真实配额模型（隐藏内置虚拟别名）
-    #[serde(default)]
+    /// Use raw upstream model IDs in all model catalogs, without derived aliases.
+    #[serde(default = "default_true")]
     pub only_raw_quota_models: bool,
 
     /// 自定义 User-Agent 请求头 (可选覆盖)
@@ -996,7 +996,7 @@ impl Default for ProxyConfig {
             internal_error_log_retention: InternalErrorLogRetentionConfig::default(),
             debug_logging: DebugLoggingConfig::default(),
             upstream_proxy: UpstreamProxyConfig::default(),
-            only_raw_quota_models: false,
+            only_raw_quota_models: true,
             scheduling: crate::proxy::sticky_config::StickySessionConfig::default(),
             experimental: ExperimentalConfig::default(),
             security_monitor: SecurityMonitorConfig::default(),

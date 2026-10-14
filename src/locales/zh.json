@@ -19,7 +19,7 @@
     "remaining": "剩余额度",
     "requests": "请求数",
     "quota": "累计总额度",
-    "all_models": "此 Token 不限制模型。当前公布的可用模型：",
+    "all_models": "此 Token 不限制模型。当前公布的模型清单：",
     "by_model": "各模型累计用量",
     "search": "搜索模型",
     "model": "模型",
@@ -1313,8 +1313,8 @@
       "title": "模型路由中心 (Model Router)",
       "subtitle": "按“规格家族”统一路由 OpenAI/Claude 模型，或添加最高优先级的“精确映射”。\n注意：Claude 原生直通模型（claude-sonnet-4-6-thinking, claude-opus-4-6-thinking 等）默认透传，需在“专家精确映射”中添加规则才能修改。",
       "subtitle_simple": "通过通配符或精确映射自定义模型路由规则",
-      "only_raw_quota_models": "仅暴露真实配额模型",
-      "only_raw_quota_models_tooltip": "开启后 /v1/models 仅展示当前账号已获取配额的真实模型，隐藏内置的虚拟映射别名（如 gpt-4o 等）及画幅变体模型",
+      "only_raw_quota_models": "仅展示上游模型",
+      "only_raw_quota_models_tooltip": "后台、用户用量中心和模型接口只展示账号返回的原始模型名称，不补充内置名称或派生别名。上游列出不代表每次调用一定成功。",
       "background_task_title": "后台任务模型",
       "background_task_desc": "用于 Claude CLI 的标题生成、摘要提取等后台自动化任务 (默认: gemini-3.1-flash-lite)",
       "use_default": "使用系统默认",
@@ -1417,6 +1417,7 @@
       "copy_base": "复制 Base"
     },
     "supported_models": {
+      "upstream_notice": "以上游账号返回的模型清单为准，实际调用受上游权限和剩余额度影响。",
       "title": "支持模型与集成 (Supported Models & Integration)",
       "model_name": "模型名称",
       "model_id": "模型 ID",

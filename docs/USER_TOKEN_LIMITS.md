@@ -75,3 +75,23 @@ Chrome 本地用户页联测：模型列表、各模型用量、缓存缺失提�
 首次启动会自动迁移表结构。部署后需用专门测试 Key 验证创建/编辑、并发拒绝、额度拒绝和一次真实流式请求的入账，确认后再设置实际 Key 限额。
 
 如回退原版镜像，新增字段可以保留，不需要删除数据库或清零用量；原版不执行新增的并发、额度和模型限制，也不提供用户用量中心。
+
+### Upstream model catalogs
+
+`proxy.only_raw_quota_models` defaults to `true` for new configurations. Enable
+**Upstream Models Only** on existing installations to use exact model IDs reported
+by accounts in the proxy pool. The admin integration table, CLI model choices,
+Token model selector, protocol model-list APIs and usage portal share the backend
+catalog. No built-in models, derived names, normalized quota buckets or version
+baseline substitutions are added in this mode. Empty pools produce empty catalogs.
+
+The portal intersects this catalog with each key's saved model permissions. Saved
+permissions and request routing are not rewritten when catalog entries change.
+Disabling the option restores the legacy expanded catalog. Web/Docker settings
+apply immediately, without restarting the service.
+
+An upstream catalog is not a health check: a listed model may still be limited or
+routed to another model. In the 2026-10-14 production checks, 17 of 18 upstream IDs
+returned generated content across the checks; `gemini-2.5-pro` returned HTTP 429.
+The three Gemini 2.5 Flash IDs returned `gemini-3.1-flash-lite` in response metadata.
+These observations are point-in-time, not permanent capability guarantees.

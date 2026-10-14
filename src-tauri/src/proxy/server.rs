@@ -1852,6 +1852,7 @@ async fn admin_save_config(
     // 在本重构中，各个状态已经在 AppState 中了。
 
     // 更新模型映射
+    *state.only_raw_quota_models.write().await = new_config.proxy.only_raw_quota_models;
     {
         let mut mapping = state.custom_mapping.write().await;
         *mapping = new_config.clone().proxy.custom_mapping;

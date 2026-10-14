@@ -149,7 +149,7 @@ function CollapsibleCard({
 export default function ApiProxy() {
     const { t } = useTranslation();
 
-    const { models } = useProxyModels();
+    const { models, loading: modelsLoading, error: modelsError, refresh: refreshModels } = useProxyModels();
 
     const [status, setStatus] = useState<ProxyStatus>({
         running: false,
@@ -165,7 +165,14 @@ export default function ApiProxy() {
     const [loading, setLoading] = useState(false);
     const [copied, setCopied] = useState<string | null>(null);
     const [selectedProtocol, setSelectedProtocol] = useState<'openai' | 'anthropic' | 'gemini'>('openai');
-    const [selectedModelId, setSelectedModelId] = useState('gemini-3.8-flash-tiered');
+    const [selectedModelId, setSelectedModelId] = useState('');
+
+    useEffect(() => {
+        const selectable = models.filter(model => selectedProtocol !== 'anthropic' || !model.id.includes('image'));
+        if (!selectable.some(model => model.id === selectedModelId)) {
+            setSelectedModelId(selectable[0]?.id ?? '');
+        }
+    }, [models, selectedProtocol, selectedModelId]);
     const [customMappingValue, setCustomMappingValue] = useState(''); // 自定义映射表单的选中值
     const [editingKey, setEditingKey] = useState<string | null>(null);
     const [editingValue, setEditingValue] = useState<string>('');
@@ -440,6 +447,7 @@ export default function ApiProxy() {
         setAppConfig(newConfig);
         try {
             await invoke('save_config', { config: newConfig });
+            refreshModels();
         } catch (error) {
             console.error('保存配置失败:', error);
             showToast(`${t('common.error')}: ${error}`, 'error');
@@ -1020,7 +1028,7 @@ print(response.choices[0].message.content)`;
                                 <input
                                     type="checkbox"
                                     className="toggle toggle-sm bg-gray-300 dark:bg-gray-700 border-gray-400 dark:border-gray-600 checked:bg-blue-600 checked:border-blue-600 cursor-pointer"
-                                    checked={appConfig.proxy.only_raw_quota_models ?? false}
+                                    checked={appConfig.proxy.only_raw_quota_models ?? true}
                                     onChange={(e) => updateProxyConfig({ only_raw_quota_models: e.target.checked })}
                                 />
                             </label>
@@ -1397,6 +1405,7 @@ print(response.choices[0].message.content)`;
                         <Terminal size={18} />
                         {t('proxy.supported_models.title')}
                     </h2>
+                    {(appConfig.proxy.only_raw_quota_models ?? true) && <p className="text-xs text-gray-500 mt-1">{t('proxy.supported_models.upstream_notice')}</p>}
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-0 lg:divide-x dark:divide-gray-700">
@@ -1414,6 +1423,7 @@ print(response.choices[0].message.content)`;
                                     </tr>
                                 </thead>
                                 <tbody>
+                                    {filteredModels.length === 0 && <tr><td colSpan={5} className="text-center text-sm text-gray-500 py-8">{t(modelsLoading ? 'common.loading' : modelsError ? 'common.load_failed' : 'token_portal.empty_catalog')}</td></tr>}
                                     {filteredModels.map((m) => (
                                         <tr
                                             key={m.id}
@@ -1455,10 +1465,11 @@ print(response.choices[0].message.content)`;
                         <div className="flex-1 relative overflow-hidden group">
                             <div className="absolute inset-0 overflow-auto scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
                                 <pre className="p-4 text-[10px] font-mono leading-relaxed">
-                                    {getPythonExample(selectedModelId)}
+                                    {selectedModelId ? getPythonExample(selectedModelId) : t('token_portal.empty_catalog')}
                                 </pre>
                             </div>
                             <button
+                                disabled={!selectedModelId}
                                 onClick={() => copyToClipboardHandler(getPythonExample(selectedModelId), 'example-code')}
                                 className="absolute top-4 right-4 p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors text-white opacity-0 group-hover:opacity-100"
                             >
