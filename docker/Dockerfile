@@ -78,13 +78,21 @@ COPY src/locales ./src/locales
 # Copy frontend dist from builder so Tauri can embed it
 COPY --from=frontend-builder /app/dist ./dist
 
-# Build the Rust backend in release mode (with BuildKit cache)
+# Quality gate compiles Rust before a production image can be assembled.
+FROM backend-builder AS backend-quality
 WORKDIR /app/src-tauri
-ARG RUN_TESTS=false
+RUN rustup component add clippy
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/src-tauri/target \
-    if [ "$RUN_TESTS" = "true" ]; then cargo test --locked --release --lib user_token && cargo test --locked --release --lib proxy::monitor::tests; fi && \
+    cargo clippy --locked --release --lib --bin antigravity-tools && \
+    cargo test --locked --release --lib user_token && \
+    cargo test --locked --release --lib proxy::monitor::tests
+
+FROM backend-quality AS backend-release
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/app/src-tauri/target \
     cargo build --locked --release --bin antigravity-tools && \
     cp target/release/antigravity-tools /tmp/antigravity-tools
 
@@ -115,7 +123,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
-COPY --from=backend-builder /tmp/antigravity-tools /app/antigravity-tools
+COPY --from=backend-release /tmp/antigravity-tools /app/antigravity-tools
 
 # Copy frontend dist from builder
 COPY --from=frontend-builder /app/dist /app/dist

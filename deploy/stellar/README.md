@@ -2,7 +2,8 @@
 
 The private repository's default and production branch is `main`. A push to
 `main`, or a manual run of **Stellar AI Build and Deploy** on `main`, builds an
-amd64 Linux image, runs focused Rust tests and isolated API smoke checks, then
+amd64 Linux image only after independent TypeScript, deployment-safety and workflow
+checks plus a dedicated Rust Clippy/test stage. Isolated API smoke checks then run, before the workflow
 publishes a commit-tagged image to GHCR. Production deploys the immutable digest.
 The upstream Pages workflow is manual-only; the custom workflow replaces the
 upstream push-to-main CI. Upstream PR checks remain available.

@@ -16,7 +16,42 @@ env:
   IMAGE: ghcr.io/david-yang-pixel/antigravity-tools-custom
 
 jobs:
+  quality:
+    name: Quality checks
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install locked frontend dependencies
+        run: npm ci --legacy-peer-deps --no-audit --no-fund
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+      - name: Deployment command safety and rollback tests
+        run: python3 -m unittest discover -s deploy/stellar -p 'test_*.py'
+      - name: Validate workflow definitions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          gh release download v1.7.12 --repo rhysd/actionlint \
+            -p actionlint_1.7.12_linux_amd64.tar.gz -p actionlint_1.7.12_checksums.txt \
+            --dir "$RUNNER_TEMP/actionlint"
+          cd "$RUNNER_TEMP/actionlint"
+          sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
+          cd "$GITHUB_WORKSPACE"
+          "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= \
+            .github/workflows/stellar-deploy.yml .github/workflows/ci.yml .github/workflows/deploy-pages.yml
+
   build:
+    name: Rust quality gate and image build
+    needs: quality
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -27,15 +62,23 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
-      - name: Validate deployment recovery behavior
-        run: python3 -m unittest discover -s deploy/stellar -p 'test_*.py'
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build Linux image and run focused Rust tests
+      - name: Rust Clippy and focused regression tests
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: backend-quality
+          platforms: linux/amd64
+          build-args: USE_MIRROR=false
+          cache-from: type=gha,scope=stellar-amd64
+          cache-to: type=gha,mode=max,scope=stellar-amd64
+      - name: Build production image after quality gates
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -45,7 +88,6 @@ jobs:
           tags: stellar-ai:test
           build-args: |
             USE_MIRROR=false
-            RUN_TESTS=true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -72,7 +114,6 @@ jobs:
           tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
           build-args: |
             USE_MIRROR=false
-            RUN_TESTS=true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -81,7 +122,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     environment:
       name: production
       url: https://antigravity.smlershou.top/usage
@@ -108,4 +149,3 @@ jobs:
             -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
             "root@$DEPLOY_HOST" "deploy $IMAGE@$DIGEST $REVISION"
-
