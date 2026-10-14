@@ -139,8 +139,14 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn get_user_token_models() -> Result<Vec<String>, String> {
+pub async fn get_user_token_models(
+    state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
+) -> Result<Vec<String>, String> {
     let config = crate::modules::config::load_app_config()?;
     let mapping = tokio::sync::RwLock::new(config.proxy.custom_mapping);
-    Ok(crate::proxy::common::model_mapping::get_all_dynamic_models(&mapping, None, false).await)
+    let instance = state.instance.read().await;
+    let manager = instance.as_ref().map(|instance| instance.token_manager.as_ref());
+    Ok(crate::proxy::common::model_mapping::get_all_dynamic_models(
+        &mapping, manager, config.proxy.only_raw_quota_models,
+    ).await)
 }

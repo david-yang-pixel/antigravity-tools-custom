@@ -508,6 +508,17 @@ pub async fn get_all_dynamic_models(
     only_raw_quota_models: bool,
 ) -> Vec<String> {
     use std::collections::HashSet;
+    // Raw mode is an exact catalog, not a compatibility or health filter.
+    // Preserve upstream IDs even when the legacy baseline rejects their version.
+    if only_raw_quota_models {
+        let mut models: Vec<_> = token_manager
+            .map(|tm| tm.get_raw_collected_models())
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        models.sort();
+        return models;
+    }
     let mut model_ids = HashSet::new();
     let mut custom_keys = HashSet::new();
 

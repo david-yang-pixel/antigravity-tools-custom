@@ -48,19 +48,20 @@ async fn overview(
 ) -> Response {
     let mut result = read_overview(&headers, &query);
     if let Ok(data) = &mut result {
-        data.available_models = if data.allowed_models.is_empty() {
-            let only_raw = *state.only_raw_quota_models.read().await;
-            crate::proxy::common::model_mapping::get_all_dynamic_models(
+        let only_raw = *state.only_raw_quota_models.read().await;
+        let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
                 &state.custom_mapping,
                 Some(&state.token_manager),
                 only_raw,
             )
-            .await
-        } else {
-            data.allowed_models.clone()
-        };
+            .await;
+        data.available_models = permitted_catalog(catalog, &data.allowed_models);
     }
     render(result)
+}
+
+fn permitted_catalog(catalog: Vec<String>, allowed: &[String]) -> Vec<String> {
+    catalog.into_iter().filter(|model| allowed.is_empty() || allowed.contains(model)).collect()
 }
 fn render(result: Result<UsageOverview, StatusCode>) -> Response {
     let mut response = match result {
@@ -146,6 +147,14 @@ fn read_overview(headers: &HeaderMap, query: &PortalQuery) -> Result<UsageOvervi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn user_token_catalog_restricts_permissions_without_reintroducing_stale_ids() {
+        let catalog = vec!["upstream-a".into(), "upstream-b".into()];
+        assert_eq!(permitted_catalog(catalog.clone(), &[]), catalog);
+        assert_eq!(permitted_catalog(catalog.clone(), &["upstream-b".into(), "old-alias".into()]), vec!["upstream-b"]);
+        assert!(permitted_catalog(catalog, &["old-alias".into()]).is_empty());
+        assert!(permitted_catalog(vec![], &["old-alias".into()]).is_empty());
+    }
     use axum::{
         body::{to_bytes, Body},
         http::Request,

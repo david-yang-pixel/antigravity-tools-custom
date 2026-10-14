@@ -45,7 +45,22 @@ def main():
     key = token['token']
     overview = request('/api/token-portal/me', key=key)
     assert overview['max_concurrency'] == 2 and overview['token_quota'] == 1000000
-    assert overview['available_models'] == ['gemini-3-flash']
+    assert overview['allowed_models'] == ['gemini-3-flash']
+    # With no upstream accounts, raw catalogs stay empty, including for keys
+    # whose saved permissions mention an old or unavailable model.
+    assert overview['available_models'] == []
+    assert request('/api/user-token-models', key=admin) == []
+    assert request('/v1/models', key=key)['data'] == []
+    config = request('/api/config', key=admin)
+    assert config['proxy']['only_raw_quota_models'] is True
+    config['proxy']['only_raw_quota_models'] = False
+    request('/api/config', key=admin, data={'config': config})
+    assert 'gemini-3-flash' in request('/api/user-token-models', key=admin)
+    assert request('/api/token-portal/me', key=key)['available_models'] == ['gemini-3-flash']
+    config['proxy']['only_raw_quota_models'] = True
+    request('/api/config', key=admin, data={'config': config})
+    assert request('/api/user-token-models', key=admin) == []
+    assert request('/api/token-portal/me', key=key)['available_models'] == []
     assert overview['logs']['total'] == 0
     request('/api/user-tokens', 401, key=key)
     request('/api/token-portal/me?start_time=2&end_time=1', 400, key=key)

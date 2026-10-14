@@ -1394,15 +1394,20 @@ impl TokenManager {
     }
 
     fn get_available_models_from_json(account_path: &PathBuf) -> Option<HashSet<String>> {
+        Self::get_raw_model_ids_from_json(account_path)
+            .map(|models| models.into_iter().map(|model| model.to_lowercase()).collect())
+    }
+
+    fn get_raw_model_ids_from_json(account_path: &PathBuf) -> Option<HashSet<String>> {
         let content = std::fs::read_to_string(account_path).ok()?;
         let account: serde_json::Value = serde_json::from_str(&content).ok()?;
         let models = account.get("quota")?.get("models")?.as_array()?;
         let mut result = HashSet::new();
         for model in models {
             if let Some(name) = model.get("name").and_then(|v| v.as_str()) {
-                let normalized = name.trim().to_lowercase();
-                if !normalized.is_empty() {
-                    result.insert(normalized);
+                let raw = name.trim();
+                if !raw.is_empty() {
+                    result.insert(raw.to_string());
                 }
             }
         }
@@ -4237,6 +4242,14 @@ impl TokenManager {
         }
     }
 
+    /// Raw upstream IDs only; never include normalized quota-protection buckets.
+    pub fn get_raw_collected_models(&self) -> std::collections::HashSet<String> {
+        self.tokens.iter().flat_map(|entry| {
+            Self::get_raw_model_ids_from_json(&entry.value().account_path)
+                .unwrap_or_default()
+        }).collect()
+    }
+
     /// 获取当前所有可用账号中收集到的官方下发的所有动态模型集合
     pub fn get_all_collected_models(&self) -> std::collections::HashSet<String> {
         let mut all_models = std::collections::HashSet::new();
@@ -5202,7 +5215,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_collected_models_preserve_raw_quota_model_names_for_model_listing() {
+    async fn user_token_raw_model_catalog_preserves_upstream_ids_without_aliases() {
         let tmp_root = std::env::temp_dir().join(format!(
             "antigravity-token-manager-test-raw-models-{}",
             uuid::Uuid::new_v4()
@@ -5223,7 +5236,9 @@ mod tests {
             },
             "quota": {
                 "models": [
-                    { "name": "gemini-3-flash-agent", "percentage": 88 }
+                    { "name": "gemini-3-flash-agent", "percentage": 88 },
+                    { "name": "gemini-2.5-flash", "percentage": 88 },
+                    { "name": "New-Upstream-high", "percentage": 0 }
                 ]
             },
             "disabled": false,
@@ -5244,6 +5259,18 @@ mod tests {
         assert!(collected_models.contains("gemini-3-flash-agent"));
         // Keep the normalized quota bucket too; it is used for quota/protection checks.
         assert!(collected_models.contains("gemini-3-flash"));
+
+        let mapping = tokio::sync::RwLock::new(
+            [("custom-alias".to_string(), "gemini-3-flash-agent".to_string())]
+                .into_iter().collect(),
+        );
+        let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
+            &mapping, Some(&manager), true,
+        ).await;
+        assert_eq!(catalog, vec!["New-Upstream-high", "gemini-2.5-flash", "gemini-3-flash-agent"]);
+        assert!(crate::proxy::common::model_mapping::get_all_dynamic_models(
+            &mapping, None, true,
+        ).await.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp_root);
     }
