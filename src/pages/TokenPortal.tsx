@@ -101,7 +101,7 @@ export default function TokenPortal() {
         <div className="min-h-screen bg-slate-50 text-slate-900">
             <header className="border-b border-slate-200 bg-white">
                 <div className="max-w-6xl mx-auto px-5 sm:px-8 h-20 flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3"><Activity size={24} className="text-blue-600" /><span className="font-semibold tracking-tight">Antigravity Tools <span className="text-slate-400 font-normal hidden sm:inline">/ {t('token_portal.title')}</span></span></div>
+                    <div className="flex items-center gap-3"><Activity size={24} className="text-blue-600" /><span className="font-semibold tracking-tight">Stellar AI <span className="text-slate-400 font-normal hidden sm:inline">/ {t('token_portal.title')}</span></span></div>
                     <div className="flex items-center gap-3 text-sm">
                         <button className="rounded-lg px-3 py-2 hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-blue-500" onClick={() => i18n.changeLanguage(i18n.language.startsWith('zh') ? 'en' : 'zh')} aria-label={t('token_portal.language')}>{i18n.language.startsWith('zh') ? 'EN' : '中文'}</button>
                         {overview && <button onClick={logout} className="flex items-center gap-2 rounded-lg px-3 py-2 hover:bg-slate-100"><LogOut size={16} />{t('token_portal.logout')}</button>}
