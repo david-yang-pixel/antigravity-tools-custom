@@ -82,12 +82,15 @@ COPY --from=frontend-builder /app/dist ./dist
 FROM backend-builder AS backend-quality
 WORKDIR /app/src-tauri
 RUN rustup component add clippy
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/src-tauri/target \
     cargo clippy --locked --release --lib --bin antigravity-tools && \
-    cargo test --locked --release --lib user_token && \
-    cargo test --locked --release --lib proxy::monitor::tests
+    for filter in user_token proxy::middleware::monitor::tests; do \
+      cargo test --locked --release --lib "$filter" | tee /tmp/test-results || exit 1; \
+      grep -Eq 'test result: ok\. [1-9][0-9]* passed;' /tmp/test-results || exit 1; \
+    done
 
 FROM backend-quality AS backend-release
 RUN --mount=type=cache,target=/root/.cargo/registry \

@@ -77,7 +77,7 @@ jobs:
           platforms: linux/amd64
           build-args: USE_MIRROR=false
           cache-from: type=gha,scope=stellar-amd64
-          cache-to: type=gha,mode=max,scope=stellar-amd64
+          cache-to: type=gha,mode=max,scope=stellar-amd64,timeout=5m,ignore-error=true
       - name: Build production image after quality gates
         uses: docker/build-push-action@v6
         with:
@@ -92,7 +92,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=stellar-amd64
-          cache-to: type=gha,mode=max,scope=stellar-amd64
+          cache-to: type=gha,mode=max,scope=stellar-amd64,timeout=5m,ignore-error=true
       - name: Smoke test isolated container
         run: |
           set -euo pipefail
