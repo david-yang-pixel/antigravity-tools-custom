@@ -145,8 +145,13 @@ pub async fn get_user_token_models(
     let config = crate::modules::config::load_app_config()?;
     let mapping = tokio::sync::RwLock::new(config.proxy.custom_mapping);
     let instance = state.instance.read().await;
-    let manager = instance.as_ref().map(|instance| instance.token_manager.as_ref());
+    let manager = instance
+        .as_ref()
+        .map(|instance| instance.token_manager.as_ref());
     Ok(crate::proxy::common::model_mapping::get_all_dynamic_models(
-        &mapping, manager, config.proxy.only_raw_quota_models,
-    ).await)
+        &mapping,
+        manager,
+        config.proxy.only_raw_quota_models,
+    )
+    .await)
 }

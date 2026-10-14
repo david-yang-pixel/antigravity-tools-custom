@@ -1394,8 +1394,12 @@ impl TokenManager {
     }
 
     fn get_available_models_from_json(account_path: &PathBuf) -> Option<HashSet<String>> {
-        Self::get_raw_model_ids_from_json(account_path)
-            .map(|models| models.into_iter().map(|model| model.to_lowercase()).collect())
+        Self::get_raw_model_ids_from_json(account_path).map(|models| {
+            models
+                .into_iter()
+                .map(|model| model.to_lowercase())
+                .collect()
+        })
     }
 
     fn get_raw_model_ids_from_json(account_path: &PathBuf) -> Option<HashSet<String>> {
@@ -4244,10 +4248,12 @@ impl TokenManager {
 
     /// Raw upstream IDs only; never include normalized quota-protection buckets.
     pub fn get_raw_collected_models(&self) -> std::collections::HashSet<String> {
-        self.tokens.iter().flat_map(|entry| {
-            Self::get_raw_model_ids_from_json(&entry.value().account_path)
-                .unwrap_or_default()
-        }).collect()
+        self.tokens
+            .iter()
+            .flat_map(|entry| {
+                Self::get_raw_model_ids_from_json(&entry.value().account_path).unwrap_or_default()
+            })
+            .collect()
     }
 
     /// 获取当前所有可用账号中收集到的官方下发的所有动态模型集合
@@ -5261,16 +5267,32 @@ mod tests {
         assert!(collected_models.contains("gemini-3-flash"));
 
         let mapping = tokio::sync::RwLock::new(
-            [("custom-alias".to_string(), "gemini-3-flash-agent".to_string())]
-                .into_iter().collect(),
+            [(
+                "custom-alias".to_string(),
+                "gemini-3-flash-agent".to_string(),
+            )]
+            .into_iter()
+            .collect(),
         );
         let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
-            &mapping, Some(&manager), true,
-        ).await;
-        assert_eq!(catalog, vec!["New-Upstream-high", "gemini-2.5-flash", "gemini-3-flash-agent"]);
-        assert!(crate::proxy::common::model_mapping::get_all_dynamic_models(
-            &mapping, None, true,
-        ).await.is_empty());
+            &mapping,
+            Some(&manager),
+            true,
+        )
+        .await;
+        assert_eq!(
+            catalog,
+            vec![
+                "New-Upstream-high",
+                "gemini-2.5-flash",
+                "gemini-3-flash-agent"
+            ]
+        );
+        assert!(
+            crate::proxy::common::model_mapping::get_all_dynamic_models(&mapping, None, true,)
+                .await
+                .is_empty()
+        );
 
         let _ = std::fs::remove_dir_all(&tmp_root);
     }

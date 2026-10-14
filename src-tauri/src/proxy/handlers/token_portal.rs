@@ -50,18 +50,21 @@ async fn overview(
     if let Ok(data) = &mut result {
         let only_raw = *state.only_raw_quota_models.read().await;
         let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
-                &state.custom_mapping,
-                Some(&state.token_manager),
-                only_raw,
-            )
-            .await;
+            &state.custom_mapping,
+            Some(&state.token_manager),
+            only_raw,
+        )
+        .await;
         data.available_models = permitted_catalog(catalog, &data.allowed_models);
     }
     render(result)
 }
 
 fn permitted_catalog(catalog: Vec<String>, allowed: &[String]) -> Vec<String> {
-    catalog.into_iter().filter(|model| allowed.is_empty() || allowed.contains(model)).collect()
+    catalog
+        .into_iter()
+        .filter(|model| allowed.is_empty() || allowed.contains(model))
+        .collect()
 }
 fn render(result: Result<UsageOverview, StatusCode>) -> Response {
     let mut response = match result {
@@ -151,7 +154,10 @@ mod tests {
     fn user_token_catalog_restricts_permissions_without_reintroducing_stale_ids() {
         let catalog = vec!["upstream-a".into(), "upstream-b".into()];
         assert_eq!(permitted_catalog(catalog.clone(), &[]), catalog);
-        assert_eq!(permitted_catalog(catalog.clone(), &["upstream-b".into(), "old-alias".into()]), vec!["upstream-b"]);
+        assert_eq!(
+            permitted_catalog(catalog.clone(), &["upstream-b".into(), "old-alias".into()]),
+            vec!["upstream-b"]
+        );
         assert!(permitted_catalog(catalog, &["old-alias".into()]).is_empty());
         assert!(permitted_catalog(vec![], &["old-alias".into()]).is_empty());
     }
