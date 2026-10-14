@@ -700,12 +700,15 @@ impl AxumServer {
             )
             // 应用 AI 服务特定的层
             // 注意：Axum layer 执行顺序是从下往上（洋葱模型）
-            // 请求: ip_filter -> auth -> monitor -> handler
-            // 响应: handler -> monitor -> auth -> ip_filter
+            // 请求: ip_filter -> auth -> user_token_limits -> monitor -> handler
+            // 响应: handler -> monitor -> user_token_limits -> auth -> ip_filter
             // monitor 需要在 auth 之后执行才能获取 UserTokenIdentity
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 monitor_middleware,
+            ))
+            .layer(axum::middleware::from_fn(
+                crate::proxy::middleware::user_token_limits::user_token_limits_middleware,
             ))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -1017,6 +1020,7 @@ impl AxumServer {
                 get(admin_list_user_tokens).post(admin_create_user_token),
             )
             .route("/user-tokens/summary", get(admin_get_user_token_summary))
+            .route("/user-token-models", get(admin_user_token_models))
             .route("/user-tokens/:id/renew", post(admin_renew_user_token))
             .route(
                 "/user-tokens/:id",
@@ -1040,6 +1044,7 @@ impl AxumServer {
 
         let app = Router::new()
             .nest("/api", admin_routes)
+            .merge(handlers::token_portal::routes())
             .merge(proxy_routes)
             // 公开路由 (无需鉴权)
             .route("/auth/callback", get(handle_oauth_callback))
@@ -2416,9 +2421,25 @@ async fn admin_get_user_token_summary(
     Ok(Json(summary))
 }
 
+async fn admin_user_token_models(State(state): State<AppState>) -> Json<Vec<String>> {
+    let only_raw = *state.only_raw_quota_models.read().await;
+    Json(
+        crate::proxy::common::model_mapping::get_all_dynamic_models(
+            &state.custom_mapping,
+            Some(&state.token_manager),
+            only_raw,
+        )
+        .await,
+    )
+}
+
 async fn admin_create_user_token(
     Json(payload): Json<crate::commands::user_token::CreateTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::user_token_db::validate_limits(payload.max_concurrency, payload.token_quota)
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    crate::modules::user_token_db::normalize_allowed_models(payload.allowed_models.clone())
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     let token = crate::commands::user_token::create_user_token(payload)
         .await
         .map_err(|e| {
@@ -2469,6 +2490,15 @@ async fn admin_update_user_token(
     Path(id): Path<String>,
     Json(payload): Json<crate::commands::user_token::UpdateTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::user_token_db::validate_limits(
+        payload.max_concurrency.unwrap_or(0),
+        payload.token_quota.unwrap_or(0),
+    )
+    .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    if let Some(models) = &payload.allowed_models {
+        crate::modules::user_token_db::normalize_allowed_models(models.clone())
+            .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    }
     crate::commands::user_token::update_user_token(id, payload)
         .await
         .map_err(|e| {

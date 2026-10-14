@@ -72,6 +72,12 @@ async fn auth_middleware_internal(
                         .headers()
                         .get("x-api-key")
                         .and_then(|h| h.to_str().ok())
+                })
+                .or_else(|| {
+                    request
+                        .headers()
+                        .get("x-goog-api-key")
+                        .and_then(|h| h.to_str().ok())
                 });
 
             if let Some(token) = api_key {

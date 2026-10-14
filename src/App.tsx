@@ -10,6 +10,7 @@ import TokenStats from './pages/TokenStats';
 import Security from './pages/Security';
 import ThemeManager from './components/common/ThemeManager';
 import UserToken from './pages/UserToken';
+import TokenPortal from './pages/TokenPortal';
 import { ApiKeyFun } from './pages/ApiKeyFun';
 import { UpdateNotification } from './components/UpdateNotification';
 import SuggestionDeleteThinkingModal from './components/common/SuggestionDeleteThinkingModal';
@@ -68,7 +69,7 @@ const router = createBrowserRouter([
   },
 ]);
 
-function App() {
+function AdminApp() {
   const { config, loadConfig } = useConfigStore();
   const { fetchCurrentAccount, fetchAccounts } = useAccountStore();
   const { i18n } = useTranslation();
@@ -176,4 +177,8 @@ function App() {
   );
 }
 
-export default App;
+// The public portal mounts without admin stores, update checks, or admin requests.
+// Full-page navigation keeps its in-memory credential separate from admin login.
+export default function App() {
+  return /^\/usage\/?$/.test(window.location.pathname) ? <TokenPortal /> : <AdminApp />;
+}

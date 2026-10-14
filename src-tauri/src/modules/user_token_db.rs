@@ -20,6 +20,9 @@ pub struct UserToken {
     pub enabled: bool,
     pub expires_type: String, // "day", "week", "month", "never"
     pub expires_at: Option<i64>,
+    pub max_concurrency: i32,         // 0 = unlimited
+    pub allowed_models: Vec<String>,  // empty = all public model IDs
+    pub token_quota: i64,             // lifetime input + output tokens; 0 = unlimited
     pub max_ips: i32,                 // 0 = unlimited
     pub curfew_start: Option<String>, // "HH:MM" 宵禁开始时间
     pub curfew_end: Option<String>,   // "HH:MM" 宵禁结束时间
@@ -66,12 +69,21 @@ pub fn get_db_path() -> Result<PathBuf, String> {
 pub fn connect_db() -> Result<Connection, String> {
     let path = get_db_path()?;
     let conn = Connection::open(&path).map_err(|e| format!("Failed to open database: {}", e))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("Failed to configure database: {e}"))?;
     Ok(conn)
 }
 
 /// 初始化数据库
 pub fn init_db() -> Result<(), String> {
-    let conn = connect_db()?;
+    let mut conn = connect_db()?;
+    init_db_connection(&mut conn)
+}
+
+fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin migration: {e}"))?;
 
     // 创建 user_tokens 表
     conn.execute(
@@ -118,6 +130,35 @@ pub fn init_db() -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE user_tokens ADD COLUMN curfew_start TEXT", []);
     let _ = conn.execute("ALTER TABLE user_tokens ADD COLUMN curfew_end TEXT", []);
 
+    // Additive migration: preserve keys and usage; report errors instead of silently
+    // treating a missing quota column as unlimited.
+    for (column, definition) in [
+        ("allowed_models", "TEXT NOT NULL DEFAULT '[]'"),
+        (
+            "max_concurrency",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(max_concurrency >= 0)",
+        ),
+        (
+            "token_quota",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(token_quota >= 0)",
+        ),
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('user_tokens') WHERE name = ?1)",
+                [column],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to inspect token schema: {e}"))?;
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE user_tokens ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|e| format!("Failed to migrate {column}: {e}"))?;
+        }
+    }
+
     // 创建 token_ip_bindings 表
     conn.execute(
         "CREATE TABLE IF NOT EXISTS token_ip_bindings (
@@ -152,6 +193,16 @@ pub fn init_db() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create token_usage_logs table: {}", e))?;
 
+    // Historical rows remain NULL: missing cache telemetry is not a zero hit count.
+    let has_cache: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('token_usage_logs') WHERE name = 'cached_tokens')",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !has_cache {
+        conn.execute("ALTER TABLE token_usage_logs ADD COLUMN cached_tokens INTEGER CHECK(cached_tokens >= 0)", [])
+            .map_err(|e| format!("Failed to migrate cached tokens: {e}"))?;
+    }
+
     // 创建索引
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_token_usage_logs_token_id ON token_usage_logs(token_id)",
@@ -180,7 +231,244 @@ pub fn init_db() -> Result<(), String> {
         [],
     );
 
+    conn.commit()
+        .map_err(|e| format!("Failed to commit token migration: {e}"))
+}
+
+pub fn validate_limits(max_concurrency: i32, token_quota: i64) -> Result<(), String> {
+    if max_concurrency < 0 || !(0..=9_007_199_254_740_991).contains(&token_quota) {
+        return Err("Concurrency and quota must be non-negative integers; quota must not exceed 9007199254740991".into());
+    }
     Ok(())
+}
+
+/// Exact client-facing model IDs; aliases remain subject to the administrator's routing.
+pub fn normalize_allowed_models(models: Vec<String>) -> Result<Vec<String>, String> {
+    if models.len() > 256 {
+        return Err("Select no more than 256 models".into());
+    }
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim().strip_prefix("models/").unwrap_or(model.trim());
+        if model.is_empty()
+            || model.len() > 200
+            || !model
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.:/".contains(&c))
+        {
+            return Err("Invalid model ID; use an exact model name without wildcards".into());
+        }
+        normalized.push(model.to_string());
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn read_allowed_models(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<String>> {
+    let raw: String = row.get("allowed_models")?;
+    serde_json::from_str(&raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            row.as_ref().column_index("allowed_models").unwrap_or(0),
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub requests: i64,
+    pub failed_requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub last_used_at: i64,
+    pub cached_tokens: Option<i64>,
+    pub cache_recorded_requests: i64,
+}
+
+pub fn model_usage_for_token(token_id: &str) -> Result<Vec<ModelUsage>, String> {
+    let conn = connect_db()?;
+    let mut statement = conn.prepare(
+        "SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model_name, COUNT(*),
+         SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
+         SUM(MAX(COALESCE(input_tokens, 0), 0)), SUM(MAX(COALESCE(output_tokens, 0), 0)), MAX(request_time), SUM(cached_tokens), COUNT(cached_tokens)
+         FROM token_usage_logs WHERE token_id = ?1 GROUP BY model_name
+         ORDER BY SUM(MAX(COALESCE(input_tokens, 0), 0) + MAX(COALESCE(output_tokens, 0), 0)) DESC, model_name"
+    ).map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([token_id], |r| {
+            Ok(ModelUsage {
+                model: r.get(0)?,
+                requests: r.get(1)?,
+                failed_requests: r.get(2)?,
+                input_tokens: r.get(3)?,
+                output_tokens: r.get(4)?,
+                last_used_at: r.get(5)?,
+                cached_tokens: r.get(6)?,
+                cache_recorded_requests: r.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Public DTOs intentionally omit token IDs, IP addresses and request/response content.
+#[derive(Debug, Serialize)]
+pub struct PublicUsageLog {
+    pub id: String,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: Option<i64>,
+    pub request_time: i64,
+    pub status: i32,
+}
+#[derive(Debug, Serialize)]
+pub struct UsageLogPage {
+    pub items: Vec<PublicUsageLog>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total: i64,
+}
+pub fn usage_logs_for_token(token_id: &str, page: u32) -> Result<UsageLogPage, String> {
+    filtered_usage_logs_for_token(token_id, page, None, None)
+}
+pub fn filtered_usage_logs_for_token(
+    token_id: &str,
+    page: u32,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> Result<UsageLogPage, String> {
+    let conn = connect_db()?;
+    let total = conn
+        .query_row(
+            "SELECT COUNT(*) FROM token_usage_logs WHERE token_id = ?1 AND request_time >= ?2 AND request_time <= ?3",
+            params![token_id, start_time.unwrap_or(i64::MIN), end_time.unwrap_or(i64::MAX)],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let page_size = 20;
+    let mut stmt = conn.prepare("SELECT id, COALESCE(NULLIF(model, ''), 'unknown'), MAX(COALESCE(input_tokens, 0), 0), MAX(COALESCE(output_tokens, 0), 0), cached_tokens, request_time, COALESCE(status, 0) FROM token_usage_logs WHERE token_id = ?1 AND request_time >= ?4 AND request_time <= ?5 ORDER BY request_time DESC, id DESC LIMIT ?2 OFFSET ?3").map_err(|e| e.to_string())?;
+    let items = stmt
+        .query_map(
+            params![
+                token_id,
+                page_size,
+                i64::from(page.saturating_sub(1)) * i64::from(page_size),
+                start_time.unwrap_or(i64::MIN),
+                end_time.unwrap_or(i64::MAX)
+            ],
+            |r| {
+                Ok(PublicUsageLog {
+                    id: r.get(0)?,
+                    model: r.get(1)?,
+                    input_tokens: r.get(2)?,
+                    output_tokens: r.get(3)?,
+                    cached_tokens: r.get(4)?,
+                    request_time: r.get(5)?,
+                    status: r.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(UsageLogPage {
+        items,
+        page,
+        page_size,
+        total,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsagePeriod {
+    pub start_date: String,
+    pub end_date: String,
+    pub requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: Option<i64>,
+    pub cache_recorded_requests: i64,
+}
+/// UTC+8 calendar days and ISO weeks (Monday start), including empty periods.
+pub fn period_usage_for_token(
+    token_id: &str,
+    weekly: bool,
+    now: i64,
+) -> Result<Vec<UsagePeriod>, String> {
+    use chrono::{Datelike, Duration, TimeZone};
+    let timezone = FixedOffset::east_opt(8 * 3600).unwrap();
+    let today = timezone
+        .timestamp_opt(now, 0)
+        .single()
+        .ok_or("Invalid timestamp")?
+        .date_naive();
+    let current = if weekly {
+        today - Duration::days(i64::from(today.weekday().num_days_from_monday()))
+    } else {
+        today
+    };
+    let count = if weekly { 12 } else { 30 };
+    let span = if weekly { 7 } else { 1 };
+    let oldest = current - Duration::days((count - 1) * span);
+    let from = timezone
+        .from_local_datetime(&oldest.and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp();
+    let until = timezone
+        .from_local_datetime(
+            &(current + Duration::days(span))
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        )
+        .single()
+        .unwrap()
+        .timestamp();
+    let conn = connect_db()?;
+    let mut stmt = conn.prepare("SELECT (request_time - ?2) / ?3 AS bucket, COUNT(*), SUM(MAX(COALESCE(input_tokens, 0), 0)), SUM(MAX(COALESCE(output_tokens, 0), 0)), SUM(cached_tokens), COUNT(cached_tokens) FROM token_usage_logs WHERE token_id = ?1 AND request_time >= ?2 AND request_time < ?4 GROUP BY bucket").map_err(|e| e.to_string())?;
+    let mut periods: Vec<_> = (0..count)
+        .map(|i| {
+            let start = oldest + Duration::days(i * span);
+            UsagePeriod {
+                start_date: start.to_string(),
+                end_date: (start + Duration::days(span - 1)).to_string(),
+                requests: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_tokens: Some(0),
+                cache_recorded_requests: 0,
+            }
+        })
+        .collect();
+    let rows = stmt
+        .query_map(params![token_id, from, span * 86400, until], |r| {
+            Ok((
+                r.get::<_, usize>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (i, requests, input, output, cached, recorded) = row.map_err(|e| e.to_string())?;
+        if let Some(p) = periods.get_mut(i) {
+            p.requests = requests;
+            p.input_tokens = input;
+            p.output_tokens = output;
+            p.cached_tokens = cached;
+            p.cache_recorded_requests = recorded;
+        }
+    }
+    periods.reverse();
+    Ok(periods)
 }
 
 /// 创建新令牌
@@ -192,7 +480,12 @@ pub fn create_token(
     curfew_start: Option<String>,
     curfew_end: Option<String>,
     custom_expires_at: Option<i64>, // 自定义过期时间戳 (秒)
+    max_concurrency: i32,
+    token_quota: i64,
+    allowed_models: Vec<String>,
 ) -> Result<UserToken, String> {
+    validate_limits(max_concurrency, token_quota)?;
+    let allowed_models = normalize_allowed_models(allowed_models)?;
     let conn = connect_db()?;
     let id = Uuid::new_v4().to_string();
     let token = format!("sk-{}", Uuid::new_v4().to_string().replace("-", ""));
@@ -230,6 +523,9 @@ pub fn create_token(
         expires_type: expires_type.clone(),
         expires_at,
         max_ips,
+        max_concurrency,
+        token_quota,
+        allowed_models,
         curfew_start: curfew_start.clone(),
         curfew_end: curfew_end.clone(),
         created_at: now,
@@ -243,8 +539,8 @@ pub fn create_token(
         "INSERT INTO user_tokens (
             id, token, username, description, enabled, expires_type, expires_at, max_ips,
             curfew_start, curfew_end,
-            created_at, updated_at, total_requests, total_tokens_used
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            created_at, updated_at, total_requests, total_tokens_used, max_concurrency, token_quota, allowed_models
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             user_token.id,
             user_token.token,
@@ -260,6 +556,9 @@ pub fn create_token(
             user_token.updated_at,
             user_token.total_requests,
             user_token.total_tokens_used,
+            user_token.max_concurrency,
+            user_token.token_quota,
+            serde_json::to_string(&user_token.allowed_models).map_err(|e| e.to_string())?,
         ],
     )
     .map_err(|e| format!("Failed to insert user token: {}", e))?;
@@ -285,6 +584,9 @@ pub fn list_tokens() -> Result<Vec<UserToken>, String> {
                 expires_type: row.get("expires_type").unwrap_or("never".to_string()), // 防御性默认值
                 expires_at: row.get("expires_at").unwrap_or(None),
                 max_ips: row.get("max_ips").unwrap_or(0),
+                max_concurrency: row.get("max_concurrency")?,
+                token_quota: row.get("token_quota")?,
+                allowed_models: read_allowed_models(row)?,
                 curfew_start: row.get("curfew_start").unwrap_or(None),
                 curfew_end: row.get("curfew_end").unwrap_or(None),
                 created_at: row.get("created_at")?,
@@ -322,6 +624,9 @@ pub fn get_token_by_id(id: &str) -> Result<Option<UserToken>, String> {
                 expires_type: row.get("expires_type")?,
                 expires_at: row.get("expires_at")?,
                 max_ips: row.get("max_ips")?,
+                max_concurrency: row.get("max_concurrency")?,
+                token_quota: row.get("token_quota")?,
+                allowed_models: read_allowed_models(row)?,
                 curfew_start: row.get("curfew_start").unwrap_or(None),
                 curfew_end: row.get("curfew_end").unwrap_or(None),
                 created_at: row.get("created_at")?,
@@ -355,6 +660,9 @@ pub fn get_token_by_value(token: &str) -> Result<Option<UserToken>, String> {
                 expires_type: row.get("expires_type")?,
                 expires_at: row.get("expires_at")?,
                 max_ips: row.get("max_ips")?,
+                max_concurrency: row.get("max_concurrency")?,
+                token_quota: row.get("token_quota")?,
+                allowed_models: read_allowed_models(row)?,
                 curfew_start: row.get("curfew_start").unwrap_or(None),
                 curfew_end: row.get("curfew_end").unwrap_or(None),
                 created_at: row.get("created_at")?,
@@ -379,7 +687,12 @@ pub fn update_token(
     max_ips: Option<i32>,
     curfew_start: Option<Option<String>>,
     curfew_end: Option<Option<String>>,
+    max_concurrency: Option<i32>,
+    token_quota: Option<i64>,
+    allowed_models: Option<Vec<String>>,
 ) -> Result<(), String> {
+    validate_limits(max_concurrency.unwrap_or(0), token_quota.unwrap_or(0))?;
+    let allowed_models = allowed_models.map(normalize_allowed_models).transpose()?;
     let conn = connect_db()?;
     let now = Utc::now().timestamp();
 
@@ -408,6 +721,25 @@ pub fn update_token(
     if let Some(ips) = max_ips {
         query.push_str(&format!(", max_ips = ?{}", param_idx));
         params_vec.push(Box::new(ips));
+        param_idx += 1;
+    }
+
+    if let Some(limit) = max_concurrency {
+        query.push_str(&format!(", max_concurrency = ?{}", param_idx));
+        params_vec.push(Box::new(limit));
+        param_idx += 1;
+    }
+    if let Some(quota) = token_quota {
+        query.push_str(&format!(", token_quota = ?{}", param_idx));
+        params_vec.push(Box::new(quota));
+        param_idx += 1;
+    }
+
+    if let Some(models) = allowed_models {
+        query.push_str(&format!(", allowed_models = ?{}", param_idx));
+        params_vec.push(Box::new(
+            serde_json::to_string(&models).map_err(|e| e.to_string())?,
+        ));
         param_idx += 1;
     }
 
@@ -517,9 +849,31 @@ pub fn record_token_usage_and_ip(
     status: u16,
     user_agent: Option<String>,
 ) -> Result<(), String> {
+    record_token_usage_with_cache(
+        token_id,
+        ip,
+        model,
+        input_tokens,
+        output_tokens,
+        None,
+        status,
+        user_agent,
+    )
+}
+
+pub fn record_token_usage_with_cache(
+    token_id: &str,
+    ip: &str,
+    model: &str,
+    input_tokens: i32,
+    output_tokens: i32,
+    cached_tokens: Option<u32>,
+    status: u16,
+    user_agent: Option<String>,
+) -> Result<(), String> {
     let mut conn = connect_db()?;
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("Failed to create transaction: {}", e))?;
     let now = Utc::now().timestamp();
 
@@ -530,7 +884,11 @@ pub fn record_token_usage_and_ip(
             total_requests = total_requests + 1, 
             total_tokens_used = total_tokens_used + ?2 
         WHERE id = ?3",
-        params![now, input_tokens + output_tokens, token_id],
+        params![
+            now,
+            i64::from(input_tokens.max(0)) + i64::from(output_tokens.max(0)),
+            token_id
+        ],
     )
     .map_err(|e| format!("Failed to update user_tokens stats: {}", e))?;
 
@@ -566,8 +924,8 @@ pub fn record_token_usage_and_ip(
     let log_id = Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO token_usage_logs (
-            id, token_id, ip_address, model, input_tokens, output_tokens, request_time, status
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            id, token_id, ip_address, model, input_tokens, output_tokens, request_time, status, cached_tokens
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             log_id,
             token_id,
@@ -576,7 +934,8 @@ pub fn record_token_usage_and_ip(
             input_tokens,
             output_tokens,
             now,
-            status
+            status,
+            cached_tokens.map(i64::from)
         ],
     )
     .map_err(|e| format!("Failed to insert usage log: {}", e))?;
@@ -593,6 +952,9 @@ pub fn validate_token(token_str: &str, ip: &str) -> Result<(bool, Option<String>
     let token_opt = get_token_by_value(token_str)?;
 
     if let Some(token) = token_opt {
+        if !token.enabled {
+            return Ok((false, Some("This token is disabled".into())));
+        }
         // 1. 检查过期时间
         if token.expires_type != "never" {
             if let Some(expires_at) = token.expires_at {
@@ -696,6 +1058,141 @@ mod tests {
     use super::*;
 
     #[test]
+    fn user_token_usage_logs_cache_pagination_and_calendar_boundaries() {
+        init_db().unwrap();
+        let a = create_token(
+            "calendar-a".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            0,
+            0,
+            vec![],
+        )
+        .unwrap();
+        let b = create_token(
+            "calendar-b".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            0,
+            0,
+            vec![],
+        )
+        .unwrap();
+        let conn = connect_db().unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-14T12:00:00+08:00")
+            .unwrap()
+            .timestamp();
+        // Sunday 23:59:59 and Monday 00:00:00 belong to different UTC+8 weeks.
+        for (stamp, cached) in [
+            ("2026-10-11T23:59:59+08:00", None),
+            ("2026-10-12T00:00:00+08:00", Some(0)),
+            ("2026-10-14T00:00:00+08:00", Some(30)),
+        ] {
+            record_token_usage_with_cache(
+                &a.id,
+                "private-ip",
+                "model-a",
+                100,
+                20,
+                cached,
+                200,
+                None,
+            )
+            .unwrap();
+            conn.execute("UPDATE token_usage_logs SET request_time = ?1 WHERE token_id = ?2 AND cached_tokens IS ?3", params![chrono::DateTime::parse_from_rfc3339(stamp).unwrap().timestamp(), &a.id, cached.map(i64::from)]).unwrap();
+        }
+        record_token_usage_with_cache(
+            &b.id,
+            "other-ip",
+            "other-model",
+            99999,
+            99999,
+            Some(99999),
+            200,
+            None,
+        )
+        .unwrap();
+        let logs = usage_logs_for_token(&a.id, 1).unwrap();
+        assert_eq!(logs.total, 3);
+        assert_eq!(logs.items.len(), 3);
+        assert_eq!(logs.items[0].cached_tokens, Some(30));
+        assert_eq!(logs.items[1].cached_tokens, Some(0));
+        assert_eq!(logs.items[2].cached_tokens, None);
+        assert!(usage_logs_for_token(&a.id, 2).unwrap().items.is_empty());
+        let start = logs.items[1].request_time;
+        let end = logs.items[0].request_time;
+        let filtered = filtered_usage_logs_for_token(&a.id, 1, Some(start), Some(end)).unwrap();
+        assert_eq!(filtered.total, 2);
+        assert_eq!(filtered.items.len(), 2);
+        assert_eq!(
+            filtered_usage_logs_for_token(&a.id, 1, Some(end), Some(end))
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            filtered_usage_logs_for_token(&a.id, 1, None, Some(start - 1))
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            filtered_usage_logs_for_token(&a.id, 1, Some(end + 1), None)
+                .unwrap()
+                .total,
+            0
+        );
+        assert!(
+            filtered_usage_logs_for_token(&a.id, 2, Some(start), Some(end))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let public = serde_json::to_string(&logs).unwrap();
+        assert!(
+            !public.contains("private-ip")
+                && !public.contains(&a.id)
+                && !public.contains("other-model")
+        );
+        let daily = period_usage_for_token(&a.id, false, now).unwrap();
+        assert_eq!(daily.len(), 30);
+        assert_eq!(daily[0].start_date, "2026-10-14");
+        assert_eq!(daily[0].input_tokens, 100);
+        assert_eq!(daily[1].requests, 0);
+        let weekly = period_usage_for_token(&a.id, true, now).unwrap();
+        assert_eq!(weekly.len(), 12);
+        assert_eq!(weekly[0].start_date, "2026-10-12");
+        assert_eq!(weekly[0].end_date, "2026-10-18");
+        assert_eq!(weekly[0].requests, 2);
+        assert_eq!(weekly[0].cached_tokens, Some(30));
+        assert_eq!(weekly[1].requests, 1);
+        assert_eq!(weekly[1].cached_tokens, None);
+        assert_eq!(
+            get_token_by_id(&a.id).unwrap().unwrap().total_tokens_used,
+            360
+        ); // cache is already included in input
+        for _ in 0..20 {
+            record_token_usage_and_ip(&a.id, "private-ip", "model-a", 1, 0, 200, None).unwrap();
+        }
+        let first = usage_logs_for_token(&a.id, 1).unwrap();
+        let second = usage_logs_for_token(&a.id, 2).unwrap();
+        assert_eq!(first.items.len(), 20);
+        assert_eq!(second.items.len(), 3);
+        assert!(!first
+            .items
+            .iter()
+            .any(|r| second.items.iter().any(|s| s.id == r.id)));
+    }
+
+    #[test]
     fn test_create_and_query_token() {
         let _ = init_db(); // Ensure DB is initialized
 
@@ -709,6 +1206,9 @@ mod tests {
             None,
             None,
             None,
+            0,
+            0,
+            Vec::new(),
         );
         assert!(token_res.is_ok());
 
@@ -733,6 +1233,9 @@ mod tests {
             None,
             None,
             None,
+            0,
+            0,
+            Vec::new(),
         );
         assert!(token_res.is_ok());
         let token = token_res.unwrap();
@@ -743,5 +1246,224 @@ mod tests {
             "Token with expires_type never must be valid, reason: {:?}",
             reason
         );
+    }
+    #[test]
+    fn user_token_migration_preserves_legacy_usage_and_is_idempotent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE user_tokens (
+            id TEXT PRIMARY KEY, token TEXT UNIQUE NOT NULL, username TEXT NOT NULL,
+            description TEXT, enabled BOOLEAN NOT NULL DEFAULT 1, expires_type TEXT NOT NULL,
+            expires_at INTEGER, max_ips INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL, last_used_at INTEGER, total_requests INTEGER NOT NULL DEFAULT 0,
+            total_tokens_used INTEGER NOT NULL DEFAULT 0, curfew_start TEXT, curfew_end TEXT);
+            INSERT INTO user_tokens (id, token, username, expires_type, created_at, updated_at, total_tokens_used)
+            VALUES ('legacy-id', 'test-key', 'legacy', 'never', 1, 1, 12345);").unwrap();
+        init_db_connection(&mut conn).unwrap();
+        init_db_connection(&mut conn).unwrap();
+        let values: (String, i64, i32, i64) = conn.query_row(
+            "SELECT token, total_tokens_used, max_concurrency, token_quota FROM user_tokens WHERE id = 'legacy-id'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(values, ("test-key".into(), 12345, 0, 0));
+    }
+
+    #[test]
+    fn user_token_limits_persist_edit_clear_and_validate() {
+        init_db().unwrap();
+        let t = create_token(
+            "settings-test".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            2,
+            100,
+            Vec::new(),
+        )
+        .unwrap();
+        record_token_usage_and_ip(&t.id, "127.0.0.1", "test", 20, 30, 200, None).unwrap();
+        update_token(
+            &t.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(40),
+            None,
+        )
+        .unwrap();
+        let edited = get_token_by_value(&t.token).unwrap().unwrap();
+        assert_eq!(
+            (
+                edited.max_concurrency,
+                edited.token_quota,
+                edited.total_tokens_used
+            ),
+            (1, 40, 50)
+        );
+        update_token(
+            &t.id,
+            Some("renamed".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(get_token_by_id(&t.id).unwrap().unwrap().token_quota, 40);
+        assert!(update_token(
+            &t.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(-1),
+            None,
+            None,
+        )
+        .is_err());
+        assert!(validate_limits(0, -1).is_err());
+        assert!(validate_limits(0, 9_007_199_254_740_992).is_err());
+        update_token(
+            &t.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+            Some(0),
+            None,
+        )
+        .unwrap();
+        renew_token(&t.id, "day").unwrap();
+        let cleared = get_token_by_id(&t.id).unwrap().unwrap();
+        assert_eq!(
+            (
+                cleared.max_concurrency,
+                cleared.token_quota,
+                cleared.total_tokens_used
+            ),
+            (0, 0, 50)
+        );
+    }
+
+    #[test]
+    fn user_token_concurrent_usage_is_not_lost() {
+        init_db().unwrap();
+        let t = create_token(
+            "settlement-test".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            0,
+            100,
+            Vec::new(),
+        )
+        .unwrap();
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let id = t.id.clone();
+                std::thread::spawn(move || {
+                    record_token_usage_and_ip(&id, "127.0.0.1", "test", 10, 5, 200, None).unwrap()
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let t = get_token_by_id(&t.id).unwrap().unwrap();
+        assert_eq!((t.total_requests, t.total_tokens_used), (16, 240));
+    }
+    #[test]
+    fn user_token_model_policy_persists_edits_and_preserves_usage() {
+        init_db().unwrap();
+        let t = create_token(
+            "models-test".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            2,
+            100,
+            vec![
+                " model-b ".into(),
+                "models/model-a".into(),
+                "model-a".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(t.allowed_models, vec!["model-a", "model-b"]);
+        record_token_usage_and_ip(&t.id, "local", "model-a", 10, 5, 200, None).unwrap();
+        update_token(
+            &t.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["model-c".into()]),
+        )
+        .unwrap();
+        let read = get_token_by_value(&t.token).unwrap().unwrap();
+        assert_eq!(read.allowed_models, vec!["model-c"]);
+        assert_eq!(read.total_tokens_used, 15);
+        update_token(
+            &t.id,
+            Some("renamed".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            get_token_by_id(&t.id).unwrap().unwrap().allowed_models,
+            vec!["model-c"]
+        );
+        update_token(
+            &t.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(vec![]),
+        )
+        .unwrap();
+        assert!(get_token_by_id(&t.id)
+            .unwrap()
+            .unwrap()
+            .allowed_models
+            .is_empty());
+        assert!(normalize_allowed_models(vec!["*".into()]).is_err());
+        assert!(normalize_allowed_models(vec!["  ".into()]).is_err());
     }
 }

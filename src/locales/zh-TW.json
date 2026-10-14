@@ -1770,6 +1770,28 @@
     }
   },
   "user_token": {
+    "allowed_models": "允許使用的模型",
+    "all_models": "全部模型",
+    "selected_models": "指定模型",
+    "search_models": "搜尋或輸入完整模型 ID",
+    "model_load_error": "模型清單暫時無法載入，可手動新增完整模型 ID。",
+    "no_models_found": "沒有符合的模型",
+    "add_model": "新增模型：{{model}}",
+    "models_selected": "已選擇 {{count}} 個模型",
+    "model_policy_hint": "依請求中的完整模型 ID 驗證，模型映射沿用管理員設定。指定模型的 Key 使用 HTTP/SSE，不支援 WebSocket。",
+    "select_model_required": "請至少選擇一個模型，或選擇「全部模型」。",
+    "portal_link": "使用者用量頁",
+    "million_tokens": "M tokens",
+    "max_concurrency": "最大並行請求數",
+    "token_quota": "累計 Token 總額度（M）",
+    "concurrency_hint": "0 表示不限。串流請求結束後才釋放並行名額。",
+    "quota_hint": "1 M = 100 萬 Token，可填小數；0 表示不限，不自動重設。",
+    "quota_settlement_hint": "額度用完後拒絕新請求；已開始的請求正常結束，因此最後一批請求可能超額。",
+    "used_tokens_hint": "已累計使用 {{amount}} M tokens，編輯限制不會歸零。",
+    "quota_edit_exhausted": "目前額度將立即阻止新請求。",
+    "quota_exhausted": "額度已用完",
+    "quota_remaining": "剩餘 {{amount}} M tokens",
+    "invalid_limits": "並行請求數須為 0–2147483647 的整數；額度以百萬為單位，最多 6 位小數，範圍為 0–9007199254.740991。",
     "title": "用戶 Token 管理",
     "total_users": "用戶總數",
     "active_tokens": "活躍 Token",
@@ -1881,5 +1903,12 @@
     "confirm": "立即刪除",
     "cancel": "暫不刪除",
     "success": "已成功刪除思考塊快取，將在後續對話中自動重建。"
+  },
+  "token_portal": {
+    "menu_overview": "用量概覽",
+    "menu_models": "可用模型",
+    "menu_statistics": "用量統計",
+    "menu_logs": "呼叫日誌",
+    "navigation": "用量中心導覽"
   }
 }

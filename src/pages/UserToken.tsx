@@ -4,6 +4,9 @@ import { Plus, Trash2, RefreshCw, Copy, Activity, User, Settings, Shield, Clock,
 import { motion, AnimatePresence } from 'framer-motion';
 import { request as invoke } from '../utils/request';
 import { showToast } from '../components/common/ToastContainer';
+import ModelAccessFields from '../components/user-token/ModelAccessFields';
+import TokenLimitFields from '../components/user-token/TokenLimitFields';
+import { parseQuotaMillions, toQuotaMillions, validTokenLimits } from '../components/user-token/tokenQuota';
 import { copyToClipboard } from '../utils/clipboard';
 
 interface UserToken {
@@ -15,6 +18,9 @@ interface UserToken {
     expires_type: string;
     expires_at?: number;
     max_ips: number;
+    max_concurrency: number;
+    token_quota: number;
+    allowed_models: string[];
     curfew_start?: string;
     curfew_end?: string;
     created_at: number;
@@ -37,6 +43,8 @@ const UserToken: React.FC = () => {
     const { t } = useTranslation();
     const [tokens, setTokens] = useState<UserToken[]>([]);
     const [stats, setStats] = useState<UserTokenStats | null>(null);
+    const [modelChoices, setModelChoices] = useState<string[]>([]);
+    const [modelLoadError, setModelLoadError] = useState(false);
     const [loading, setLoading] = useState(false);
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -47,6 +55,10 @@ const UserToken: React.FC = () => {
     const [editUsername, setEditUsername] = useState('');
     const [editDesc, setEditDesc] = useState('');
     const [editMaxIps, setEditMaxIps] = useState(0);
+    const [editMaxConcurrency, setEditMaxConcurrency] = useState('0');
+    const [editTokenQuota, setEditTokenQuota] = useState('0');
+    const [editRestricted, setEditRestricted] = useState(false);
+    const [editAllowedModels, setEditAllowedModels] = useState<string[]>([]);
     const [editCurfewStart, setEditCurfewStart] = useState('');
     const [editCurfewEnd, setEditCurfewEnd] = useState('');
     const [updating, setUpdating] = useState(false);
@@ -56,6 +68,10 @@ const UserToken: React.FC = () => {
     const [newDesc, setNewDesc] = useState('');
     const [newExpiresType, setNewExpiresType] = useState('month'); // day, week, month, never, custom
     const [newMaxIps, setNewMaxIps] = useState(0);
+    const [newMaxConcurrency, setNewMaxConcurrency] = useState('0');
+    const [newTokenQuota, setNewTokenQuota] = useState('0');
+    const [newRestricted, setNewRestricted] = useState(false);
+    const [newAllowedModels, setNewAllowedModels] = useState<string[]>([]);
     const [newCurfewStart, setNewCurfewStart] = useState('');
     const [newCurfewEnd, setNewCurfewEnd] = useState('');
     const [newCustomExpires, setNewCustomExpires] = useState(''); // datetime-local value
@@ -79,6 +95,7 @@ const UserToken: React.FC = () => {
 
     useEffect(() => {
         loadData();
+        invoke<string[]>('get_user_token_models').then(setModelChoices).catch(() => setModelLoadError(true));
     }, []);
 
     const handleCreate = async () => {
@@ -90,6 +107,16 @@ const UserToken: React.FC = () => {
         // 验证自定义时间
         if (newExpiresType === 'custom' && !newCustomExpires) {
             showToast(t('user_token.custom_expires_required') || 'Please select a custom expiration time', 'error');
+            return;
+        }
+
+        if (newRestricted && newAllowedModels.length === 0) {
+            showToast(t('user_token.select_model_required'), 'error');
+            return;
+        }
+
+        if (!validTokenLimits(newMaxConcurrency, newTokenQuota)) {
+            showToast(t('user_token.invalid_limits'), 'error');
             return;
         }
 
@@ -106,6 +133,9 @@ const UserToken: React.FC = () => {
                     expires_type: newExpiresType,
                     description: newDesc || null,
                     max_ips: newMaxIps,
+                    max_concurrency: Number(newMaxConcurrency),
+                    token_quota: parseQuotaMillions(newTokenQuota),
+                    allowed_models: newRestricted ? newAllowedModels : [],
                     curfew_start: newCurfewStart || null,
                     curfew_end: newCurfewEnd || null,
                     custom_expires_at: customExpiresAt || null
@@ -117,6 +147,10 @@ const UserToken: React.FC = () => {
             setNewDesc('');
             setNewExpiresType('month');
             setNewMaxIps(0);
+            setNewMaxConcurrency('0');
+            setNewTokenQuota('0');
+            setNewRestricted(false);
+            setNewAllowedModels([]);
             setNewCurfewStart('');
             setNewCurfewEnd('');
             setNewCustomExpires('');
@@ -144,6 +178,10 @@ const UserToken: React.FC = () => {
         setEditUsername(token.username);
         setEditDesc(token.description || '');
         setEditMaxIps(token.max_ips ?? 0);  // 使用 ?? 确保 null/undefined 变为 0
+        setEditMaxConcurrency(String(token.max_concurrency ?? 0));
+        setEditTokenQuota(toQuotaMillions(token.token_quota ?? 0));
+        setEditAllowedModels(token.allowed_models ?? []);
+        setEditRestricted((token.allowed_models?.length ?? 0) > 0);
         setEditCurfewStart(token.curfew_start ?? '');
         setEditCurfewEnd(token.curfew_end ?? '');
         setShowEditModal(true);
@@ -156,6 +194,16 @@ const UserToken: React.FC = () => {
             return;
         }
 
+        if (editRestricted && editAllowedModels.length === 0) {
+            showToast(t('user_token.select_model_required'), 'error');
+            return;
+        }
+
+        if (!validTokenLimits(editMaxConcurrency, editTokenQuota)) {
+            showToast(t('user_token.invalid_limits'), 'error');
+            return;
+        }
+
         setUpdating(true);
         try {
             await invoke('update_user_token', {
@@ -164,6 +212,9 @@ const UserToken: React.FC = () => {
                     username: editUsername,
                     description: editDesc || undefined,
                     max_ips: editMaxIps,
+                    max_concurrency: Number(editMaxConcurrency),
+                    token_quota: parseQuotaMillions(editTokenQuota),
+                    allowed_models: editRestricted ? editAllowedModels : [],
                     // 使用双层包装: undefined = 不更新, null = 清空, string = 设置值
                     curfew_start: editCurfewStart === '' ? null : editCurfewStart,
                     curfew_end: editCurfewEnd === '' ? null : editCurfewEnd
@@ -241,6 +292,7 @@ const UserToken: React.FC = () => {
                 </h1>
 
                 <div className="flex items-center gap-2">
+                    <a href="/usage" target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 px-2">{t('user_token.portal_link')}</a>
                     <button
                         onClick={() => loadData()}
                         className={`p-2 hover:bg-gray-100 dark:hover:bg-base-200 rounded-lg transition-colors ${loading ? 'text-blue-500' : 'text-gray-500'}`}
@@ -322,6 +374,7 @@ const UserToken: React.FC = () => {
                             <th className="bg-transparent text-gray-500 font-medium py-4">{t('user_token.token', { defaultValue: 'Token' })}</th>
                             <th className="bg-transparent text-gray-500 font-medium py-4">{t('user_token.expires', { defaultValue: 'Expires' })}</th>
                             <th className="bg-transparent text-gray-500 font-medium py-4">{t('user_token.usage', { defaultValue: 'Usage' })}</th>
+                            <th className="bg-transparent text-gray-500 font-medium py-4">{t('user_token.max_concurrency')}</th>
                             <th className="bg-transparent text-gray-500 font-medium py-4">{t('user_token.ip_limit', { defaultValue: 'IP Limit' })}</th>
                             <th className="bg-transparent text-gray-500 font-medium py-4">{t('user_token.created', { defaultValue: 'Created' })}</th>
                             <th className="bg-transparent text-gray-500 font-medium py-4 text-right">{t('common.actions', { defaultValue: 'Actions' })}</th>
@@ -346,6 +399,9 @@ const UserToken: React.FC = () => {
                                             <div>
                                                 <div className="font-semibold text-gray-900 dark:text-white uppercase tracking-wider text-xs">{token.username}</div>
                                                 <div className="text-[10px] text-gray-500">{token.description || '-'}</div>
+                                                <div className="text-[10px] text-blue-600 mt-1" title={(token.allowed_models ?? []).join(', ')}>
+                                                    {token.allowed_models?.length ? t('user_token.models_selected', { count: token.allowed_models.length }) : t('user_token.all_models')}
+                                                </div>
                                             </div>
                                         </div>
                                     </td>
@@ -383,8 +439,18 @@ const UserToken: React.FC = () => {
                                     <td>
                                         <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">{token.total_requests} <span className="text-[10px] font-normal text-gray-400">reqs</span></div>
                                         <div className="text-[10px] text-gray-400 mt-0.5">
-                                            {(token.total_tokens_used / 1000).toFixed(1)}k tokens
+                                            {toQuotaMillions(token.total_tokens_used)} / {token.token_quota > 0 ? toQuotaMillions(token.token_quota) : t('user_token.unlimited')} {t('user_token.million_tokens')}
                                         </div>
+                                        {token.token_quota > 0 && (
+                                            <div className={`text-xs mt-1 ${token.total_tokens_used >= token.token_quota ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
+                                                {token.total_tokens_used >= token.token_quota
+                                                    ? t('user_token.quota_exhausted')
+                                                    : t('user_token.quota_remaining', { amount: toQuotaMillions(token.token_quota - token.total_tokens_used) })}
+                                            </div>
+                                        )}
+                                    </td>
+                                    <td>
+                                        {token.max_concurrency > 0 ? token.max_concurrency : t('user_token.unlimited')}
                                     </td>
                                     <td>
                                         {token.max_ips === 0
@@ -434,7 +500,7 @@ const UserToken: React.FC = () => {
                         </AnimatePresence>
                         {tokens.length === 0 && !loading && (
                             <tr>
-                                <td colSpan={7} className="py-20">
+                                <td colSpan={8} className="py-20">
                                     <div className="flex flex-col items-center justify-center text-gray-400 gap-3">
                                         <div className="p-4 bg-gray-50 dark:bg-base-200 rounded-full">
                                             <Users size={40} className="opacity-20" />
@@ -521,6 +587,14 @@ const UserToken: React.FC = () => {
                                 </label>
                             </div>
                         </div>
+
+                        <ModelAccessFields prefix="new" restricted={newRestricted} selected={newAllowedModels}
+                            models={modelChoices} loadError={modelLoadError} onRestrictedChange={setNewRestricted} onSelectedChange={setNewAllowedModels} />
+
+                        <TokenLimitFields
+                            prefix="create" maxConcurrency={newMaxConcurrency} tokenQuota={newTokenQuota}
+                            onMaxConcurrencyChange={setNewMaxConcurrency} onTokenQuotaChange={setNewTokenQuota}
+                        />
 
                         {/* Custom Expiration Time Picker */}
                         {newExpiresType === 'custom' && (
@@ -630,6 +704,15 @@ const UserToken: React.FC = () => {
                                 <span className="label-text-alt text-gray-500">{t('user_token.hint_max_ips', { defaultValue: '0 = Unlimited' })}</span>
                             </label>
                         </div>
+
+                        <ModelAccessFields prefix="edit" restricted={editRestricted} selected={editAllowedModels}
+                            models={modelChoices} loadError={modelLoadError} onRestrictedChange={setEditRestricted} onSelectedChange={setEditAllowedModels} />
+
+                        <TokenLimitFields
+                            prefix="edit" maxConcurrency={editMaxConcurrency} tokenQuota={editTokenQuota}
+                            onMaxConcurrencyChange={setEditMaxConcurrency} onTokenQuotaChange={setEditTokenQuota}
+                            usedTokens={editingToken?.total_tokens_used}
+                        />
 
                         <div className="form-control w-full mb-3">
                             <label className="label">

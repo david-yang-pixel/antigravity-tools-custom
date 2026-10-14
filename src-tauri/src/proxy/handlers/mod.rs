@@ -8,3 +8,5 @@ pub mod gemini;
 pub mod openai;
 pub mod thinking; // 思考块会话结束/查询
 pub mod warmup; // 预热处理器
+
+pub mod token_portal;

@@ -175,6 +175,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_security_config': { url: '/api/security/config', method: 'GET' },
   'update_security_config': { url: '/api/security/config', method: 'POST' },
   // User Tokens
+  'get_user_token_models': { url: '/api/user-token-models', method: 'GET' },
   'list_user_tokens': { url: '/api/user-tokens', method: 'GET' },
   'get_user_token_summary': { url: '/api/user-tokens/summary', method: 'GET' },
   'create_user_token': { url: '/api/user-tokens', method: 'POST' },

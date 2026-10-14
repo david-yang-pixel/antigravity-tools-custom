@@ -296,27 +296,51 @@ fn record_user_token_usage(
     user_token_identity: &Option<UserTokenIdentity>,
     log: &ProxyRequestLog,
     user_agent: Option<String>,
+    permit: &Option<std::sync::Arc<super::user_token_limits::UserTokenPermit>>,
 ) {
     if let Some(identity) = user_token_identity {
-        let _ = crate::modules::user_token_db::record_token_usage_and_ip(
+        let result = crate::modules::user_token_db::record_token_usage_with_cache(
             &identity.token_id,
             log.client_ip.as_deref().unwrap_or("127.0.0.1"),
             log.model.as_deref().unwrap_or("unknown"),
-            log.input_tokens.unwrap_or(0) as i32,
-            log.output_tokens.unwrap_or(0) as i32,
+            log.input_tokens.unwrap_or(0).min(i32::MAX as u32) as i32,
+            log.output_tokens.unwrap_or(0).min(i32::MAX as u32) as i32,
+            log.cached_tokens,
             log.status as u16,
             user_agent,
         );
+        if let Err(error) = result {
+            tracing::error!("Failed to persist user token usage: {error}");
+            if let Some(permit) = permit {
+                permit.accounting_failed();
+            }
+        }
     }
 }
 
 fn extract_cached_tokens(usage: &Value) -> Option<u32> {
-    let c = crate::proxy::pipeline::CanonicalUsage::from_gemini(usage);
-    if c.cached_tokens > 0 {
-        Some(c.cached_tokens)
-    } else {
-        None
-    }
+    // Preserve explicit zero; NULL means the upstream never supplied cache telemetry.
+    let usage = usage.get("usageMetadata").unwrap_or(usage);
+    [
+        "cache_read_input_tokens",
+        "cachedContentTokenCount",
+        "cached_content_token_count",
+        "total_cached_tokens",
+        "cached_tokens",
+    ]
+    .iter()
+    .find_map(|field| usage.get(*field).and_then(Value::as_u64))
+    .or_else(|| {
+        usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+    })
+    .or_else(|| {
+        usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+    })
+    .map(|value| value.min(u32::MAX as u64) as u32)
 }
 
 fn extract_input_tokens(usage: &Value) -> Option<u32> {
@@ -731,7 +755,11 @@ pub async fn monitor_middleware(
     let method = request.method().to_string();
     let uri = request.uri().to_string();
 
-    if uri.contains("event_logging") || uri.contains("/api/") || uri.starts_with("/internal/") {
+    let path = request.uri().path();
+    if path == "/v1/api/event_logging"
+        || path == "/v1/api/event_logging/batch"
+        || path.starts_with("/internal/")
+    {
         return next.run(request).await;
     }
 
@@ -804,6 +832,11 @@ pub async fn monitor_middleware(
     // [FIX] 从请求 extensions 提取 UserTokenIdentity (由 Auth 中间件注入)
     // 必须在处理 request body 之前提取，因为 into_parts() 后需要保留这个值
     let user_token_identity = request.extensions().get::<UserTokenIdentity>().cloned();
+    // Keep admission occupied through asynchronous SSE accounting, including disconnects.
+    let user_token_permit = request
+        .extensions()
+        .get::<std::sync::Arc<super::user_token_limits::UserTokenPermit>>()
+        .cloned();
 
     let request = if method == "POST" {
         let (parts, body) = request.into_parts();
@@ -1335,13 +1368,14 @@ pub async fn monitor_middleware(
                         if let Some(usage) = json
                             .get("usage")
                             .or(json.get("usageMetadata"))
+                            .or(json.get("message").and_then(|m| m.get("usage")))
                             .or(json.get("response").and_then(|r| r.get("usage")))
                             .or(json.get("response").and_then(|r| r.get("usageMetadata")))
                         {
-                            log.input_tokens = extract_input_tokens(usage);
-                            log.output_tokens = extract_output_tokens(usage);
-                            cached_tokens = cached_tokens.or_else(|| extract_cached_tokens(usage));
-                            log.cached_tokens = log.cached_tokens.or(cached_tokens);
+                            log.input_tokens = extract_input_tokens(usage).or(log.input_tokens);
+                            log.output_tokens = extract_output_tokens(usage).or(log.output_tokens);
+                            cached_tokens = extract_cached_tokens(usage).or(cached_tokens);
+                            log.cached_tokens = cached_tokens.or(log.cached_tokens);
                             reasoning_tokens =
                                 reasoning_tokens.or_else(|| extract_reasoning_tokens(usage));
 
@@ -1403,16 +1437,19 @@ pub async fn monitor_middleware(
                                     if let Some(usage) = json
                                         .get("usage")
                                         .or(json.get("usageMetadata"))
+                                        .or(json.get("message").and_then(|m| m.get("usage")))
                                         .or(json.get("response").and_then(|r| r.get("usage")))
                                         .or(json
                                             .get("response")
                                             .and_then(|r| r.get("usageMetadata")))
                                     {
-                                        log.input_tokens = extract_input_tokens(usage);
-                                        log.output_tokens = extract_output_tokens(usage);
+                                        log.input_tokens =
+                                            extract_input_tokens(usage).or(log.input_tokens);
+                                        log.output_tokens =
+                                            extract_output_tokens(usage).or(log.output_tokens);
                                         cached_tokens =
-                                            cached_tokens.or_else(|| extract_cached_tokens(usage));
-                                        log.cached_tokens = log.cached_tokens.or(cached_tokens);
+                                            extract_cached_tokens(usage).or(cached_tokens);
+                                        log.cached_tokens = cached_tokens.or(log.cached_tokens);
                                         reasoning_tokens = reasoning_tokens
                                             .or_else(|| extract_reasoning_tokens(usage));
                                         break;
@@ -1513,13 +1550,16 @@ pub async fn monitor_middleware(
                                 if let Some(usage) = json
                                     .get("usage")
                                     .or(json.get("usageMetadata"))
+                                    .or(json.get("message").and_then(|m| m.get("usage")))
                                     .or(json.get("response").and_then(|r| r.get("usage")))
                                     .or(json.get("response").and_then(|r| r.get("usageMetadata")))
                                 {
-                                    log.input_tokens = extract_input_tokens(usage);
-                                    log.output_tokens = extract_output_tokens(usage);
+                                    log.input_tokens =
+                                        extract_input_tokens(usage).or(log.input_tokens);
+                                    log.output_tokens =
+                                        extract_output_tokens(usage).or(log.output_tokens);
                                     log.cached_tokens =
-                                        log.cached_tokens.or_else(|| extract_cached_tokens(usage));
+                                        extract_cached_tokens(usage).or(log.cached_tokens);
                                     break;
                                 }
                             }
@@ -1533,7 +1573,7 @@ pub async fn monitor_middleware(
             }
 
             // Fallback input token estimation prefers the transit (upstream) body
-            if log.input_tokens.is_none() {
+            if log.input_tokens.is_none() && log.status < 400 {
                 let estimated = log
                     .upstream_request_body
                     .as_ref()
@@ -1550,7 +1590,12 @@ pub async fn monitor_middleware(
             }
 
             // Record User Token Usage
-            record_user_token_usage(&user_token_identity, &log, user_agent.clone());
+            record_user_token_usage(
+                &user_token_identity,
+                &log,
+                user_agent.clone(),
+                &user_token_permit,
+            );
 
             monitor.log_request(log).await;
         });
@@ -1584,13 +1629,13 @@ pub async fn monitor_middleware(
                         if let Some(usage) = json
                             .get("usage")
                             .or(json.get("usageMetadata"))
+                            .or(json.get("message").and_then(|m| m.get("usage")))
                             .or(json.get("response").and_then(|r| r.get("usage")))
                             .or(json.get("response").and_then(|r| r.get("usageMetadata")))
                         {
-                            log.input_tokens = extract_input_tokens(usage);
-                            log.output_tokens = extract_output_tokens(usage);
-                            log.cached_tokens =
-                                log.cached_tokens.or_else(|| extract_cached_tokens(usage));
+                            log.input_tokens = extract_input_tokens(usage).or(log.input_tokens);
+                            log.output_tokens = extract_output_tokens(usage).or(log.output_tokens);
+                            log.cached_tokens = extract_cached_tokens(usage).or(log.cached_tokens);
 
                             if log.input_tokens.is_none() && log.output_tokens.is_none() {
                                 log.output_tokens = usage
@@ -1631,7 +1676,7 @@ pub async fn monitor_middleware(
                 }
 
                 // Fallback input token estimation prefers the transit (upstream) body
-                if log.input_tokens.is_none() {
+                if log.input_tokens.is_none() && log.status < 400 {
                     let estimated = log
                         .upstream_request_body
                         .as_ref()
@@ -1646,7 +1691,12 @@ pub async fn monitor_middleware(
                 }
 
                 // Record User Token Usage
-                record_user_token_usage(&user_token_identity, &log, user_agent.clone());
+                record_user_token_usage(
+                    &user_token_identity,
+                    &log,
+                    user_agent.clone(),
+                    &user_token_permit,
+                );
 
                 monitor.log_request(log).await;
                 Response::from_parts(parts, Body::from(bytes))
@@ -1655,7 +1705,12 @@ pub async fn monitor_middleware(
                 log.response_body = Some("[Response too large (>100MB)]".to_string());
 
                 // Record User Token Usage (even if too large)
-                record_user_token_usage(&user_token_identity, &log, user_agent.clone());
+                record_user_token_usage(
+                    &user_token_identity,
+                    &log,
+                    user_agent.clone(),
+                    &user_token_permit,
+                );
 
                 monitor.log_request(log).await;
                 Response::from_parts(parts, Body::empty())
@@ -1665,7 +1720,7 @@ pub async fn monitor_middleware(
         log.response_body = Some(format!("[{}]", content_type));
 
         // Record User Token Usage
-        record_user_token_usage(&user_token_identity, &log, user_agent);
+        record_user_token_usage(&user_token_identity, &log, user_agent, &user_token_permit);
 
         monitor.log_request(log).await;
         response
@@ -1719,6 +1774,27 @@ mod tests {
             .expect("forwarder did not stop after receiver closed")
             .expect("forwarder task panicked");
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_cache_telemetry_distinguishes_zero_missing_and_invalid() {
+        use serde_json::json;
+        assert_eq!(
+            super::extract_cached_tokens(&json!({"prompt_tokens": 100})),
+            None
+        );
+        assert_eq!(
+            super::extract_cached_tokens(&json!({"prompt_tokens_details": {"cached_tokens": 0}})),
+            Some(0)
+        );
+        assert_eq!(
+            super::extract_cached_tokens(&json!({"cached_tokens": -1})),
+            None
+        );
+        assert_eq!(
+            super::extract_cached_tokens(&json!({"usageMetadata": {"cachedContentTokenCount": 5}})),
+            Some(5)
+        );
     }
 
     #[test]
