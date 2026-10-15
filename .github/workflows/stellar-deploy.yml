@@ -100,6 +100,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Read application version
+        id: meta
+        run: |
+          set -euo pipefail
+          # The [package] version is the first top-level `version =` and is what /health reports.
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' src-tauri/Cargo.toml | head -n 1)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::Unexpected version '$version'"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build production image
         uses: docker/build-push-action@v6
         with:
@@ -113,6 +121,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           # Registry cache uploads only layers it does not already hold, so the large
           # toolchain and compiled-dependency layers are written once per Cargo.lock change.
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
@@ -141,6 +150,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
 
   deploy:

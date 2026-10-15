@@ -39,6 +39,10 @@ The server helper is installed manually from `deploy.py` as root-owned mode
 helper. SSH accepts only this repository's `image@sha256:<digest>` plus a full
 commit SHA, checks the image revision label, and uses an exclusive deployment
 lock. GitHub workflow concurrency never cancels an in-progress deployment.
+The expected `/health` version comes from the image's
+`org.opencontainers.image.version` label, which the workflow reads from
+`src-tauri/Cargo.toml`; an image without it is refused before the service stops.
+Reinstall the helper after changing `deploy.py`.
 
 The existing `/opt/antigravity-manager/compose.yaml`, `.env`, Nginx, port mapping,
 resource limits and data directory are reused. The old container's machine ID

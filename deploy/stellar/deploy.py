@@ -57,13 +57,21 @@ def request(base, path, expected=200, key=None):
         return json.loads(data) if 'application/json' in response.headers.get('Content-Type', '') else data
 
 
-def verify(image):
+def image_version(labels):
+    """Application version the build stamped on the image; /health must report the same."""
+    version = labels.get('org.opencontainers.image.version', '')
+    if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?', version):
+        raise RuntimeError('Image version label missing or invalid')
+    return version
+
+
+def verify(image, version):
     state = json.loads(run(['docker', 'inspect', CONTAINER], capture_output=True).stdout)[0]
     if state['Image'] != inspect_image(image)['Id'] or state['State']['Health']['Status'] != 'healthy':
         raise RuntimeError('Running image or container health did not match')
     for base in ['http://127.0.0.1:8045', 'https://antigravity.smlershou.top']:
         health = request(base, '/health')
-        if health.get('version') != '4.9.6':
+        if health.get('version') != version:
             raise RuntimeError('Unexpected application version')
         html = request(base, '/usage')
         if not isinstance(html, bytes) or b'<html' not in html.lower():
@@ -109,6 +117,8 @@ def deploy(image, revision, credential):
     labels = inspect_image(image)['Config'].get('Labels') or {}
     if labels.get('org.opencontainers.image.revision') != revision:
         raise RuntimeError('Image revision does not match requested commit')
+    # Checked before the service stops, so an unlabelled image never reaches rollback.
+    version = image_version(labels)
     original = (ROOT / 'compose.yaml').read_text()
     if len(re.findall(r'^    image:.*$', original, re.M)) != 1:
         raise RuntimeError('Unexpected Compose layout; refusing automated edit')
@@ -134,9 +144,9 @@ def deploy(image, revision, credential):
         run(['tar', '-czf', str(backup / 'data.tar.gz'), '-C', str(ROOT), 'data', 'machine-id'])
         (ROOT / 'compose.yaml').write_text(updated)
         compose('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', CONTAINER)
-        verify(image)
+        verify(image, version)
         time.sleep(10)
-        verify(image)
+        verify(image, version)
     except BaseException:
         (ROOT / 'compose.yaml').write_text(original)
         try:
