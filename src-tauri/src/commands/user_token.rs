@@ -29,6 +29,9 @@ pub struct UpdateTokenRequest {
     pub allowed_models: Option<Vec<String>>,
     pub curfew_start: Option<Option<String>>,
     pub curfew_end: Option<Option<String>>,
+    /// Absent keeps the current expiry; "custom" requires `custom_expires_at`.
+    pub expires_type: Option<String>,
+    pub custom_expires_at: Option<i64>, // 自定义过期时间戳 (秒)
 }
 
 // 命令实现
@@ -70,6 +73,9 @@ pub async fn update_user_token(id: String, request: UpdateTokenRequest) -> Resul
         request.max_concurrency,
         request.token_quota,
         request.allowed_models,
+        request
+            .expires_type
+            .map(|kind| (kind, request.custom_expires_at)),
     )
 }
 

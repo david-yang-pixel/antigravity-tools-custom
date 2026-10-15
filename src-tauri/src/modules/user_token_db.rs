@@ -235,6 +235,29 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to commit token migration: {e}"))
 }
 
+/// Resolve an expiration type to an absolute timestamp (seconds); relative types count
+/// from `now`. Every write path uses this, so an invalid choice is rejected instead of
+/// silently producing a token that never expires.
+pub fn resolve_expires_at(
+    expires_type: &str,
+    custom_expires_at: Option<i64>,
+    now: i64,
+) -> Result<Option<i64>, String> {
+    const DAY: i64 = 86_400;
+    match expires_type {
+        "day" => Ok(Some(now + DAY)),
+        "week" => Ok(Some(now + 7 * DAY)),
+        "month" => Ok(Some(now + 30 * DAY)),
+        "never" => Ok(None),
+        "custom" => match custom_expires_at {
+            Some(at) if at > now => Ok(Some(at)),
+            Some(_) => Err("Custom expiration time must be in the future".into()),
+            None => Err("Custom expiration time is required".into()),
+        },
+        other => Err(format!("Unsupported expiration type: {other}")),
+    }
+}
+
 pub fn validate_limits(max_concurrency: i32, token_quota: i64) -> Result<(), String> {
     if max_concurrency < 0 || !(0..=9_007_199_254_740_991).contains(&token_quota) {
         return Err("Concurrency and quota must be non-negative integers; quota must not exceed 9007199254740991".into());
@@ -490,29 +513,7 @@ pub fn create_token(
     let id = Uuid::new_v4().to_string();
     let token = format!("sk-{}", Uuid::new_v4().to_string().replace("-", ""));
     let now = Utc::now().timestamp();
-
-    let expires_at = match expires_type.as_str() {
-        "day" => Some(
-            Utc::now()
-                .checked_add_signed(chrono::Duration::days(1))
-                .unwrap()
-                .timestamp(),
-        ),
-        "week" => Some(
-            Utc::now()
-                .checked_add_signed(chrono::Duration::weeks(1))
-                .unwrap()
-                .timestamp(),
-        ),
-        "month" => Some(
-            Utc::now()
-                .checked_add_signed(chrono::Duration::days(30))
-                .unwrap()
-                .timestamp(),
-        ),
-        "custom" => custom_expires_at, // 使用自定义时间戳
-        _ => None,                     // "never" or other
-    };
+    let expires_at = resolve_expires_at(&expires_type, custom_expires_at, now)?;
 
     let user_token = UserToken {
         id: id.clone(),
@@ -690,11 +691,15 @@ pub fn update_token(
     max_concurrency: Option<i32>,
     token_quota: Option<i64>,
     allowed_models: Option<Vec<String>>,
+    expires: Option<(String, Option<i64>)>, // (expires_type, custom_expires_at)
 ) -> Result<(), String> {
     validate_limits(max_concurrency.unwrap_or(0), token_quota.unwrap_or(0))?;
     let allowed_models = allowed_models.map(normalize_allowed_models).transpose()?;
-    let conn = connect_db()?;
     let now = Utc::now().timestamp();
+    let expires = expires
+        .map(|(kind, custom)| resolve_expires_at(&kind, custom, now).map(|at| (kind, at)))
+        .transpose()?;
+    let conn = connect_db()?;
 
     let mut query = "UPDATE user_tokens SET updated_at = ?1".to_string();
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
@@ -755,6 +760,17 @@ pub fn update_token(
         param_idx += 1;
     }
 
+    if let Some((kind, expires_at)) = expires {
+        query.push_str(&format!(
+            ", expires_type = ?{}, expires_at = ?{}",
+            param_idx,
+            param_idx + 1
+        ));
+        params_vec.push(Box::new(kind));
+        params_vec.push(Box::new(expires_at));
+        param_idx += 2;
+    }
+
     query.push_str(&format!(" WHERE id = ?{}", param_idx));
     params_vec.push(Box::new(id.to_string()));
 
@@ -769,30 +785,10 @@ pub fn update_token(
 
 /// 续期令牌
 pub fn renew_token(id: &str, expires_type: &str) -> Result<(), String> {
-    let conn = connect_db()?;
     let now = Utc::now().timestamp();
-
-    let expires_at = match expires_type {
-        "day" => Some(
-            Utc::now()
-                .checked_add_signed(chrono::Duration::days(1))
-                .unwrap()
-                .timestamp(),
-        ),
-        "week" => Some(
-            Utc::now()
-                .checked_add_signed(chrono::Duration::weeks(1))
-                .unwrap()
-                .timestamp(),
-        ),
-        "month" => Some(
-            Utc::now()
-                .checked_add_signed(chrono::Duration::days(30))
-                .unwrap()
-                .timestamp(),
-        ),
-        _ => None, // "never" or other
-    };
+    // Renewal carries no timestamp, so "custom" is rejected here instead of clearing the expiry.
+    let expires_at = resolve_expires_at(expires_type, None, now)?;
+    let conn = connect_db()?;
 
     conn.execute(
         "UPDATE user_tokens SET expires_type = ?1, expires_at = ?2, updated_at = ?3, enabled = 1 WHERE id = ?4",
@@ -1295,6 +1291,7 @@ mod tests {
             Some(1),
             Some(40),
             None,
+            None,
         )
         .unwrap();
         let edited = get_token_by_value(&t.token).unwrap().unwrap();
@@ -1317,6 +1314,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(get_token_by_id(&t.id).unwrap().unwrap().token_quota, 40);
@@ -1329,6 +1327,7 @@ mod tests {
             None,
             None,
             Some(-1),
+            None,
             None,
             None,
         )
@@ -1345,6 +1344,7 @@ mod tests {
             None,
             Some(0),
             Some(0),
+            None,
             None,
         )
         .unwrap();
@@ -1423,6 +1423,7 @@ mod tests {
             None,
             None,
             Some(vec!["model-c".into()]),
+            None,
         )
         .unwrap();
         let read = get_token_by_value(&t.token).unwrap().unwrap();
@@ -1431,6 +1432,7 @@ mod tests {
         update_token(
             &t.id,
             Some("renamed".into()),
+            None,
             None,
             None,
             None,
@@ -1456,6 +1458,7 @@ mod tests {
             None,
             None,
             Some(vec![]),
+            None,
         )
         .unwrap();
         assert!(get_token_by_id(&t.id)
@@ -1465,5 +1468,137 @@ mod tests {
             .is_empty());
         assert!(normalize_allowed_models(vec!["*".into()]).is_err());
         assert!(normalize_allowed_models(vec!["  ".into()]).is_err());
+    }
+
+    #[test]
+    fn user_token_expiry_resolution_rejects_ambiguous_choices() {
+        let now = 1_000_000;
+        assert_eq!(resolve_expires_at("day", None, now), Ok(Some(now + 86_400)));
+        assert_eq!(
+            resolve_expires_at("week", None, now),
+            Ok(Some(now + 7 * 86_400))
+        );
+        assert_eq!(
+            resolve_expires_at("month", None, now),
+            Ok(Some(now + 30 * 86_400))
+        );
+        assert_eq!(resolve_expires_at("never", Some(now + 5), now), Ok(None));
+        assert_eq!(
+            resolve_expires_at("custom", Some(now + 5), now),
+            Ok(Some(now + 5))
+        );
+        assert!(resolve_expires_at("custom", Some(now), now).is_err());
+        assert!(resolve_expires_at("custom", None, now).is_err());
+        assert!(resolve_expires_at("year", None, now).is_err());
+    }
+
+    #[test]
+    fn user_token_expiry_edit_keeps_or_replaces_expiry() {
+        init_db().unwrap();
+        let t = create_token(
+            format!("expiry-edit-{}", Uuid::new_v4()),
+            "day".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            0,
+            0,
+            vec![],
+        )
+        .unwrap();
+        let original = t.expires_at.unwrap();
+        let edit = |expires| {
+            update_token(
+                &t.id, None, None, None, None, None, None, None, None, None, expires,
+            )
+        };
+
+        // Editing other fields leaves the expiry untouched.
+        update_token(
+            &t.id,
+            Some("renamed".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let kept = get_token_by_id(&t.id).unwrap().unwrap();
+        assert_eq!(
+            (kept.expires_type.as_str(), kept.expires_at),
+            ("day", Some(original))
+        );
+
+        let custom = Utc::now().timestamp() + 3_600;
+        edit(Some(("custom".into(), Some(custom)))).unwrap();
+        let edited = get_token_by_id(&t.id).unwrap().unwrap();
+        assert_eq!(
+            (edited.expires_type.as_str(), edited.expires_at),
+            ("custom", Some(custom))
+        );
+
+        // Rejected edits change nothing, including the other fields in the same request.
+        assert!(update_token(
+            &t.id,
+            Some("ignored".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(("custom".into(), None))
+        )
+        .is_err());
+        assert!(edit(Some(("custom".into(), Some(1)))).is_err());
+        let unchanged = get_token_by_id(&t.id).unwrap().unwrap();
+        assert_eq!(
+            (unchanged.username.as_str(), unchanged.expires_at),
+            ("renamed", Some(custom))
+        );
+
+        edit(Some(("never".into(), None))).unwrap();
+        let never = get_token_by_id(&t.id).unwrap().unwrap();
+        assert_eq!(
+            (never.expires_type.as_str(), never.expires_at),
+            ("never", None)
+        );
+    }
+
+    #[test]
+    fn user_token_custom_renewal_never_clears_expiry() {
+        init_db().unwrap();
+        let expires_at = Utc::now().timestamp() + 60;
+        let t = create_token(
+            format!("expiry-renew-{}", Uuid::new_v4()),
+            "custom".into(),
+            None,
+            0,
+            None,
+            None,
+            Some(expires_at),
+            0,
+            0,
+            vec![],
+        )
+        .unwrap();
+        assert!(renew_token(&t.id, "custom").is_err());
+        assert_eq!(
+            get_token_by_id(&t.id).unwrap().unwrap().expires_at,
+            Some(expires_at)
+        );
+        renew_token(&t.id, "week").unwrap();
+        let renewed = get_token_by_id(&t.id).unwrap().unwrap();
+        assert_eq!(renewed.expires_type, "week");
+        assert!(renewed.expires_at.unwrap() > expires_at);
     }
 }
