@@ -10,6 +10,9 @@ deploy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(deploy)
 
 
+LABELS = {'org.opencontainers.image.revision': 'b' * 40, 'org.opencontainers.image.version': '4.10.0-beta.1'}
+
+
 class DeploymentTests(unittest.TestCase):
     def test_restricted_command(self):
         valid = 'deploy ' + deploy.IMAGE + '@sha256:' + 'a' * 64 + ' ' + 'b' * 40
@@ -33,7 +36,7 @@ class DeploymentTests(unittest.TestCase):
             with patch.object(deploy, 'ROOT', root), patch.object(deploy, 'BACKUPS', Path(tmp) / 'backups'), \
                     patch.object(deploy, 'run') as run, patch.object(deploy, 'compose') as compose, \
                     patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \
-                    patch.object(deploy, 'inspect_image', return_value={'Config': {'Labels': {'org.opencontainers.image.revision': 'b' * 40}}}), \
+                    patch.object(deploy, 'inspect_image', return_value={'Config': {'Labels': LABELS}}), \
                     patch.object(deploy, 'verify', side_effect=RuntimeError('unhealthy')):
                 with self.assertRaisesRegex(RuntimeError, 'unhealthy'):
                     deploy.deploy(deploy.IMAGE + '@sha256:' + 'a' * 64, 'b' * 40, 'temporary-token')
@@ -42,6 +45,35 @@ class DeploymentTests(unittest.TestCase):
                 self.assertFalse((root / 'last-deployment.json').exists())
                 self.assertEqual(compose.call_count, 3)  # stop, new image, previous image
                 self.assertTrue(any(call.args[0][0] == 'tar' for call in run.call_args_list))
+
+    def test_image_version_label_is_required_and_checked_against_health(self):
+        self.assertEqual(deploy.image_version(LABELS), '4.10.0-beta.1')
+        for labels in ({}, {'org.opencontainers.image.version': ''},
+                       {'org.opencontainers.image.version': '4.9'}, {'org.opencontainers.image.version': '4.9.6 x'}):
+            with self.subTest(labels=labels), self.assertRaisesRegex(RuntimeError, 'version label'):
+                deploy.image_version(labels)
+
+    def test_unlabelled_image_is_refused_before_service_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'app'
+            root.mkdir()
+            (root / 'compose.yaml').write_text('services:\n  antigravity-manager:\n    image: old@sha256:abc\n')
+            unlabelled = {k: v for k, v in LABELS.items() if k != 'org.opencontainers.image.version'}
+            with patch.object(deploy, 'ROOT', root), patch.object(deploy, 'BACKUPS', Path(tmp) / 'backups'), \
+                    patch.object(deploy, 'run'), patch.object(deploy, 'compose') as compose, \
+                    patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \
+                    patch.object(deploy, 'inspect_image', return_value={'Config': {'Labels': unlabelled}}):
+                with self.assertRaisesRegex(RuntimeError, 'version label'):
+                    deploy.deploy(deploy.IMAGE + '@sha256:' + 'a' * 64, 'b' * 40, 'temporary-token')
+                compose.assert_not_called()
+                self.assertFalse((Path(tmp) / 'backups').exists())
+
+    def test_health_must_report_the_image_version(self):
+        with patch.object(deploy, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='[{"Image": "id", "State": {"Health": {"Status": "healthy"}}}]')), \
+                patch.object(deploy, 'inspect_image', return_value={'Id': 'id'}), \
+                patch.object(deploy, 'request', return_value={'version': '4.9.6'}):
+            with self.assertRaisesRegex(RuntimeError, 'Unexpected application version'):
+                deploy.verify(deploy.IMAGE + '@sha256:' + 'a' * 64, '4.10.0-beta.1')
 
 
 if __name__ == '__main__':
