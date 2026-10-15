@@ -2500,6 +2500,14 @@ async fn admin_update_user_token(
         crate::modules::user_token_db::normalize_allowed_models(models.clone())
             .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     }
+    if let Some(expires_type) = &payload.expires_type {
+        crate::modules::user_token_db::resolve_expires_at(
+            expires_type,
+            payload.custom_expires_at,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    }
     crate::commands::user_token::update_user_token(id, payload)
         .await
         .map_err(|e| {

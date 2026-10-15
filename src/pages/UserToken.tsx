@@ -7,6 +7,7 @@ import { showToast } from '../components/common/ToastContainer';
 import ModelAccessFields from '../components/user-token/ModelAccessFields';
 import TokenLimitFields from '../components/user-token/TokenLimitFields';
 import { parseQuotaMillions, toQuotaMillions, validTokenLimits } from '../components/user-token/tokenQuota';
+import { fromDateTimeLocal, nowSeconds, toDateTimeLocal } from '../components/user-token/tokenExpiry';
 import { copyToClipboard } from '../utils/clipboard';
 
 interface UserToken {
@@ -61,6 +62,8 @@ const UserToken: React.FC = () => {
     const [editAllowedModels, setEditAllowedModels] = useState<string[]>([]);
     const [editCurfewStart, setEditCurfewStart] = useState('');
     const [editCurfewEnd, setEditCurfewEnd] = useState('');
+    const [editExpiresType, setEditExpiresType] = useState('keep'); // keep, day, week, month, never, custom
+    const [editCustomExpires, setEditCustomExpires] = useState(''); // datetime-local value
     const [updating, setUpdating] = useState(false);
 
     // Create Form State
@@ -109,6 +112,10 @@ const UserToken: React.FC = () => {
             showToast(t('user_token.custom_expires_required') || 'Please select a custom expiration time', 'error');
             return;
         }
+        if (newExpiresType === 'custom' && fromDateTimeLocal(newCustomExpires) <= nowSeconds()) {
+            showToast(t('user_token.custom_expires_future'), 'error');
+            return;
+        }
 
         if (newRestricted && newAllowedModels.length === 0) {
             showToast(t('user_token.select_model_required'), 'error');
@@ -124,7 +131,7 @@ const UserToken: React.FC = () => {
         try {
             // 计算自定义过期时间戳
             const customExpiresAt = newExpiresType === 'custom' && newCustomExpires
-                ? Math.floor(new Date(newCustomExpires).getTime() / 1000)
+                ? fromDateTimeLocal(newCustomExpires)
                 : undefined;
 
             await invoke('create_user_token', {
@@ -184,6 +191,8 @@ const UserToken: React.FC = () => {
         setEditRestricted((token.allowed_models?.length ?? 0) > 0);
         setEditCurfewStart(token.curfew_start ?? '');
         setEditCurfewEnd(token.curfew_end ?? '');
+        setEditExpiresType('keep');
+        setEditCustomExpires(token.expires_at && token.expires_at > nowSeconds() ? toDateTimeLocal(token.expires_at) : '');
         setShowEditModal(true);
     };
 
@@ -204,6 +213,15 @@ const UserToken: React.FC = () => {
             return;
         }
 
+        if (editExpiresType === 'custom' && !editCustomExpires) {
+            showToast(t('user_token.custom_expires_required') || 'Please select a custom expiration time', 'error');
+            return;
+        }
+        if (editExpiresType === 'custom' && fromDateTimeLocal(editCustomExpires) <= nowSeconds()) {
+            showToast(t('user_token.custom_expires_future'), 'error');
+            return;
+        }
+
         setUpdating(true);
         try {
             await invoke('update_user_token', {
@@ -217,7 +235,12 @@ const UserToken: React.FC = () => {
                     allowed_models: editRestricted ? editAllowedModels : [],
                     // 使用双层包装: undefined = 不更新, null = 清空, string = 设置值
                     curfew_start: editCurfewStart === '' ? null : editCurfewStart,
-                    curfew_end: editCurfewEnd === '' ? null : editCurfewEnd
+                    curfew_end: editCurfewEnd === '' ? null : editCurfewEnd,
+                    // 省略 = 保持当前有效期；day/week/month 从保存时起算
+                    ...(editExpiresType !== 'keep' && {
+                        expires_type: editExpiresType,
+                        custom_expires_at: editExpiresType === 'custom' ? fromDateTimeLocal(editCustomExpires) : null
+                    })
                 }
             });
             showToast(t('common.update_success') || 'Updated successfully', 'success');
@@ -428,7 +451,8 @@ const UserToken: React.FC = () => {
                                             </span>
                                             {token.expires_at && token.expires_at < Date.now() / 1000 && (
                                                 <button
-                                                    onClick={() => handleRenew(token.id, token.expires_type)}
+                                                    // A custom expiry needs a new date, so it is renewed through the edit dialog.
+                                                    onClick={() => token.expires_type === 'custom' ? handleEdit(token) : handleRenew(token.id, token.expires_type)}
                                                     className="text-[10px] text-blue-500 hover:underline font-medium"
                                                 >
                                                     {t('user_token.renew_button', { defaultValue: 'Renew' })}
@@ -607,7 +631,7 @@ const UserToken: React.FC = () => {
                                     className="input input-bordered w-full"
                                     value={newCustomExpires}
                                     onChange={e => setNewCustomExpires(e.target.value)}
-                                    min={new Date().toISOString().slice(0, 16)}
+                                    min={toDateTimeLocal(nowSeconds())}
                                 />
                                 <label className="label">
                                     <span className="label-text-alt text-gray-500">{t('user_token.hint_custom_expires', { defaultValue: 'Select the exact date and hour when this token expires' })}</span>
@@ -686,6 +710,45 @@ const UserToken: React.FC = () => {
                                 onChange={e => setEditDesc(e.target.value)}
                                 placeholder={t('user_token.placeholder_desc', { defaultValue: 'Optional notes' })}
                             />
+                        </div>
+
+                        <div className="form-control w-full mb-3">
+                            <label className="label">
+                                <span className="label-text">{t('user_token.expires', { defaultValue: 'Expires' })}</span>
+                            </label>
+                            <select
+                                className="select select-bordered w-full"
+                                value={editExpiresType}
+                                onChange={e => setEditExpiresType(e.target.value)}
+                            >
+                                <option value="keep">
+                                    {t('user_token.expires_keep', {
+                                        value: editingToken.expires_at ? formatTime(editingToken.expires_at) : t('user_token.never', { defaultValue: 'Never' }),
+                                        defaultValue: 'Keep current ({{value}})'
+                                    })}
+                                </option>
+                                <option value="day">{t('user_token.expires_day', { defaultValue: '1 Day' })}</option>
+                                <option value="week">{t('user_token.expires_week', { defaultValue: '1 Week' })}</option>
+                                <option value="month">{t('user_token.expires_month', { defaultValue: '1 Month' })}</option>
+                                <option value="custom">{t('user_token.expires_custom', { defaultValue: 'Custom' })}</option>
+                                <option value="never">{t('user_token.expires_never', { defaultValue: 'Never' })}</option>
+                            </select>
+                            {editExpiresType === 'custom' && (
+                                <input
+                                    type="datetime-local"
+                                    className="input input-bordered w-full mt-2"
+                                    value={editCustomExpires}
+                                    onChange={e => setEditCustomExpires(e.target.value)}
+                                    min={toDateTimeLocal(nowSeconds())}
+                                />
+                            )}
+                            <label className="label">
+                                <span className="label-text-alt text-gray-500">
+                                    {editExpiresType === 'custom'
+                                        ? t('user_token.hint_custom_expires', { defaultValue: 'Select the exact date and hour when this token expires' })
+                                        : t('user_token.hint_edit_expires', { defaultValue: '1 Day / 1 Week / 1 Month count from when you save.' })}
+                                </span>
+                            </label>
                         </div>
 
                         <div className="form-control w-full mb-3">

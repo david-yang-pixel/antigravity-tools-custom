@@ -1889,7 +1889,10 @@
     "custom_expires_required": "请选择自定义过期时间",
     "expires_custom": "自定义时间",
     "custom_expires_at": "自定义到期时间",
-    "hint_custom_expires": "设置 Token 的精确到期时间点"
+    "hint_custom_expires": "设置 Token 的精确到期时间点",
+    "expires_keep": "保持不变（{{value}}）",
+    "hint_edit_expires": "1 天、1 周、1 个月从点击更新时起算。",
+    "custom_expires_future": "到期时间必须晚于当前时间"
   },
   "apiKeyFun": {
     "title": "APIKEY.FUN 中转站",

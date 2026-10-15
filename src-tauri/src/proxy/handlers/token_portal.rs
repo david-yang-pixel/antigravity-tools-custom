@@ -280,6 +280,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(

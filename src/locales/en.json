@@ -1923,7 +1923,10 @@
     "custom_expires_required": "Please select custom expiration time",
     "expires_custom": "Custom Time",
     "custom_expires_at": "Custom Expiration At",
-    "hint_custom_expires": "Set precise expiration timestamp for this token"
+    "hint_custom_expires": "Set precise expiration timestamp for this token",
+    "expires_keep": "Keep current ({{value}})",
+    "hint_edit_expires": "1 Day / 1 Week / 1 Month count from when you save.",
+    "custom_expires_future": "Expiration time must be in the future"
   },
   "apiKeyFun": {
     "title": "APIKEY.FUN Hub",
