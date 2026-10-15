@@ -1,10 +1,17 @@
 # Stellar AI deployment
 
 The private repository's default and production branch is `main`. A push to
-`main`, or a manual run of **Stellar AI Build and Deploy** on `main`, builds an
-amd64 Linux image only after independent TypeScript, deployment-safety and workflow
-checks plus a dedicated Rust Clippy/test stage. Isolated API smoke checks then run, before the workflow
-publishes a commit-tagged image to GHCR. Production deploys the immutable digest.
+`main`, or a manual run of **Stellar AI Build and Deploy** on `main`, runs three
+jobs in parallel: TypeScript, deployment-safety and workflow checks; native Rust
+Clippy and focused regression tests; and the amd64 Linux image build, which runs
+isolated API smoke checks before publishing a commit-tagged image to GHCR.
+Production deploys the immutable digest only after all three jobs pass, so a
+published image that failed a check is never deployed.
+
+The image build caches compiled Rust dependencies as a separate layer (cargo-chef)
+in the `buildcache` tag of the GHCR package, so a commit that leaves
+`Cargo.toml`/`Cargo.lock` unchanged only recompiles this crate. The first run after
+a dependency change rebuilds that layer and takes noticeably longer.
 The upstream Pages workflow is manual-only; the custom workflow replaces the
 upstream push-to-main CI. Upstream PR checks remain available.
 

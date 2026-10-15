@@ -68,36 +68,31 @@ RUN if [ "$USE_MIRROR" = "true" ] || ( [ "$USE_MIRROR" = "auto" ] && ! timeout 3
 # Verify Go installation for BoringSSL build
 RUN which go && go version || (echo "ERROR: Go compiler not found" && exit 1)
 
-WORKDIR /app
-# Copy only backend sources to keep frontend cache intact on backend-only changes
-COPY src-tauri ./src-tauri
-
-# [FIX] Copy locales for Rust compilation (needed by i18n.rs include_str!)
-COPY src/locales ./src/locales
-
-# Copy frontend dist from builder so Tauri can embed it
-COPY --from=frontend-builder /app/dist ./dist
-
-# Quality gate compiles Rust before a production image can be assembled.
-FROM backend-builder AS backend-quality
+RUN cargo install cargo-chef --version 0.1.78 --locked
 WORKDIR /app/src-tauri
-RUN rustup component add clippy
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/app/src-tauri/target \
-    cargo clippy --locked --release --lib --bin antigravity-tools && \
-    for filter in user_token proxy::middleware::monitor::tests; do \
-      cargo test --locked --release --lib "$filter" | tee /tmp/test-results || exit 1; \
-      grep -Eq 'test result: ok\. [1-9][0-9]* passed;' /tmp/test-results || exit 1; \
-    done
 
-FROM backend-quality AS backend-release
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/app/src-tauri/target \
-    cargo build --locked --release --bin antigravity-tools && \
-    cp target/release/antigravity-tools /tmp/antigravity-tools
+# --- Dependency Recipe Stage ---
+FROM backend-builder AS backend-planner
+COPY src-tauri ./
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- Backend Release Stage ---
+FROM backend-builder AS backend-release
+COPY --from=backend-planner /app/src-tauri/recipe.json recipe.json
+# Dependencies compile into their own layer, reused until Cargo.toml/Cargo.lock change,
+# so a CI build with an exported layer cache only recompiles this crate.
+RUN cargo chef cook --locked --release --bin antigravity-tools --recipe-path recipe.json
+
+COPY src-tauri ./
+# [FIX] Copy locales for Rust compilation (needed by i18n.rs include_str!)
+COPY src/locales ../src/locales
+# Copy frontend dist from builder so Tauri can embed it
+COPY --from=frontend-builder /app/dist ../dist
+
+# Dropping this crate's own artifacts keeps the per-commit layer small for cache export.
+RUN cargo build --locked --release --bin antigravity-tools && \
+    cp target/release/antigravity-tools /tmp/antigravity-tools && \
+    cargo clean --release -p antigravity-tools
 
 # --- Final Runtime Stage ---
 FROM debian:bookworm-slim

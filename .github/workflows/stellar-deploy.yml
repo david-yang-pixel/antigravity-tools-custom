@@ -49,9 +49,41 @@ jobs:
           "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= \
             .github/workflows/stellar-deploy.yml .github/workflows/ci.yml .github/workflows/deploy-pages.yml
 
+  rust-quality:
+    name: Rust Clippy and focused regression tests
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev pkg-config libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Provide placeholder frontend bundle
+        run: |
+          mkdir -p dist
+          [ -f dist/index.html ] || echo '<html/>' > dist/index.html
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --lib --bin antigravity-tools
+      - name: Focused regression tests
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          for filter in user_token proxy::middleware::monitor::tests; do
+            cargo test --locked --lib "$filter" | tee "$RUNNER_TEMP/test-results"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/test-results"
+          done
+
   build:
-    name: Rust quality gate and image build
-    needs: quality
+    name: Build and smoke-test image
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -68,17 +100,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Rust Clippy and focused regression tests
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          target: backend-quality
-          platforms: linux/amd64
-          build-args: USE_MIRROR=false
-          cache-from: type=gha,scope=stellar-amd64
-          cache-to: type=gha,mode=max,scope=stellar-amd64,timeout=5m,ignore-error=true
-      - name: Build production image after quality gates
+      - name: Build production image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -91,8 +113,10 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=stellar-amd64
-          cache-to: type=gha,mode=max,scope=stellar-amd64,timeout=5m,ignore-error=true
+          # Registry cache uploads only layers it does not already hold, so the large
+          # toolchain and compiled-dependency layers are written once per Cargo.lock change.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
       - name: Smoke test isolated container
         run: |
           set -euo pipefail
@@ -117,10 +141,10 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=stellar-amd64
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
 
   deploy:
-    needs: build
+    needs: [quality, rust-quality, build]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment:
