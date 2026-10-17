@@ -9,6 +9,8 @@ interface Props {
     onMaxConcurrencyChange: (value: string) => void;
     onTokenQuotaChange: (value: string) => void;
     usedTokens?: number;
+    /** Overrides the quota hint, e.g. for registered users where 0 means "not activated". */
+    quotaHint?: string;
 }
 
 export default function TokenLimitFields(props: Props) {
@@ -35,7 +37,7 @@ export default function TokenLimitFields(props: Props) {
                     <input id={`${props.prefix}-token-quota`} type="number" min="0" max="9007199254.740991" step="0.000001"
                         className="input input-bordered w-full" value={props.tokenQuota}
                         onChange={e => props.onTokenQuotaChange(e.target.value)} />
-                    <p className="text-xs text-gray-500 mt-1">{t('user_token.quota_hint')}</p>
+                    <p className="text-xs text-gray-500 mt-1">{props.quotaHint ?? t('user_token.quota_hint')}</p>
                 </div>
             </div>
             <p className="text-xs text-gray-500 mt-2">{t('user_token.quota_settlement_hint')}</p>

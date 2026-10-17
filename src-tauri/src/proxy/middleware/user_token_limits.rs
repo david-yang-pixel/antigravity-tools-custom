@@ -107,11 +107,11 @@ pub async fn user_token_limits_middleware(mut request: Request, next: Next) -> R
         Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
         Err(_) => return LimitError::AccountingUnavailable.into_response(),
     };
-    if token.token_quota > 0 && token.total_tokens_used >= token.token_quota {
+    if token.quota_exhausted() {
         return LimitError::Quota.into_response();
     }
     if request.headers().contains_key(axum::http::header::UPGRADE)
-        && (token.max_concurrency > 0 || token.token_quota > 0)
+        && (token.max_concurrency > 0 || token.has_quota_limit())
     {
         // The legacy WebSocket handler calls generation handlers directly, bypassing
         // per-frame admission and usage settlement. Restricted keys require HTTP/SSE.

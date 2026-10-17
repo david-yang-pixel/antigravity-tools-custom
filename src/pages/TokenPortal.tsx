@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Activity, ArrowRight, KeyRound, LogOut, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Activity, AlertTriangle, LogOut, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toQuotaMillions } from '../components/user-token/tokenQuota';
 import TokenConnectionDetails from '../components/user-token/TokenConnectionDetails';
 import TokenUsageDetails, { LogTimeRange, UsageLogPage, UsagePeriod } from '../components/user-token/TokenUsageDetails';
+import PortalAuthForms from '../components/user-token/PortalAuthForms';
+import PortalApiKeyPanel from '../components/user-token/PortalApiKeyPanel';
+import { PortalConfig, portalCall } from '../components/user-token/portalApi';
 
 interface ModelUsage {
     model: string;
@@ -18,6 +21,8 @@ interface ModelUsage {
 interface Overview {
     username: string;
     token_hint: string;
+    account_email: string | null;
+    pending_activation: boolean;
     expired: boolean;
     expires_at: number | null;
     max_concurrency: number;
@@ -33,33 +38,63 @@ interface Overview {
     models: ModelUsage[];
 }
 
-const portalMenus = ['overview', 'models', 'statistics', 'logs'] as const;
+const portalMenus = ['overview', 'apikey', 'models', 'statistics', 'logs'] as const;
 type PortalMenu = typeof portalMenus[number];
+/** Key sign-in sends the key as Bearer; account sign-in relies on the session cookie. */
+type Auth = { kind: 'key'; token: string } | { kind: 'account' };
 
 export default function TokenPortal() {
     const { t, i18n } = useTranslation();
-    const [input, setInput] = useState('');
     const [menu, setMenu] = useState<PortalMenu>('overview');
     const [overview, setOverview] = useState<Overview | null>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
+    const [keyError, setKeyError] = useState('');
+    const [notice, setNotice] = useState('');
+    const [config, setConfig] = useState<PortalConfig | null>(null);
+    const [accountKey, setAccountKey] = useState('');
     const [search, setSearch] = useState('');
     const [logRange, setLogRange] = useState<LogTimeRange>({});
     const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
-    const key = useRef('');
+    const auth = useRef<Auth | null>(null);
     const pending = useRef<AbortController | null>(null);
     useEffect(() => () => pending.current?.abort(), []);
+    // Restore an existing account session and learn which account features are on.
+    useEffect(() => {
+        void portalCall<PortalConfig>('config').then(result => { if (result.ok) setConfig(result.data); }).catch(() => undefined);
+        void load({ kind: 'account' }, 1, {}, true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
-    function logout() {
+    function reset() {
         pending.current?.abort();
         pending.current = null;
-        key.current = '';
+        auth.current = null;
         setMenu('overview');
         setLogRange({});
-        setInput(''); setOverview(null); setSearch(''); setUpdatedAt(null); setError(''); setBusy(false);
+        setOverview(null); setAccountKey(''); setSearch(''); setUpdatedAt(null); setError(''); setBusy(false);
     }
 
-    async function load(token: string, page = 1, range: LogTimeRange = logRange) {
+    async function logout() {
+        const wasAccount = auth.current?.kind === 'account';
+        reset(); setKeyError(''); setNotice('');
+        if (wasAccount) await portalCall('auth/logout', {}).catch(() => undefined);
+    }
+
+    async function loadAccountKey() {
+        const result = await portalCall<{ token?: string }>('key');
+        if (result.ok && result.data.token) setAccountKey(result.data.token);
+    }
+
+    async function regenerateKey(): Promise<boolean> {
+        const result = await portalCall<{ token?: string }>('key/regenerate', {});
+        if (!result.ok || !result.data.token) return false;
+        setAccountKey(result.data.token);
+        if (overview) setOverview({ ...overview, token_hint: `••••${result.data.token.slice(-4)}` });
+        return true;
+    }
+
+    async function load(next: Auth, page = 1, range: LogTimeRange = logRange, silent = false) {
         pending.current?.abort();
         const controller = new AbortController();
         pending.current = controller;
@@ -69,30 +104,43 @@ export default function TokenPortal() {
             if (range.start_time !== undefined) query.set('start_time', String(range.start_time));
             if (range.end_time !== undefined) query.set('end_time', String(range.end_time));
             const response = await fetch(`/api/token-portal/me?${query}`, {
-                headers: { Authorization: `Bearer ${token}` },
-                cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
+                headers: next.kind === 'key' ? { Authorization: `Bearer ${next.token}` } : undefined,
+                cache: 'no-store', credentials: next.kind === 'key' ? 'omit' : 'same-origin', referrerPolicy: 'no-referrer', signal: controller.signal,
             });
             if (response.status === 401) {
                 if (controller.signal.aborted) return;
-                logout(); setError(t('token_portal.invalid_token')); return;
+                const wasSignedIn = auth.current !== null;
+                reset();
+                if (next.kind === 'key') setKeyError(t('token_portal.invalid_token'));
+                else if (wasSignedIn && !silent) setNotice(t('token_portal.session_expired'));
+                return;
             }
             if (!response.ok) throw new Error('unavailable');
             const result: Overview = await response.json();
             if (controller.signal.aborted) return;
-            key.current = token;
+            const firstLoad = auth.current === null;
+            auth.current = next;
             setLogRange(range);
-            setInput(''); setOverview(result); setUpdatedAt(new Date());
+            setKeyError(''); setNotice('');
+            setOverview(result); setUpdatedAt(new Date());
+            if (next.kind === 'account' && firstLoad) void loadAccountKey();
         } catch {
-            if (!controller.signal.aborted) setError(t('token_portal.load_error'));
+            if (!controller.signal.aborted && !silent) setError(t('token_portal.load_error'));
         } finally {
             if (pending.current === controller) { setBusy(false); pending.current = null; }
         }
     }
 
+    const reload = (page = overview?.logs.page ?? 1, range: LogTimeRange = logRange) => { if (auth.current) void load(auth.current, page, range); };
+    const isAccount = auth.current?.kind === 'account';
+    const currentKey = auth.current?.kind === 'key' ? auth.current.token : accountKey;
+    const menus = portalMenus.filter(item => item !== 'apikey' || isAccount);
+
     const unlimited = t('user_token.unlimited');
     const million = (n: number) => `${toQuotaMillions(n)} M tokens`;
     const exhausted = overview?.remaining_tokens === 0;
-    const status = overview?.expired ? t('token_portal.expired') : exhausted ? t('user_token.quota_exhausted') : t('token_portal.active');
+    const quotaUnlimited = overview?.remaining_tokens === null;
+    const status = overview?.pending_activation ? t('token_portal.pending_activation') : overview?.expired ? t('token_portal.expired') : exhausted ? t('user_token.quota_exhausted') : t('token_portal.active');
     const rows = overview?.models.filter(m => m.model.toLowerCase().includes(search.toLowerCase())) ?? [];
     const usedPercent = overview && overview.token_quota > 0 ? Math.min(100, overview.total_tokens_used / overview.token_quota * 100) : 0;
     const date = (ts: number) => new Date(ts * 1000).toLocaleString(i18n.language, { timeZone: 'Asia/Shanghai' });
@@ -104,11 +152,12 @@ export default function TokenPortal() {
                     <div className="flex items-center gap-3"><Activity size={24} className="text-blue-600" /><span className="font-semibold tracking-tight">Stellar AI <span className="text-slate-400 font-normal hidden sm:inline">/ {t('token_portal.title')}</span></span></div>
                     <div className="flex items-center gap-3 text-sm">
                         <button className="rounded-lg px-3 py-2 hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-blue-500" onClick={() => i18n.changeLanguage(i18n.language.startsWith('zh') ? 'en' : 'zh')} aria-label={t('token_portal.language')}>{i18n.language.startsWith('zh') ? 'EN' : '中文'}</button>
-                        {overview && <button onClick={logout} className="flex items-center gap-2 rounded-lg px-3 py-2 hover:bg-slate-100"><LogOut size={16} />{t('token_portal.logout')}</button>}
+                        {overview?.account_email && <span className="hidden md:inline text-slate-500 max-w-56 truncate" title={overview.account_email}>{overview.account_email}</span>}
+                        {overview && <button onClick={() => void logout()} className="flex items-center gap-2 rounded-lg px-3 py-2 hover:bg-slate-100"><LogOut size={16} />{t('token_portal.logout')}</button>}
                     </div>
                 </div>
                 {overview && <nav aria-label={t('token_portal.navigation')} className="max-w-6xl mx-auto px-5 sm:px-8 flex gap-1 sm:gap-6 overflow-x-auto">
-                    {portalMenus.map(item => <button key={item} type="button" aria-current={menu === item ? 'page' : undefined}
+                    {menus.map(item => <button key={item} type="button" aria-current={menu === item ? 'page' : undefined}
                         aria-controls={`portal-panel-${item}`} onClick={() => setMenu(item)}
                         className={`shrink-0 border-b-2 px-3 sm:px-4 py-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${menu === item ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-900 hover:border-slate-300'}`}>
                         {t(`token_portal.menu_${item}`)}
@@ -116,23 +165,9 @@ export default function TokenPortal() {
                 </nav>}
             </header>
             {!overview ? (
-                <main className="max-w-md mx-auto px-5 py-16 sm:py-24">
-                    <div className="mb-8"><div className="w-12 h-12 flex items-center justify-center rounded-xl bg-blue-50 text-blue-600 mb-6"><KeyRound size={24} /></div>
-                        <p className="text-sm text-blue-600 font-medium mb-3">{t('token_portal.kicker')}</p>
-                        <h1 className="text-3xl font-semibold tracking-tight mb-3">{t('token_portal.login_title')}</h1>
-                        <p className="text-sm leading-6 text-slate-500">{t('token_portal.login_description')}</p>
-                    </div>
-                    <form onSubmit={e => { e.preventDefault(); const token = input.trim(); if (token) void load(token); }} className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-sm">
-                        <label htmlFor="portal-token" className="block text-sm font-medium">API Token</label>
-                        <input id="portal-token" type="password" autoComplete="off" spellCheck={false} value={input} onChange={e => setInput(e.target.value)} maxLength={256}
-                            placeholder="sk-…" disabled={busy} required className="w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
-                        {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-                        <button type="submit" disabled={busy || !input.trim()} className="w-full flex justify-center items-center gap-2 rounded-lg bg-blue-600 text-white text-sm font-medium py-3 hover:bg-blue-700 disabled:opacity-50">
-                            {busy ? <RefreshCw size={16} className="animate-spin" /> : <ArrowRight size={16} />}{t('token_portal.login')}
-                        </button>
-                        <p className="text-xs leading-5 text-slate-500 flex gap-2"><ShieldCheck size={16} className="shrink-0 mt-0.5" />{t('token_portal.memory_only')}</p>
-                    </form>
-                </main>
+                <PortalAuthForms config={config} busy={busy} keyError={keyError} accountError={error} notice={notice}
+                    onKeyLogin={token => void load({ kind: 'key', token }, 1, {})}
+                    onAccountReady={() => void load({ kind: 'account' }, 1, {})} />
             ) : (
                 <main className="max-w-6xl mx-auto px-5 sm:px-8 py-10 space-y-8">
                     <section className="flex flex-wrap items-start justify-between gap-4">
@@ -141,26 +176,30 @@ export default function TokenPortal() {
                             <div className="flex flex-wrap items-center gap-3 mt-3 text-xs text-slate-500"><span className={`rounded-full px-2.5 py-1 font-medium ${overview.expired || exhausted ? 'bg-amber-100 text-amber-800' : 'bg-emerald-50 text-emerald-700'}`}>{status}</span>
                                 <span>{t('token_portal.expires')}: {overview.expires_at ? date(overview.expires_at) : t('user_token.never')}</span></div>
                         </div>
-                        <div className="text-right"><button onClick={() => void load(key.current, overview.logs.page)} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm disabled:opacity-50"><RefreshCw size={16} className={busy ? 'animate-spin' : ''} />{t('common.refresh')}</button>
+                        <div className="text-right"><button onClick={() => reload()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm disabled:opacity-50"><RefreshCw size={16} className={busy ? 'animate-spin' : ''} />{t('common.refresh')}</button>
                             {updatedAt && <p className="mt-2 text-xs text-slate-400">{t('token_portal.updated')}: {updatedAt.toLocaleTimeString(i18n.language)}</p>}</div>
                     </section>
                     {error && <p role="alert" className="text-sm text-red-600 rounded-lg bg-red-50 px-4 py-3">{error}</p>}
+                    {overview.pending_activation && <p className="flex gap-2 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800"><AlertTriangle size={16} className="shrink-0 mt-0.5" />{t('token_portal.pending_banner')}</p>}
                     <div id="portal-panel-overview" hidden={menu !== 'overview'} className="space-y-8">
                     <section aria-label={t('token_portal.summary')} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                         {[
                             [t('token_portal.used'), million(overview.total_tokens_used)],
-                            [t('token_portal.remaining'), overview.remaining_tokens === null ? unlimited : million(overview.remaining_tokens)],
+                            [t('token_portal.remaining'), quotaUnlimited ? unlimited : million(overview.remaining_tokens ?? 0)],
                             [t('token_portal.requests'), overview.total_requests.toLocaleString()],
                             [t('user_token.max_concurrency'), overview.max_concurrency === 0 ? unlimited : String(overview.max_concurrency)],
                         ].map(([label, value]) => <div key={label} className="bg-white border border-slate-200 rounded-xl p-5"><p className="text-sm text-slate-500 mb-3">{label}</p><p className="text-xl font-semibold tracking-tight break-words">{value}</p></div>)}
                     </section>
                     <section className="bg-white border border-slate-200 rounded-xl px-5 py-5 space-y-3">
-                        <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{t('token_portal.quota')}</span><span>{overview.token_quota === 0 ? unlimited : million(overview.token_quota)}</span></div>
+                        <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{t('token_portal.quota')}</span><span>{quotaUnlimited ? unlimited : million(overview.token_quota)}</span></div>
                         {overview.token_quota > 0 && <div role="progressbar" aria-label={t('token_portal.used')} aria-valuenow={Math.round(usedPercent)} aria-valuemin={0} aria-valuemax={100} className="h-2 rounded-full bg-slate-100 overflow-hidden"><div style={{ width: `${usedPercent}%` }} className={`h-full rounded-full ${exhausted ? 'bg-amber-500' : 'bg-blue-500'}`} /></div>}
                         <p className="text-xs text-slate-500">{t('user_token.quota_settlement_hint')}</p>
                     </section>
-                    <TokenConnectionDetails token={key.current} />
+                    {currentKey && <TokenConnectionDetails token={currentKey} />}
                     </div>
+                    {isAccount && <div id="portal-panel-apikey" hidden={menu !== 'apikey'}>
+                        <PortalApiKeyPanel token={accountKey} pending={overview.pending_activation} onRegenerate={regenerateKey} />
+                    </div>}
                     <section id="portal-panel-models" hidden={menu !== 'models'} className="space-y-3">
                         <h2 className="text-lg font-semibold">{t('user_token.allowed_models')}</h2>
                         {overview.allowed_models.length === 0 && <p className="text-sm text-slate-500">{t('token_portal.all_models')}</p>}
@@ -182,10 +221,10 @@ export default function TokenPortal() {
                         </div>
                         <p className="text-xs text-slate-500 leading-5">{t('token_portal.statistics_note')}</p>
                     </section>
-                    <TokenUsageDetails view="statistics" daily={overview.daily} weekly={overview.weekly} logs={overview.logs} busy={busy} onPage={page => void load(key.current, page)} />
+                    <TokenUsageDetails view="statistics" daily={overview.daily} weekly={overview.weekly} logs={overview.logs} busy={busy} onPage={page => reload(page)} />
                     </div>
                     <div id="portal-panel-logs" hidden={menu !== 'logs'}>
-                        <TokenUsageDetails view="logs" daily={overview.daily} weekly={overview.weekly} logs={overview.logs} busy={busy} onPage={page => void load(key.current, page)} onFilter={range => void load(key.current, 1, range)} />
+                        <TokenUsageDetails view="logs" daily={overview.daily} weekly={overview.weekly} logs={overview.logs} busy={busy} onPage={page => reload(page)} onFilter={range => reload(1, range)} />
                     </div>
                 </main>
             )}

@@ -195,16 +195,22 @@ pub fn normalize_ip_str(raw: &str) -> String {
 
 /// 从请求中提取客户端 IP（支持 X-Forwarded-For, X-Real-IP, ConnectInfo，并自动规范化 IPv4/IPv6）
 pub fn extract_client_ip(request: &Request) -> Option<String> {
+    client_ip_from_parts(request.headers(), request.extensions())
+}
+
+/// Same as [`extract_client_ip`] for handlers that only hold request parts.
+pub fn client_ip_from_parts(
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> Option<String> {
     // 1. 优先从 X-Forwarded-For 提取 (取第一个 IP)
-    let raw = request
-        .headers()
+    let raw = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(',').next().unwrap_or(s).trim())
         .or_else(|| {
             // 2. 备选从 X-Real-IP 提取
-            request
-                .headers()
+            headers
                 .get("x-real-ip")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.trim())
@@ -217,8 +223,7 @@ pub fn extract_client_ip(request: &Request) -> Option<String> {
     }
 
     // 3. 最后尝试从 ConnectInfo 获取 (TCP 连接 IP)
-    request
-        .extensions()
+    extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| match info.0.ip() {
             std::net::IpAddr::V6(v6) => {

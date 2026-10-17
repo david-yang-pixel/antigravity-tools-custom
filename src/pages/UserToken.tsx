@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Trash2, RefreshCw, Copy, Activity, User, Settings, Shield, Clock, Users } from 'lucide-react';
+import { Plus, Trash2, RefreshCw, Copy, Activity, User, Settings, Shield, Clock, Users, Mail, UserCog, Hourglass } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { request as invoke } from '../utils/request';
 import { showToast } from '../components/common/ToastContainer';
@@ -9,6 +9,8 @@ import TokenLimitFields from '../components/user-token/TokenLimitFields';
 import { parseQuotaMillions, toQuotaMillions, validTokenLimits } from '../components/user-token/tokenQuota';
 import { fromDateTimeLocal, nowSeconds, toDateTimeLocal } from '../components/user-token/tokenExpiry';
 import { copyToClipboard } from '../utils/clipboard';
+import ModalDialog from '../components/common/ModalDialog';
+import PortalSettingsModal, { portalErrorText } from '../components/user-token/PortalSettingsModal';
 
 interface UserToken {
     id: string;
@@ -29,6 +31,12 @@ interface UserToken {
     last_used_at?: number;
     total_requests: number;
     total_tokens_used: number;
+    owner_user_id?: string | null;
+    /** "admin" = created here; "registered" = self-registered usage-portal account. */
+    source?: 'admin' | 'registered';
+    owner_email?: string | null;
+    account_status?: string | null;
+    pending_activation?: boolean;
 }
 
 interface UserTokenStats {
@@ -36,7 +44,13 @@ interface UserTokenStats {
     active_tokens: number;
     total_users: number;
     today_requests: number;
+    registered_tokens?: number;
+    pending_tokens?: number;
 }
+
+const tokenFilters = ['all', 'admin', 'registered', 'pending'] as const;
+type TokenFilter = typeof tokenFilters[number];
+const isRegistered = (token: UserToken) => token.source === 'registered';
 
 // interface CreateTokenRequest omitted as it's not explicitly used for typing variables
 
@@ -49,6 +63,9 @@ const UserToken: React.FC = () => {
     const [loading, setLoading] = useState(false);
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [creating, setCreating] = useState(false);
+    const [filter, setFilter] = useState<TokenFilter>('all');
+    const [showPortalSettings, setShowPortalSettings] = useState(false);
+    const [deleting, setDeleting] = useState<UserToken | null>(null);
 
     // Edit State
     const [showEditModal, setShowEditModal] = useState(false);
@@ -180,6 +197,27 @@ const UserToken: React.FC = () => {
         }
     };
 
+    // Registered keys delete their account too, so they ask first.
+    const requestDelete = (token: UserToken) => isRegistered(token) ? setDeleting(token) : handleDelete(token.id);
+
+    const accountAction = async (token: UserToken, action: 'enable' | 'disable' | 'revoke' | 'reset') => {
+        const userId = token.owner_user_id;
+        if (!userId) return;
+        try {
+            if (action === 'enable' || action === 'disable') {
+                await invoke('set_portal_account_enabled', { userId, enabled: action === 'enable' });
+            } else if (action === 'revoke') {
+                await invoke('revoke_portal_sessions', { userId });
+            } else {
+                await invoke('send_portal_reset_email', { userId });
+            }
+            showToast(t(`user_token.account_${action}_done`, { email: token.owner_email ?? '' }), 'success');
+            loadData();
+        } catch (e) {
+            showToast(String(e), 'error');
+        }
+    };
+
     const handleEdit = (token: UserToken) => {
         setEditingToken(token);
         setEditUsername(token.username);
@@ -222,11 +260,17 @@ const UserToken: React.FC = () => {
             return;
         }
 
+        // A registered key is on exactly while it has a quota; saving a quota activates it.
+        const editQuota = parseQuotaMillions(editTokenQuota) ?? 0;
+        const registeredEnabled = isRegistered(editingToken) && editingToken.account_status === 'active'
+            ? { enabled: editQuota > 0 } : {};
+
         setUpdating(true);
         try {
             await invoke('update_user_token', {
                 id: editingToken.id,
                 request: {
+                    ...registeredEnabled,
                     username: editUsername,
                     description: editDesc || undefined,
                     max_ips: editMaxIps,
@@ -249,7 +293,7 @@ const UserToken: React.FC = () => {
             loadData();
         } catch (e) {
             console.error('Failed to update token', e);
-            showToast(String(e), 'error');
+            showToast(portalErrorText(t, e), 'error');
         } finally {
             setUpdating(false);
         }
@@ -299,6 +343,10 @@ const UserToken: React.FC = () => {
         return 'text-green-500';
     };
 
+    const matchesFilter = (token: UserToken, item: TokenFilter) =>
+        item === 'all' || (item === 'pending' ? !!token.pending_activation : (token.source ?? 'admin') === item);
+    const visibleTokens = tokens.filter(token => matchesFilter(token, filter));
+
     return (
         <motion.div
             initial={{ opacity: 0, y: 10 }}
@@ -317,6 +365,12 @@ const UserToken: React.FC = () => {
                 <div className="flex items-center gap-2">
                     <a href="/usage" target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 px-2">{t('user_token.portal_link')}</a>
                     <button
+                        onClick={() => setShowPortalSettings(true)}
+                        className="px-3 py-2 hover:bg-gray-100 dark:hover:bg-base-200 rounded-lg text-sm text-gray-600 dark:text-gray-300 flex items-center gap-1.5 transition-colors"
+                    >
+                        <UserCog size={16} />{t('user_token.portal_settings')}
+                    </button>
+                    <button
                         onClick={() => loadData()}
                         className={`p-2 hover:bg-gray-100 dark:hover:bg-base-200 rounded-lg transition-colors ${loading ? 'text-blue-500' : 'text-gray-500'}`}
                         title={t('common.refresh') || 'Refresh'}
@@ -334,7 +388,7 @@ const UserToken: React.FC = () => {
             </div>
 
             {/* Stats Cards Row */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <motion.div
                     whileHover={{ y: -2 }}
                     className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200"
@@ -386,6 +440,32 @@ const UserToken: React.FC = () => {
                     <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats?.today_requests || 0}</div>
                     <div className="text-xs text-gray-500 dark:text-gray-400">{t('user_token.today_requests', { defaultValue: 'Today Requests' })}</div>
                 </motion.div>
+
+                <motion.button
+                    type="button"
+                    whileHover={{ y: -2 }}
+                    onClick={() => setFilter('pending')}
+                    className="text-left bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200"
+                >
+                    <div className="flex items-center justify-between mb-2">
+                        <div className="p-1.5 bg-amber-50 dark:bg-amber-900/20 rounded-md">
+                            <Hourglass className="w-4 h-4 text-amber-500" />
+                        </div>
+                    </div>
+                    <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats?.pending_tokens || 0}</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">{t('user_token.pending_tokens')}</div>
+                </motion.button>
+            </div>
+
+            {/* Source filter */}
+            <div role="group" aria-label={t('user_token.filter_label')} className="flex flex-wrap gap-2 -mb-2">
+                {tokenFilters.map(item => {
+                    const count = item === 'all' ? tokens.length : tokens.filter(token => matchesFilter(token, item)).length;
+                    return <button key={item} type="button" aria-pressed={filter === item} onClick={() => setFilter(item)}
+                        className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${filter === item ? 'bg-blue-500 border-blue-500 text-white' : 'bg-white dark:bg-base-100 border-gray-200 dark:border-base-300 text-gray-600 dark:text-gray-300 hover:border-blue-300'}`}>
+                        {t(`user_token.filter_${item}`)} <span className="opacity-70">{count}</span>
+                    </button>;
+                })}
             </div>
 
             {/* Token List */}
@@ -405,7 +485,7 @@ const UserToken: React.FC = () => {
                     </thead>
                     <tbody className="divide-y divide-gray-50 dark:divide-base-200">
                         <AnimatePresence mode="popLayout">
-                            {tokens.map((token, index) => (
+                            {visibleTokens.map((token, index) => (
                                 <motion.tr
                                     key={token.id}
                                     initial={{ opacity: 0, x: -10 }}
@@ -420,8 +500,16 @@ const UserToken: React.FC = () => {
                                                 {token.username.substring(0, 2).toUpperCase()}
                                             </div>
                                             <div>
-                                                <div className="font-semibold text-gray-900 dark:text-white uppercase tracking-wider text-xs">{token.username}</div>
-                                                <div className="text-[10px] text-gray-500">{token.description || '-'}</div>
+                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                    <span className="font-semibold text-gray-900 dark:text-white uppercase tracking-wider text-xs">{token.username}</span>
+                                                    {isRegistered(token)
+                                                        ? <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">{t('user_token.source_registered')}</span>
+                                                        : <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 dark:bg-base-200 dark:text-gray-400">{t('user_token.source_admin')}</span>}
+                                                    {token.pending_activation && <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">{t('user_token.pending_activation')}</span>}
+                                                    {isRegistered(token) && token.account_status === 'disabled' && <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-300">{t('user_token.account_disabled')}</span>}
+                                                </div>
+                                                {token.owner_email && <div className="text-[11px] text-gray-500 mt-0.5 flex items-center gap-1"><Mail size={10} />{token.owner_email}</div>}
+                                                {!isRegistered(token) && <div className="text-[10px] text-gray-500">{token.description || '-'}</div>}
                                                 <div className="text-[10px] text-blue-600 mt-1" title={(token.allowed_models ?? []).join(', ')}>
                                                     {token.allowed_models?.length ? t('user_token.models_selected', { count: token.allowed_models.length }) : t('user_token.all_models')}
                                                 </div>
@@ -463,8 +551,9 @@ const UserToken: React.FC = () => {
                                     <td>
                                         <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">{token.total_requests} <span className="text-[10px] font-normal text-gray-400">reqs</span></div>
                                         <div className="text-[10px] text-gray-400 mt-0.5">
-                                            {toQuotaMillions(token.total_tokens_used)} / {token.token_quota > 0 ? toQuotaMillions(token.token_quota) : t('user_token.unlimited')} {t('user_token.million_tokens')}
+                                            {toQuotaMillions(token.total_tokens_used)} / {token.token_quota > 0 || isRegistered(token) ? toQuotaMillions(token.token_quota) : t('user_token.unlimited')} {t('user_token.million_tokens')}
                                         </div>
+                                        {token.pending_activation && <div className="text-xs mt-1 text-amber-600">{t('user_token.quota_not_activated')}</div>}
                                         {token.token_quota > 0 && (
                                             <div className={`text-xs mt-1 ${token.total_tokens_used >= token.token_quota ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
                                                 {token.total_tokens_used >= token.token_quota
@@ -492,7 +581,14 @@ const UserToken: React.FC = () => {
                                         {formatTime(token.created_at)}
                                     </td>
                                     <td className="text-right">
-                                        <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <div className="flex justify-end items-center gap-1">
+                                            {token.pending_activation && <button
+                                                onClick={() => handleEdit(token)}
+                                                className="px-2 py-1 rounded-md text-[11px] font-medium bg-amber-500 hover:bg-amber-600 text-white transition-colors"
+                                            >
+                                                {t('user_token.activate')}
+                                            </button>}
+                                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                             <button
                                                 onClick={() => handleEdit(token)}
                                                 className="p-1.5 hover:bg-gray-100 dark:hover:bg-base-200 rounded-lg text-gray-500 hover:text-blue-500 transition-colors"
@@ -511,17 +607,34 @@ const UserToken: React.FC = () => {
                                                     <li><a className="text-xs py-2" onClick={() => handleRenew(token.id, 'month')}>{t('user_token.expires_month', { defaultValue: '1 Month' })}</a></li>
                                                 </ul>
                                             </div>
+                                            {isRegistered(token) && <div className="dropdown dropdown-end">
+                                                <label tabIndex={0} title={t('user_token.account_actions')} className="p-1.5 hover:bg-gray-100 dark:hover:bg-base-200 rounded-lg text-gray-500 hover:text-blue-500 transition-colors inline-block cursor-pointer">
+                                                    <UserCog size={14} />
+                                                </label>
+                                                <ul tabIndex={0} className="dropdown-content z-[10] menu p-2 shadow-xl bg-white dark:bg-base-100 rounded-xl w-44 border border-gray-100 dark:border-base-200 mt-1">
+                                                    <div className="px-3 py-1.5 text-[10px] font-bold text-gray-400 uppercase tracking-widest">{t('user_token.account_actions')}</div>
+                                                    {token.account_status === 'disabled'
+                                                        ? <li><a className="text-xs py-2" onClick={() => accountAction(token, 'enable')}>{t('user_token.account_enable')}</a></li>
+                                                        : <li><a className="text-xs py-2" onClick={() => accountAction(token, 'disable')}>{t('user_token.account_disable')}</a></li>}
+                                                    <li><a className="text-xs py-2" onClick={() => accountAction(token, 'revoke')}>{t('user_token.account_revoke')}</a></li>
+                                                    {token.account_status !== 'disabled' && <li><a className="text-xs py-2" onClick={() => accountAction(token, 'reset')}>{t('user_token.account_reset')}</a></li>}
+                                                </ul>
+                                            </div>}
                                             <button
-                                                onClick={() => handleDelete(token.id)}
+                                                onClick={() => requestDelete(token)}
                                                 className="p-1.5 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg text-gray-400 hover:text-red-500 transition-colors"
                                             >
                                                 <Trash2 size={14} />
                                             </button>
+                                            </div>
                                         </div>
                                     </td>
                                 </motion.tr>
                             ))}
                         </AnimatePresence>
+                        {tokens.length > 0 && visibleTokens.length === 0 && (
+                            <tr><td colSpan={8} className="py-12 text-center text-sm text-gray-400">{t('user_token.filter_empty')}</td></tr>
+                        )}
                         {tokens.length === 0 && !loading && (
                             <tr>
                                 <td colSpan={8} className="py-20">
@@ -685,6 +798,12 @@ const UserToken: React.FC = () => {
                 <div className="modal modal-open">
                     <div className="modal-box">
                         <h3 className="font-bold text-lg mb-4">{t('user_token.edit_title', { defaultValue: 'Edit Token' })}</h3>
+                        {isRegistered(editingToken) && (
+                            <div className={`mb-4 rounded-lg px-3 py-2.5 text-xs ${editingToken.pending_activation ? 'bg-amber-50 text-amber-800 dark:bg-amber-900/20 dark:text-amber-200' : 'bg-blue-50 text-blue-800 dark:bg-blue-900/20 dark:text-blue-200'}`}>
+                                <div className="flex items-center gap-1.5 font-medium"><Mail size={12} />{editingToken.owner_email} · {t(editingToken.account_status === 'disabled' ? 'user_token.account_disabled' : 'user_token.source_registered')}</div>
+                                <p className="mt-1">{t(editingToken.pending_activation ? 'user_token.activate_hint' : 'user_token.registered_edit_hint')}</p>
+                            </div>
+                        )}
 
                         <div className="form-control w-full mb-3">
                             <label className="label">
@@ -775,6 +894,7 @@ const UserToken: React.FC = () => {
                             prefix="edit" maxConcurrency={editMaxConcurrency} tokenQuota={editTokenQuota}
                             onMaxConcurrencyChange={setEditMaxConcurrency} onTokenQuotaChange={setEditTokenQuota}
                             usedTokens={editingToken?.total_tokens_used}
+                            quotaHint={isRegistered(editingToken) ? t('user_token.registered_quota_hint') : undefined}
                         />
 
                         <div className="form-control w-full mb-3">
@@ -817,6 +937,18 @@ const UserToken: React.FC = () => {
                     </div>
                 </div>
             )}
+            <PortalSettingsModal open={showPortalSettings} models={modelChoices} modelLoadError={modelLoadError}
+                onClose={() => { setShowPortalSettings(false); loadData(); }} />
+            <ModalDialog
+                isOpen={deleting !== null}
+                title={t('user_token.delete_registered_title')}
+                message={t('user_token.delete_registered_message', { email: deleting?.owner_email ?? '' })}
+                type="confirm"
+                isDestructive
+                confirmText={t('common.delete')}
+                onCancel={() => setDeleting(null)}
+                onConfirm={() => { const target = deleting; setDeleting(null); if (target) void handleDelete(target.id); }}
+            />
         </motion.div>
     );
 };
