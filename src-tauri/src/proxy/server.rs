@@ -1026,6 +1026,27 @@ impl AxumServer {
                 "/user-tokens/:id",
                 delete(admin_delete_user_token).patch(admin_update_user_token),
             )
+            // Usage-portal accounts and registration settings
+            .route(
+                "/user-accounts/:userId/status",
+                post(admin_set_portal_account_enabled),
+            )
+            .route(
+                "/user-accounts/:userId/revoke-sessions",
+                post(admin_revoke_portal_sessions),
+            )
+            .route(
+                "/user-accounts/:userId/send-reset",
+                post(admin_send_portal_reset_email),
+            )
+            .route(
+                "/portal-settings",
+                get(admin_get_portal_settings).post(admin_save_portal_settings),
+            )
+            .route(
+                "/portal-settings/test-email",
+                post(admin_send_portal_test_email),
+            )
             // OAuth (Web) - Admin 接口
             .route("/auth/url", get(admin_prepare_oauth_url_web))
             // 应用管理特定鉴权层 (强制校验)
@@ -2511,11 +2532,89 @@ async fn admin_update_user_token(
     crate::commands::user_token::update_user_token(id, payload)
         .await
         .map_err(|e| {
+            let status = if e.starts_with(crate::modules::user_token_db::OWNED_KEY_REQUIRES_QUOTA) {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(ErrorResponse { error: e }))
+        })?;
+    Ok(StatusCode::OK)
+}
+
+// --- Usage-portal account handlers ---
+
+/// Portal admin operations fail on bad input or SMTP problems, not server faults.
+fn portal_admin_error(error: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))
+}
+
+#[derive(Deserialize)]
+struct PortalAccountStatusRequest {
+    enabled: bool,
+}
+
+async fn admin_set_portal_account_enabled(
+    Path(user_id): Path<String>,
+    Json(payload): Json<PortalAccountStatusRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::user_token::set_portal_account_enabled(user_id, payload.enabled)
+        .await
+        .map_err(portal_admin_error)?;
+    Ok(StatusCode::OK)
+}
+
+async fn admin_revoke_portal_sessions(
+    Path(user_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let revoked = crate::commands::user_token::revoke_portal_sessions(user_id)
+        .await
+        .map_err(portal_admin_error)?;
+    Ok(Json(revoked))
+}
+
+async fn admin_send_portal_reset_email(
+    Path(user_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::user_token::send_portal_reset_email(user_id)
+        .await
+        .map_err(portal_admin_error)?;
+    Ok(StatusCode::OK)
+}
+
+async fn admin_get_portal_settings() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
+{
+    let view = crate::commands::user_token::get_portal_settings()
+        .await
+        .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse { error: e }),
             )
         })?;
+    Ok(Json(view))
+}
+
+async fn admin_save_portal_settings(
+    Json(payload): Json<crate::modules::portal_settings::PortalSettingsUpdate>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let view = crate::commands::user_token::save_portal_settings(payload)
+        .await
+        .map_err(portal_admin_error)?;
+    Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+struct PortalTestEmailRequest {
+    to: String,
+}
+
+async fn admin_send_portal_test_email(
+    Json(payload): Json<PortalTestEmailRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::user_token::send_portal_test_email(payload.to)
+        .await
+        .map_err(portal_admin_error)?;
     Ok(StatusCode::OK)
 }
 

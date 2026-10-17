@@ -182,6 +182,12 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'renew_user_token': { url: '/api/user-tokens/:id/renew', method: 'POST' },
   'delete_user_token': { url: '/api/user-tokens/:id', method: 'DELETE' },
   'update_user_token': { url: '/api/user-tokens/:id', method: 'PATCH' },
+  'set_portal_account_enabled': { url: '/api/user-accounts/:userId/status', method: 'POST' },
+  'revoke_portal_sessions': { url: '/api/user-accounts/:userId/revoke-sessions', method: 'POST' },
+  'send_portal_reset_email': { url: '/api/user-accounts/:userId/send-reset', method: 'POST' },
+  'get_portal_settings': { url: '/api/portal-settings', method: 'GET' },
+  'save_portal_settings': { url: '/api/portal-settings', method: 'POST' },
+  'send_portal_test_email': { url: '/api/portal-settings/test-email', method: 'POST' },
 
   // Proxy Pool (Web Mode Fix)
   'get_proxy_pool_config': { url: '/api/proxy/pool/config', method: 'GET' },

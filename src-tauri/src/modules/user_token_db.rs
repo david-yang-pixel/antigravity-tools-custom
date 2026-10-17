@@ -31,6 +31,63 @@ pub struct UserToken {
     pub last_used_at: Option<i64>,
     pub total_requests: i64,
     pub total_tokens_used: i64,
+    /// Usage-portal account that registered this key; `None` for administrator keys.
+    #[serde(default)]
+    pub owner_user_id: Option<String>,
+}
+
+impl UserToken {
+    /// Administrator keys use 0 as "unlimited"; a registered account's key never
+    /// gets that shortcut, so its quota of 0 means no usage at all.
+    pub fn has_quota_limit(&self) -> bool {
+        self.token_quota > 0 || self.owner_user_id.is_some()
+    }
+
+    pub fn quota_exhausted(&self) -> bool {
+        self.has_quota_limit() && self.total_tokens_used >= self.token_quota
+    }
+
+    pub fn remaining_tokens(&self) -> Option<i64> {
+        self.has_quota_limit()
+            .then(|| (self.token_quota - self.total_tokens_used).max(0))
+    }
+}
+
+/// Inputs for a new key; administrators and portal registration share this path.
+pub(crate) struct NewToken {
+    pub username: String,
+    pub description: Option<String>,
+    pub expires_type: String,
+    pub custom_expires_at: Option<i64>,
+    pub max_ips: i32,
+    pub curfew_start: Option<String>,
+    pub curfew_end: Option<String>,
+    pub max_concurrency: i32,
+    pub token_quota: i64,
+    pub allowed_models: Vec<String>,
+    pub owner_user_id: Option<String>,
+    pub enabled: bool,
+}
+
+/// Database-level rule: a registered account's key can only be enabled while it has
+/// a positive quota and its account is active. Enforced by triggers so every write
+/// path (admin edit, renewal, older binaries after a rollback) fails closed.
+const OWNED_KEY_ENABLE_BLOCKED: &str = "NEW.owner_user_id IS NOT NULL AND NEW.enabled <> 0 AND \
+    (NEW.token_quota <= 0 OR NOT EXISTS (SELECT 1 FROM portal_users p \
+    WHERE p.id = NEW.owner_user_id AND p.status = 'active'))";
+pub const OWNED_KEY_REQUIRES_QUOTA: &str = "registered_token_requires_quota";
+
+fn map_write_error(context: &str, error: rusqlite::Error) -> String {
+    let text = error.to_string();
+    if text.contains(OWNED_KEY_REQUIRES_QUOTA) {
+        format!("{OWNED_KEY_REQUIRES_QUOTA}: a registered user's token needs a quota above 0 and an active account before it can be enabled")
+    } else {
+        format!("{context}: {text}")
+    }
+}
+
+pub(crate) fn generate_token_value() -> String {
+    format!("sk-{}", Uuid::new_v4().simple())
 }
 
 /// 令牌 IP 绑定结构体
@@ -142,6 +199,7 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
             "token_quota",
             "INTEGER NOT NULL DEFAULT 0 CHECK(token_quota >= 0)",
         ),
+        ("owner_user_id", "TEXT"),
     ] {
         let exists: bool = conn
             .query_row(
@@ -158,6 +216,19 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
             .map_err(|e| format!("Failed to migrate {column}: {e}"))?;
         }
     }
+
+    crate::modules::portal_account::migrate(&conn)?;
+    conn.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS user_tokens_owned_key_insert;
+         DROP TRIGGER IF EXISTS user_tokens_owned_key_update;
+         CREATE TRIGGER user_tokens_owned_key_insert BEFORE INSERT ON user_tokens
+         WHEN {OWNED_KEY_ENABLE_BLOCKED}
+         BEGIN SELECT RAISE(ABORT, '{OWNED_KEY_REQUIRES_QUOTA}'); END;
+         CREATE TRIGGER user_tokens_owned_key_update BEFORE UPDATE ON user_tokens
+         WHEN {OWNED_KEY_ENABLE_BLOCKED}
+         BEGIN SELECT RAISE(ABORT, '{OWNED_KEY_REQUIRES_QUOTA}'); END;"
+    ))
+    .map_err(|e| format!("Failed to install registered token guard: {e}"))?;
 
     // 创建 token_ip_bindings 表
     conn.execute(
@@ -507,41 +578,61 @@ pub fn create_token(
     token_quota: i64,
     allowed_models: Vec<String>,
 ) -> Result<UserToken, String> {
-    validate_limits(max_concurrency, token_quota)?;
-    let allowed_models = normalize_allowed_models(allowed_models)?;
     let conn = connect_db()?;
-    let id = Uuid::new_v4().to_string();
-    let token = format!("sk-{}", Uuid::new_v4().to_string().replace("-", ""));
+    insert_token(
+        &conn,
+        NewToken {
+            username,
+            description,
+            expires_type,
+            custom_expires_at,
+            max_ips,
+            curfew_start,
+            curfew_end,
+            max_concurrency,
+            token_quota,
+            allowed_models,
+            owner_user_id: None,
+            enabled: true,
+        },
+    )
+}
+
+pub(crate) fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, String> {
+    validate_limits(spec.max_concurrency, spec.token_quota)?;
+    let allowed_models = normalize_allowed_models(spec.allowed_models)?;
     let now = Utc::now().timestamp();
-    let expires_at = resolve_expires_at(&expires_type, custom_expires_at, now)?;
+    let expires_at = resolve_expires_at(&spec.expires_type, spec.custom_expires_at, now)?;
 
     let user_token = UserToken {
-        id: id.clone(),
-        token: token.clone(),
-        username: username.clone(),
-        description: description.clone(),
-        enabled: true,
-        expires_type: expires_type.clone(),
+        id: Uuid::new_v4().to_string(),
+        token: generate_token_value(),
+        username: spec.username,
+        description: spec.description,
+        enabled: spec.enabled,
+        expires_type: spec.expires_type,
         expires_at,
-        max_ips,
-        max_concurrency,
-        token_quota,
+        max_ips: spec.max_ips,
+        max_concurrency: spec.max_concurrency,
+        token_quota: spec.token_quota,
         allowed_models,
-        curfew_start: curfew_start.clone(),
-        curfew_end: curfew_end.clone(),
+        curfew_start: spec.curfew_start,
+        curfew_end: spec.curfew_end,
         created_at: now,
         updated_at: now,
         last_used_at: None,
         total_requests: 0,
         total_tokens_used: 0,
+        owner_user_id: spec.owner_user_id,
     };
 
     conn.execute(
         "INSERT INTO user_tokens (
             id, token, username, description, enabled, expires_type, expires_at, max_ips,
             curfew_start, curfew_end,
-            created_at, updated_at, total_requests, total_tokens_used, max_concurrency, token_quota, allowed_models
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            created_at, updated_at, total_requests, total_tokens_used, max_concurrency, token_quota, allowed_models,
+            owner_user_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             user_token.id,
             user_token.token,
@@ -560,11 +651,46 @@ pub fn create_token(
             user_token.max_concurrency,
             user_token.token_quota,
             serde_json::to_string(&user_token.allowed_models).map_err(|e| e.to_string())?,
+            user_token.owner_user_id,
         ],
     )
-    .map_err(|e| format!("Failed to insert user token: {}", e))?;
+    .map_err(|e| map_write_error("Failed to insert user token", e))?;
 
     Ok(user_token)
+}
+
+/// Lenient row mapping: columns added by migrations may still be NULL on old rows.
+fn token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserToken> {
+    Ok(UserToken {
+        id: row.get("id")?,
+        token: row.get("token")?,
+        username: row.get("username")?,
+        description: row.get("description")?,
+        enabled: row.get("enabled").unwrap_or(true),
+        expires_type: row
+            .get("expires_type")
+            .unwrap_or_else(|_| "never".to_string()),
+        expires_at: row.get("expires_at").unwrap_or(None),
+        max_ips: row.get("max_ips").unwrap_or(0),
+        max_concurrency: row.get("max_concurrency")?,
+        token_quota: row.get("token_quota")?,
+        allowed_models: read_allowed_models(row)?,
+        curfew_start: row.get("curfew_start").unwrap_or(None),
+        curfew_end: row.get("curfew_end").unwrap_or(None),
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        last_used_at: row.get("last_used_at").unwrap_or(None),
+        total_requests: row.get("total_requests").unwrap_or(0),
+        total_tokens_used: row.get("total_tokens_used").unwrap_or(0),
+        owner_user_id: row.get("owner_user_id")?,
+    })
+}
+
+fn query_token(sql: &str, value: &str) -> Result<Option<UserToken>, String> {
+    let conn = connect_db()?;
+    conn.query_row(sql, params![value], token_from_row)
+        .optional()
+        .map_err(|e| format!("Failed to query token: {}", e))
 }
 
 /// 列出所有令牌
@@ -575,28 +701,7 @@ pub fn list_tokens() -> Result<Vec<UserToken>, String> {
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
     let token_iter = stmt
-        .query_map([], |row| {
-            Ok(UserToken {
-                id: row.get("id")?,
-                token: row.get("token")?,
-                username: row.get("username")?,
-                description: row.get("description")?,
-                enabled: row.get("enabled").unwrap_or(true), // 防御性默认值
-                expires_type: row.get("expires_type").unwrap_or("never".to_string()), // 防御性默认值
-                expires_at: row.get("expires_at").unwrap_or(None),
-                max_ips: row.get("max_ips").unwrap_or(0),
-                max_concurrency: row.get("max_concurrency")?,
-                token_quota: row.get("token_quota")?,
-                allowed_models: read_allowed_models(row)?,
-                curfew_start: row.get("curfew_start").unwrap_or(None),
-                curfew_end: row.get("curfew_end").unwrap_or(None),
-                created_at: row.get("created_at")?,
-                updated_at: row.get("updated_at")?,
-                last_used_at: row.get("last_used_at").unwrap_or(None),
-                total_requests: row.get("total_requests").unwrap_or(0),
-                total_tokens_used: row.get("total_tokens_used").unwrap_or(0),
-            })
-        })
+        .query_map([], token_from_row)
         .map_err(|e| format!("Failed to query tokens: {}", e))?;
 
     let mut tokens = Vec::new();
@@ -609,74 +714,20 @@ pub fn list_tokens() -> Result<Vec<UserToken>, String> {
 
 /// 获取单个令牌信息
 pub fn get_token_by_id(id: &str) -> Result<Option<UserToken>, String> {
-    let conn = connect_db()?;
-    let mut stmt = conn
-        .prepare("SELECT * FROM user_tokens WHERE id = ?1")
-        .map_err(|e| format!("Failed to prepare query: {}", e))?;
-
-    let token = stmt
-        .query_row(params![id], |row| {
-            Ok(UserToken {
-                id: row.get("id")?,
-                token: row.get("token")?,
-                username: row.get("username")?,
-                description: row.get("description")?,
-                enabled: row.get("enabled")?,
-                expires_type: row.get("expires_type")?,
-                expires_at: row.get("expires_at")?,
-                max_ips: row.get("max_ips")?,
-                max_concurrency: row.get("max_concurrency")?,
-                token_quota: row.get("token_quota")?,
-                allowed_models: read_allowed_models(row)?,
-                curfew_start: row.get("curfew_start").unwrap_or(None),
-                curfew_end: row.get("curfew_end").unwrap_or(None),
-                created_at: row.get("created_at")?,
-                updated_at: row.get("updated_at")?,
-                last_used_at: row.get("last_used_at")?,
-                total_requests: row.get("total_requests")?,
-                total_tokens_used: row.get("total_tokens_used")?,
-            })
-        })
-        .optional()
-        .map_err(|e| format!("Failed to query token: {}", e))?;
-
-    Ok(token)
+    query_token("SELECT * FROM user_tokens WHERE id = ?1", id)
 }
 
 /// 根据 Token 值获取令牌信息
 pub fn get_token_by_value(token: &str) -> Result<Option<UserToken>, String> {
-    let conn = connect_db()?;
-    let mut stmt = conn
-        .prepare("SELECT * FROM user_tokens WHERE token = ?1")
-        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+    query_token("SELECT * FROM user_tokens WHERE token = ?1", token)
+}
 
-    let token = stmt
-        .query_row(params![token], |row| {
-            Ok(UserToken {
-                id: row.get("id")?,
-                token: row.get("token")?,
-                username: row.get("username")?,
-                description: row.get("description")?,
-                enabled: row.get("enabled")?,
-                expires_type: row.get("expires_type")?,
-                expires_at: row.get("expires_at")?,
-                max_ips: row.get("max_ips")?,
-                max_concurrency: row.get("max_concurrency")?,
-                token_quota: row.get("token_quota")?,
-                allowed_models: read_allowed_models(row)?,
-                curfew_start: row.get("curfew_start").unwrap_or(None),
-                curfew_end: row.get("curfew_end").unwrap_or(None),
-                created_at: row.get("created_at")?,
-                updated_at: row.get("updated_at")?,
-                last_used_at: row.get("last_used_at")?,
-                total_requests: row.get("total_requests")?,
-                total_tokens_used: row.get("total_tokens_used")?,
-            })
-        })
-        .optional()
-        .map_err(|e| format!("Failed to query token: {}", e))?;
-
-    Ok(token)
+/// The single key owned by a usage-portal account.
+pub fn get_token_by_owner(user_id: &str) -> Result<Option<UserToken>, String> {
+    query_token(
+        "SELECT * FROM user_tokens WHERE owner_user_id = ?1",
+        user_id,
+    )
 }
 
 /// 更新令牌状态/备注等
@@ -778,7 +829,7 @@ pub fn update_token(
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
 
     conn.execute(&query, params_refs.as_slice())
-        .map_err(|e| format!("Failed to update user token: {}", e))?;
+        .map_err(|e| map_write_error("Failed to update user token", e))?;
 
     Ok(())
 }
@@ -790,20 +841,45 @@ pub fn renew_token(id: &str, expires_type: &str) -> Result<(), String> {
     let expires_at = resolve_expires_at(expires_type, None, now)?;
     let conn = connect_db()?;
 
+    // Renewal re-enables administrator keys; a registered key is re-enabled only when
+    // the guard trigger would allow it, so renewing a pending key just extends it.
     conn.execute(
-        "UPDATE user_tokens SET expires_type = ?1, expires_at = ?2, updated_at = ?3, enabled = 1 WHERE id = ?4",
+        "UPDATE user_tokens SET expires_type = ?1, expires_at = ?2, updated_at = ?3,
+            enabled = CASE WHEN owner_user_id IS NULL OR (token_quota > 0 AND EXISTS (
+                SELECT 1 FROM portal_users p WHERE p.id = owner_user_id AND p.status = 'active'))
+            THEN 1 ELSE enabled END
+         WHERE id = ?4",
         params![expires_type, expires_at, now, id],
-    ).map_err(|e| format!("Failed to renew token: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to renew token: {}", e))?;
 
     Ok(())
 }
 
 /// 删除令牌
+/// Deleting a registered user's key also deletes the account, since each account
+/// owns exactly one key; the email can then register again.
 pub fn delete_token(id: &str) -> Result<(), String> {
-    let conn = connect_db()?;
-    conn.execute("DELETE FROM user_tokens WHERE id = ?1", params![id])
+    let mut conn = connect_db()?;
+    let tx = conn
+        .transaction()
         .map_err(|e| format!("Failed to delete token: {}", e))?;
-    Ok(())
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT owner_user_id FROM user_tokens WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to delete token: {}", e))?
+        .flatten();
+    tx.execute("DELETE FROM user_tokens WHERE id = ?1", params![id])
+        .map_err(|e| format!("Failed to delete token: {}", e))?;
+    if let Some(user_id) = owner {
+        crate::modules::portal_account::purge_account(&tx, &user_id)?;
+    }
+    tx.commit()
+        .map_err(|e| format!("Failed to delete token: {}", e))
 }
 
 /// 获取令牌的所有 IP 绑定

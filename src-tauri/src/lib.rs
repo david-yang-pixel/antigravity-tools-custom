@@ -843,6 +843,12 @@ pub fn run() {
             commands::user_token::renew_user_token,
             commands::user_token::get_token_ip_bindings,
             commands::user_token::get_user_token_summary,
+            commands::user_token::set_portal_account_enabled,
+            commands::user_token::revoke_portal_sessions,
+            commands::user_token::send_portal_reset_email,
+            commands::user_token::get_portal_settings,
+            commands::user_token::save_portal_settings,
+            commands::user_token::send_portal_test_email,
             commands::query_transit_info,
             // Patch commands
             commands::patch_agy_binary,

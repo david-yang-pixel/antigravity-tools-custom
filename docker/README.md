@@ -148,6 +148,14 @@ docker build --build-arg USE_MIRROR=true -t antigravity-manager:latest -f docker
 | `LOG_LEVEL` | `info` | 日志等級 (debug, info, warn, error) |
 | `ABV_DIST_PATH` | `/app/dist` | 前端靜態資源託管路徑 (Dockerfile 已內置) |
 | `ABV_PUBLIC_URL` | - | 用於遠程 OAuth 回調的公網 URL (可選) |
+| `ABV_PORTAL_REGISTRATION` | `false` | 用量中心是否開放郵箱註冊 (`true` / `false`)。註冊的帳號自帶一個額度為 0 的 Token，需管理員開通 |
+| `ABV_PORTAL_EMAIL_DOMAINS` | - | 允許註冊的郵箱網域，逗號分隔（含子網域）；留空不限制 |
+| `ABV_SMTP_HOST` / `ABV_SMTP_PORT` | - / `465` | 驗證碼郵件的 SMTP 伺服器與連接埠 |
+| `ABV_SMTP_SECURITY` | `tls` | `tls`（465）、`starttls`（587）或 `none`（僅限內網中繼） |
+| `ABV_SMTP_USERNAME` / `ABV_SMTP_PASSWORD` | - | SMTP 登入帳號與密碼（授權碼） |
+| `ABV_SMTP_FROM` / `ABV_SMTP_FROM_NAME` | - | 寄件地址與寄件者名稱 |
+
+> 以上用量中心設定也可以在管理後台「用戶 Token → 註冊設置」中修改，保存在數據目錄的 `portal_settings.json`；設置了環境變量的欄位以環境變量為準，後台顯示為鎖定。反向代理（如 Nginx）請以 `proxy_set_header X-Forwarded-For $remote_addr;` 覆蓋客戶端 IP，並傳遞 `X-Forwarded-Proto`，以確保登入限流與 Cookie 的 `Secure` 屬性正確生效。
 
 ## 📂 數據持久化
 請務必將宿主機目錄掛載至容器內的 `/root/.antigravity_tools`，否則賬號和配置在容器重啟後會丟失。
