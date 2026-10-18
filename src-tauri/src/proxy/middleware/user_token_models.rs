@@ -39,9 +39,24 @@ pub fn is_model_list(request: &Request) -> bool {
         )
 }
 
-pub async fn enforce(mut request: Request, allowed: &[String]) -> Result<Request, Response> {
-    if allowed.is_empty() || is_model_list(&request) {
-        return Ok(request);
+/// Exact allowlist check for a model read by [`requested_model`].
+pub fn ensure_allowed(allowed: &[String], model: Option<&str>) -> Result<(), Response> {
+    match model {
+        Some(model) if !allowed.is_empty() && !allowed.iter().any(|m| m == model) => Err(error(
+            StatusCode::FORBIDDEN,
+            "model_not_allowed",
+            "This API key is not permitted to use the requested model.",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The one model a request targets, read without consuming it. `None` for routes
+/// that use no model (model lists, telemetry); a request whose model cannot be
+/// determined is rejected so per-model policies cannot be bypassed.
+pub async fn requested_model(mut request: Request) -> Result<(Request, Option<String>), Response> {
+    if is_model_list(&request) {
+        return Ok((request, None));
     }
     if request.headers().get(header::UPGRADE).is_some() {
         // WebSocket frames can switch models after the HTTP handshake. Do not
@@ -58,7 +73,7 @@ pub async fn enforce(mut request: Request, allowed: &[String]) -> Result<Request
         path.as_str(),
         "/v1/api/event_logging" | "/v1/api/event_logging/batch"
     ) {
-        return Ok(request);
+        return Ok((request, None));
     }
     let model = if path.starts_with("/v1beta/models/") || request.method() == Method::GET {
         let (mut parts, body) = request.into_parts();
@@ -120,14 +135,7 @@ pub async fn enforce(mut request: Request, allowed: &[String]) -> Result<Request
         request = Request::from_parts(parts, Body::from(bytes));
         model
     };
-    if !allowed.contains(&model) {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "model_not_allowed",
-            "This API key is not permitted to use the requested model.",
-        ));
-    }
-    Ok(request)
+    Ok((request, Some(model)))
 }
 
 pub async fn filter_model_list(response: Response, allowed: &[String]) -> Response {
@@ -177,8 +185,12 @@ mod tests {
     };
     use tower::ServiceExt;
     async fn policy(request: Request, next: Next) -> Response {
-        match enforce(request, &["allowed-model".into()]).await {
-            Ok(r) => next.run(r).await,
+        let (request, model) = match requested_model(request).await {
+            Ok(resolved) => resolved,
+            Err(r) => return r,
+        };
+        match ensure_allowed(&["allowed-model".into()], model.as_deref()) {
+            Ok(()) => next.run(request).await,
             Err(r) => r,
         }
     }

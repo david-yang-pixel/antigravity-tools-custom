@@ -2,7 +2,7 @@
 //! email account (session cookie). Ownership always derives from the credential;
 //! no caller-supplied token ID is ever used and no administrator DTO is returned.
 use crate::modules::portal_account::{self as accounts, CodeDelivery, CodePurpose, PortalError};
-use crate::modules::{portal_mail, portal_settings, user_token_db as db};
+use crate::modules::{billing, portal_mail, portal_settings, user_token_db as db};
 use crate::proxy::server::AppState;
 use axum::extract::{FromRequestParts, Query, State};
 use axum::http::request::Parts;
@@ -33,12 +33,23 @@ struct UsageOverview {
     total_tokens_used: i64,
     remaining_tokens: Option<i64>,
     total_requests: i64,
+    /// Prepaid balance in micro-yuan; absent when the key is not billed.
+    balance_micros: Option<i64>,
     allowed_models: Vec<String>,
     available_models: Vec<String>,
+    /// Price of each available model that has one; the others are free.
+    model_prices: Vec<PortalModelPrice>,
     logs: db::UsageLogPage,
     daily: Vec<db::UsagePeriod>,
     weekly: Vec<db::UsagePeriod>,
     models: Vec<db::ModelUsage>,
+}
+
+#[derive(Serialize)]
+struct PortalModelPrice {
+    model: String,
+    #[serde(flatten)]
+    price: billing::Price,
 }
 
 #[derive(Default, Deserialize)]
@@ -283,7 +294,23 @@ async fn overview(
         .await;
         data.available_models = permitted_catalog(catalog, &data.allowed_models);
     }
-    render(result)
+    render(result.and_then(|mut data| {
+        data.model_prices = priced_models(&data.available_models)?;
+        Ok(data)
+    }))
+}
+
+fn priced_models(models: &[String]) -> Result<Vec<PortalModelPrice>, StatusCode> {
+    let rules = billing::load_prices().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(models
+        .iter()
+        .filter_map(|model| {
+            billing::match_price(&rules, model).map(|rule| PortalModelPrice {
+                model: model.clone(),
+                price: rule.price.clone(),
+            })
+        })
+        .collect())
 }
 
 fn permitted_catalog(catalog: Vec<String>, allowed: &[String]) -> Vec<String> {
@@ -359,7 +386,9 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
         total_tokens_used: token.total_tokens_used,
         remaining_tokens: token.remaining_tokens(),
         total_requests: token.total_requests,
+        balance_micros: token.balance_micros,
         available_models: token.allowed_models.clone(),
+        model_prices: Vec::new(),
         username: token.username,
         allowed_models: token.allowed_models,
         logs,
@@ -808,7 +837,9 @@ mod tests {
         assert_eq!(me["account_email"], email.as_str());
         assert_eq!(me["pending_activation"], true);
         assert_eq!(me["token_quota"], 0);
-        assert_eq!(me["remaining_tokens"], 0);
+        // Registered keys are billed from a balance instead of a token quota.
+        assert_eq!(me["balance_micros"], 0);
+        assert!(me["remaining_tokens"].is_null());
         let (status, _) = call("GET", "/api/token-portal/me", None, Some(&token.token)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 

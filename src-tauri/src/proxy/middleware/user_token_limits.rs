@@ -30,6 +30,9 @@ static ACTIVE: Lazy<Mutex<HashMap<String, KeyState>>> = Lazy::new(|| Mutex::new(
 #[derive(Debug)]
 pub struct UserTokenPermit {
     token_id: String,
+    /// The model admission resolved (decoded route or body); settlement bills this
+    /// one so the charge always matches what was admitted.
+    model: std::sync::OnceLock<String>,
 }
 
 impl UserTokenPermit {
@@ -45,7 +48,12 @@ impl UserTokenPermit {
         key.active += 1;
         Ok(Arc::new(Self {
             token_id: token_id.to_owned(),
+            model: std::sync::OnceLock::new(),
         }))
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.get().map(String::as_str)
     }
 
     /// Fail closed if accounting cannot be persisted; never silently grant free usage.
@@ -72,6 +80,7 @@ impl Drop for UserTokenPermit {
 enum LimitError {
     Concurrency,
     Quota,
+    InsufficientBalance,
     AccountingUnavailable,
 }
 impl IntoResponse for LimitError {
@@ -79,6 +88,7 @@ impl IntoResponse for LimitError {
         let (status, code, message) = match self {
             Self::Concurrency => (StatusCode::TOO_MANY_REQUESTS, "concurrency_limit_exceeded", "This API key has reached its concurrent request limit. Retry after an active request finishes."),
             Self::Quota => (StatusCode::TOO_MANY_REQUESTS, "token_quota_exhausted", "This API key has exhausted its lifetime token quota. Contact the administrator to increase it."),
+            Self::InsufficientBalance => (StatusCode::PAYMENT_REQUIRED, "insufficient_balance", "This API key's balance is too low for the requested model. Top up your balance to continue."),
             Self::AccountingUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "token_accounting_unavailable", "Token usage accounting is unavailable. Contact the administrator."),
         };
         (
@@ -111,7 +121,7 @@ pub async fn user_token_limits_middleware(mut request: Request, next: Next) -> R
         return LimitError::Quota.into_response();
     }
     if request.headers().contains_key(axum::http::header::UPGRADE)
-        && (token.max_concurrency > 0 || token.has_quota_limit())
+        && (token.max_concurrency > 0 || token.has_quota_limit() || token.is_billed())
     {
         // The legacy WebSocket handler calls generation handlers directly, bypassing
         // per-frame admission and usage settlement. Restricted keys require HTTP/SSE.
@@ -129,10 +139,38 @@ pub async fn user_token_limits_middleware(mut request: Request, next: Next) -> R
         Err(error) => return error.into_response(),
     };
     let filter_models = super::user_token_models::is_model_list(&request);
-    request = match super::user_token_models::enforce(request, &token.allowed_models).await {
-        Ok(request) => request,
-        Err(response) => return response,
+    let model = if !token.allowed_models.is_empty() || token.is_billed() {
+        match super::user_token_models::requested_model(request).await {
+            Ok((next, model)) => {
+                request = next;
+                model
+            }
+            Err(response) => return response,
+        }
+    } else {
+        None
     };
+    if let Err(response) =
+        super::user_token_models::ensure_allowed(&token.allowed_models, model.as_deref())
+    {
+        return response;
+    }
+    if let Some(model) = &model {
+        let _ = permit.model.set(model.clone());
+    }
+    if let Some(balance) = token.balance_micros {
+        // Unpriced models are free; priced ones need enough balance to start.
+        let rules = match crate::modules::billing::load_prices() {
+            Ok(rules) => rules,
+            Err(_) => return LimitError::AccountingUnavailable.into_response(),
+        };
+        let price = model
+            .as_deref()
+            .and_then(|model| crate::modules::billing::match_price(&rules, model));
+        if price.is_some_and(|rule| !rule.price.admits(balance)) {
+            return LimitError::InsufficientBalance.into_response();
+        }
+    }
     request.extensions_mut().insert(permit.clone());
     let response = next.run(request).await;
     let response = if filter_models {
@@ -409,5 +447,143 @@ mod tests {
             assert_eq!(result.is_err(), error);
             assert!(UserTokenPermit::acquire(&id, 1).is_ok());
         }
+    }
+    #[tokio::test]
+    async fn user_token_billed_key_admission_settlement_and_admin_edit() {
+        use crate::modules::billing::{self, ModelPrice, Price};
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let per_call = format!("call-{tag}");
+        let per_token = format!("tok-{tag}-pro");
+        let free = format!("free-{tag}");
+        billing::save_prices(vec![
+            ModelPrice {
+                pattern: per_call.clone(),
+                price: Price::PerCall {
+                    call_price_micros: 500,
+                },
+            },
+            ModelPrice {
+                pattern: format!("tok-{tag}-*"),
+                price: Price::PerToken {
+                    input_price_micros: 1_000_000,
+                    output_price_micros: 2_000_000,
+                    cached_price_micros: None,
+                },
+            },
+        ])
+        .unwrap();
+        let k = key(0, 0);
+        let set_balance = |balance: Option<i64>| {
+            db::update_token_with_balance(
+                &k.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(balance),
+            )
+            .unwrap()
+        };
+        let router = app();
+        let status = |model: &str| {
+            let mut req = request(&k);
+            *req.body_mut() = Body::from(serde_json::json!({ "model": model }).to_string());
+            let router = router.clone();
+            async move { router.oneshot(req).await.unwrap().status() }
+        };
+
+        // A zero balance blocks priced models but not unpriced (free) ones.
+        set_balance(Some(0));
+        assert_eq!(status(&per_call).await, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(status(&per_token).await, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(status(&free).await, StatusCode::OK);
+
+        set_balance(Some(600));
+        assert_eq!(status(&per_call).await, StatusCode::OK);
+        assert_eq!(status(&per_token).await, StatusCode::OK);
+
+        let record = |model: &str, input: i32, output: i32, code: u16| {
+            db::record_token_usage_and_ip(&k.id, "127.0.0.1", model, input, output, code, None)
+                .unwrap()
+        };
+        record(&per_call, 1000, 1000, 200); // -500
+        record(&per_call, 0, 0, 502); // failed call: free
+        record(&per_token, 100, 50, 200); // 100 * ¥1/M + 50 * ¥2/M = 200 micros
+        record(&free, 9999, 9999, 200); // unpriced: free
+        let balance = db::get_token_by_id(&k.id).unwrap().unwrap().balance_micros;
+        assert_eq!(balance, Some(-100), "per-token settlement may overdraw");
+        assert_eq!(status(&per_token).await, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(status(&free).await, StatusCode::OK);
+
+        let mut charges: Vec<(String, Option<i64>, Option<String>)> =
+            db::usage_logs_for_token(&k.id, 1)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|log| (log.model, log.cost_micros, log.billing_mode))
+                .collect();
+        charges.sort();
+        let entry = |model: &str, cost: i64, mode: &str| {
+            (model.to_string(), Some(cost), Some(mode.to_string()))
+        };
+        let mut expected = vec![
+            entry(&per_call, 0, "per_call"),
+            entry(&per_call, 500, "per_call"),
+            entry(&per_token, 200, "per_token"),
+            entry(&free, 0, "free"),
+        ];
+        expected.sort();
+        assert_eq!(charges, expected);
+
+        // Every administrator edit is in the ledger; switching billing off stops charging.
+        let ledger: Vec<i64> = db::connect_db()
+            .unwrap()
+            .prepare("SELECT delta_micros FROM balance_ledger WHERE token_id = ?1 ORDER BY created_at, rowid")
+            .unwrap()
+            .query_map([&k.id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ledger, vec![0, 600]);
+        set_balance(None);
+        record(&per_call, 0, 0, 200);
+        let token = db::get_token_by_id(&k.id).unwrap().unwrap();
+        assert_eq!(token.balance_micros, None);
+        assert!(db::usage_logs_for_token(&k.id, 1)
+            .unwrap()
+            .items
+            .iter()
+            .any(|log| log.cost_micros.is_none()));
+        assert_eq!(status(&per_call).await, StatusCode::OK);
+
+        // Settlement bills the model admission resolved, even when the client
+        // percent-encodes the Gemini action separator in the URL.
+        set_balance(Some(1_000));
+        let gemini = Router::new()
+            .route(
+                "/v1beta/models/:model",
+                post(
+                    |axum::Extension(permit): axum::Extension<Arc<UserTokenPermit>>| async move {
+                        permit.model().unwrap_or_default().to_string()
+                    },
+                ),
+            )
+            .layer(axum::middleware::from_fn(user_token_limits_middleware));
+        let mut req = request(&k);
+        *req.uri_mut() = format!("/v1beta/models/{per_call}%3AgenerateContent")
+            .parse()
+            .unwrap();
+        let response = gemini.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body, per_call.as_bytes());
     }
 }

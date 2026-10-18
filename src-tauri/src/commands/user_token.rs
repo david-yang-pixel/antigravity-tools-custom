@@ -1,7 +1,17 @@
+use crate::modules::billing::{self, ModelPrice};
 use crate::modules::portal_settings::{PortalSettingsUpdate, PortalSettingsView};
 use crate::modules::user_token_db::{self, TokenIpBinding, UserToken};
 use crate::modules::{portal_account, portal_mail, portal_settings};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
 
 /// Admin list row: the key plus who created it.
 #[derive(Debug, Serialize)]
@@ -12,7 +22,7 @@ pub struct UserTokenView {
     pub source: &'static str,
     pub owner_email: Option<String>,
     pub account_status: Option<String>,
-    /// Registered key still waiting for a quota.
+    /// Registered key the administrator has not switched on yet.
     pub pending_activation: bool,
 }
 
@@ -31,6 +41,9 @@ pub struct CreateTokenRequest {
     pub curfew_start: Option<String>,
     pub curfew_end: Option<String>,
     pub custom_expires_at: Option<i64>, // 自定义过期时间戳 (秒)
+    /// Opening balance in micro-yuan; absent = the key is not billed.
+    #[serde(default)]
+    pub balance_micros: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,6 +60,14 @@ pub struct UpdateTokenRequest {
     /// Absent keeps the current expiry; "custom" requires `custom_expires_at`.
     pub expires_type: Option<String>,
     pub custom_expires_at: Option<i64>, // 自定义过期时间戳 (秒)
+    /// Absent keeps the balance, `null` stops billing, a number sets the balance (micro-yuan).
+    #[serde(default, deserialize_with = "double_option")]
+    pub balance_micros: Option<Option<i64>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SaveModelPricesRequest {
+    pub prices: Vec<ModelPrice>,
 }
 
 // 命令实现
@@ -69,7 +90,7 @@ pub async fn list_user_tokens() -> Result<Vec<UserTokenView>, String> {
                     "admin"
                 },
                 pending_activation: token.owner_user_id.is_some()
-                    && token.token_quota == 0
+                    && !token.enabled
                     && account.as_ref().is_some_and(|a| a.is_active()),
                 owner_email: account.as_ref().map(|a| a.email.clone()),
                 account_status: account.map(|a| a.status),
@@ -82,24 +103,34 @@ pub async fn list_user_tokens() -> Result<Vec<UserTokenView>, String> {
 /// 创建新令牌
 #[tauri::command]
 pub async fn create_user_token(request: CreateTokenRequest) -> Result<UserToken, String> {
-    user_token_db::create_token(
-        request.username,
-        request.expires_type,
-        request.description,
-        request.max_ips,
-        request.curfew_start,
-        request.curfew_end,
-        request.custom_expires_at,
-        request.max_concurrency,
-        request.token_quota,
-        request.allowed_models,
-    )
+    let mut conn = user_token_db::connect_db()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let token = user_token_db::insert_token(
+        &tx,
+        user_token_db::NewToken {
+            username: request.username,
+            description: request.description,
+            expires_type: request.expires_type,
+            custom_expires_at: request.custom_expires_at,
+            max_ips: request.max_ips,
+            curfew_start: request.curfew_start,
+            curfew_end: request.curfew_end,
+            max_concurrency: request.max_concurrency,
+            token_quota: request.token_quota,
+            allowed_models: request.allowed_models,
+            owner_user_id: None,
+            enabled: true,
+            balance_micros: request.balance_micros,
+        },
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(token)
 }
 
 /// 更新令牌
 #[tauri::command]
 pub async fn update_user_token(id: String, request: UpdateTokenRequest) -> Result<(), String> {
-    user_token_db::update_token(
+    user_token_db::update_token_with_balance(
         &id,
         request.username,
         request.description,
@@ -113,6 +144,7 @@ pub async fn update_user_token(id: String, request: UpdateTokenRequest) -> Resul
         request
             .expires_type
             .map(|kind| (kind, request.custom_expires_at)),
+        request.balance_micros,
     )
 }
 
@@ -218,6 +250,19 @@ pub async fn send_portal_reset_email(user_id: String) -> Result<(), String> {
     Ok(())
 }
 
+// --- Model prices (balance billing) ---
+
+#[tauri::command]
+pub async fn get_model_prices() -> Result<Vec<ModelPrice>, String> {
+    billing::load_prices()
+}
+
+/// Replaces the whole price list.
+#[tauri::command]
+pub async fn save_model_prices(request: SaveModelPricesRequest) -> Result<Vec<ModelPrice>, String> {
+    billing::save_prices(request.prices)
+}
+
 #[tauri::command]
 pub async fn get_portal_settings() -> Result<PortalSettingsView, String> {
     portal_settings::view()
@@ -251,6 +296,25 @@ mod tests {
         let update: UpdateTokenRequest =
             serde_json::from_value(serde_json::json!({"username": "edit"})).unwrap();
         assert_eq!((update.max_concurrency, update.token_quota), (None, None));
+        assert_eq!((create.balance_micros, update.balance_micros), (None, None));
+    }
+
+    #[test]
+    fn user_token_balance_edit_distinguishes_absent_null_and_value() {
+        let parse = |body: serde_json::Value| {
+            serde_json::from_value::<UpdateTokenRequest>(body)
+                .unwrap()
+                .balance_micros
+        };
+        assert_eq!(parse(serde_json::json!({})), None);
+        assert_eq!(
+            parse(serde_json::json!({"balance_micros": null})),
+            Some(None)
+        );
+        assert_eq!(
+            parse(serde_json::json!({"balance_micros": 5})),
+            Some(Some(5))
+        );
     }
 }
 

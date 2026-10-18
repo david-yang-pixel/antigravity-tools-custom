@@ -34,13 +34,21 @@ pub struct UserToken {
     /// Usage-portal account that registered this key; `None` for administrator keys.
     #[serde(default)]
     pub owner_user_id: Option<String>,
+    /// Prepaid balance in micro-yuan; `None` = this key is not billed.
+    #[serde(default)]
+    pub balance_micros: Option<i64>,
 }
 
 impl UserToken {
     /// Administrator keys use 0 as "unlimited"; a registered account's key never
-    /// gets that shortcut, so its quota of 0 means no usage at all.
+    /// gets that shortcut, so its quota of 0 means no usage at all — unless the key
+    /// is billed, in which case the balance governs usage instead.
     pub fn has_quota_limit(&self) -> bool {
-        self.token_quota > 0 || self.owner_user_id.is_some()
+        self.token_quota > 0 || (self.owner_user_id.is_some() && !self.is_billed())
+    }
+
+    pub fn is_billed(&self) -> bool {
+        self.balance_micros.is_some()
     }
 
     pub fn quota_exhausted(&self) -> bool {
@@ -54,7 +62,7 @@ impl UserToken {
 }
 
 /// Inputs for a new key; administrators and portal registration share this path.
-pub(crate) struct NewToken {
+pub struct NewToken {
     pub username: String,
     pub description: Option<String>,
     pub expires_type: String,
@@ -67,20 +75,22 @@ pub(crate) struct NewToken {
     pub allowed_models: Vec<String>,
     pub owner_user_id: Option<String>,
     pub enabled: bool,
+    pub balance_micros: Option<i64>,
 }
 
-/// Database-level rule: a registered account's key can only be enabled while it has
-/// a positive quota and its account is active. Enforced by triggers so every write
-/// path (admin edit, renewal, older binaries after a rollback) fails closed.
+/// Database-level rule: a registered account's key can only be enabled while its
+/// account is active and it has a positive quota or is billed from a balance.
+/// Enforced by triggers so every write path (admin edit, renewal, older binaries
+/// after a rollback) fails closed.
 const OWNED_KEY_ENABLE_BLOCKED: &str = "NEW.owner_user_id IS NOT NULL AND NEW.enabled <> 0 AND \
-    (NEW.token_quota <= 0 OR NOT EXISTS (SELECT 1 FROM portal_users p \
+    ((NEW.token_quota <= 0 AND NEW.balance_micros IS NULL) OR NOT EXISTS (SELECT 1 FROM portal_users p \
     WHERE p.id = NEW.owner_user_id AND p.status = 'active'))";
 pub const OWNED_KEY_REQUIRES_QUOTA: &str = "registered_token_requires_quota";
 
-fn map_write_error(context: &str, error: rusqlite::Error) -> String {
+pub(crate) fn map_write_error(context: &str, error: rusqlite::Error) -> String {
     let text = error.to_string();
     if text.contains(OWNED_KEY_REQUIRES_QUOTA) {
-        format!("{OWNED_KEY_REQUIRES_QUOTA}: a registered user's token needs a quota above 0 and an active account before it can be enabled")
+        format!("{OWNED_KEY_REQUIRES_QUOTA}: a registered user's token needs a quota above 0 or balance billing, and an active account, before it can be enabled")
     } else {
         format!("{context}: {text}")
     }
@@ -200,6 +210,7 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
             "INTEGER NOT NULL DEFAULT 0 CHECK(token_quota >= 0)",
         ),
         ("owner_user_id", "TEXT"),
+        ("balance_micros", "INTEGER"),
     ] {
         let exists: bool = conn
             .query_row(
@@ -218,6 +229,7 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
     }
 
     crate::modules::portal_account::migrate(&conn)?;
+    crate::modules::billing::migrate(&conn)?;
     conn.execute_batch(&format!(
         "DROP TRIGGER IF EXISTS user_tokens_owned_key_insert;
          DROP TRIGGER IF EXISTS user_tokens_owned_key_update;
@@ -272,6 +284,23 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
     if !has_cache {
         conn.execute("ALTER TABLE token_usage_logs ADD COLUMN cached_tokens INTEGER CHECK(cached_tokens >= 0)", [])
             .map_err(|e| format!("Failed to migrate cached tokens: {e}"))?;
+    }
+    // NULL cost = the key was not billed for that request.
+    for (column, definition) in [("cost_micros", "INTEGER"), ("billing_mode", "TEXT")] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('token_usage_logs') WHERE name = ?1)",
+                [column],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to inspect usage log schema: {e}"))?;
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE token_usage_logs ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|e| format!("Failed to migrate {column}: {e}"))?;
+        }
     }
 
     // 创建索引
@@ -380,6 +409,8 @@ pub struct ModelUsage {
     pub last_used_at: i64,
     pub cached_tokens: Option<i64>,
     pub cache_recorded_requests: i64,
+    /// Total charged to the balance; `None` when no request was billed.
+    pub cost_micros: Option<i64>,
 }
 
 pub fn model_usage_for_token(token_id: &str) -> Result<Vec<ModelUsage>, String> {
@@ -387,7 +418,7 @@ pub fn model_usage_for_token(token_id: &str) -> Result<Vec<ModelUsage>, String> 
     let mut statement = conn.prepare(
         "SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model_name, COUNT(*),
          SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
-         SUM(MAX(COALESCE(input_tokens, 0), 0)), SUM(MAX(COALESCE(output_tokens, 0), 0)), MAX(request_time), SUM(cached_tokens), COUNT(cached_tokens)
+         SUM(MAX(COALESCE(input_tokens, 0), 0)), SUM(MAX(COALESCE(output_tokens, 0), 0)), MAX(request_time), SUM(cached_tokens), COUNT(cached_tokens), SUM(cost_micros)
          FROM token_usage_logs WHERE token_id = ?1 GROUP BY model_name
          ORDER BY SUM(MAX(COALESCE(input_tokens, 0), 0) + MAX(COALESCE(output_tokens, 0), 0)) DESC, model_name"
     ).map_err(|e| e.to_string())?;
@@ -402,6 +433,7 @@ pub fn model_usage_for_token(token_id: &str) -> Result<Vec<ModelUsage>, String> 
                 last_used_at: r.get(5)?,
                 cached_tokens: r.get(6)?,
                 cache_recorded_requests: r.get(7)?,
+                cost_micros: r.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -419,6 +451,9 @@ pub struct PublicUsageLog {
     pub cached_tokens: Option<i64>,
     pub request_time: i64,
     pub status: i32,
+    /// Charge for this request; `None` when the key was not billed.
+    pub cost_micros: Option<i64>,
+    pub billing_mode: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct UsageLogPage {
@@ -445,7 +480,7 @@ pub fn filtered_usage_logs_for_token(
         )
         .map_err(|e| e.to_string())?;
     let page_size = 20;
-    let mut stmt = conn.prepare("SELECT id, COALESCE(NULLIF(model, ''), 'unknown'), MAX(COALESCE(input_tokens, 0), 0), MAX(COALESCE(output_tokens, 0), 0), cached_tokens, request_time, COALESCE(status, 0) FROM token_usage_logs WHERE token_id = ?1 AND request_time >= ?4 AND request_time <= ?5 ORDER BY request_time DESC, id DESC LIMIT ?2 OFFSET ?3").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT id, COALESCE(NULLIF(model, ''), 'unknown'), MAX(COALESCE(input_tokens, 0), 0), MAX(COALESCE(output_tokens, 0), 0), cached_tokens, request_time, COALESCE(status, 0), cost_micros, billing_mode FROM token_usage_logs WHERE token_id = ?1 AND request_time >= ?4 AND request_time <= ?5 ORDER BY request_time DESC, id DESC LIMIT ?2 OFFSET ?3").map_err(|e| e.to_string())?;
     let items = stmt
         .query_map(
             params![
@@ -464,6 +499,8 @@ pub fn filtered_usage_logs_for_token(
                     cached_tokens: r.get(4)?,
                     request_time: r.get(5)?,
                     status: r.get(6)?,
+                    cost_micros: r.get(7)?,
+                    billing_mode: r.get(8)?,
                 })
             },
         )
@@ -594,12 +631,14 @@ pub fn create_token(
             allowed_models,
             owner_user_id: None,
             enabled: true,
+            balance_micros: None,
         },
     )
 }
 
-pub(crate) fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, String> {
+pub fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, String> {
     validate_limits(spec.max_concurrency, spec.token_quota)?;
+    crate::modules::billing::validate_balance(spec.balance_micros)?;
     let allowed_models = normalize_allowed_models(spec.allowed_models)?;
     let now = Utc::now().timestamp();
     let expires_at = resolve_expires_at(&spec.expires_type, spec.custom_expires_at, now)?;
@@ -624,6 +663,7 @@ pub(crate) fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToke
         total_requests: 0,
         total_tokens_used: 0,
         owner_user_id: spec.owner_user_id,
+        balance_micros: spec.balance_micros,
     };
 
     conn.execute(
@@ -631,8 +671,8 @@ pub(crate) fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToke
             id, token, username, description, enabled, expires_type, expires_at, max_ips,
             curfew_start, curfew_end,
             created_at, updated_at, total_requests, total_tokens_used, max_concurrency, token_quota, allowed_models,
-            owner_user_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            owner_user_id, balance_micros
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             user_token.id,
             user_token.token,
@@ -652,9 +692,16 @@ pub(crate) fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToke
             user_token.token_quota,
             serde_json::to_string(&user_token.allowed_models).map_err(|e| e.to_string())?,
             user_token.owner_user_id,
+            user_token.balance_micros,
         ],
     )
     .map_err(|e| map_write_error("Failed to insert user token", e))?;
+    crate::modules::billing::record_opening_balance(
+        conn,
+        &user_token.id,
+        user_token.balance_micros,
+        now,
+    )?;
 
     Ok(user_token)
 }
@@ -683,6 +730,7 @@ fn token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserToken> {
         total_requests: row.get("total_requests").unwrap_or(0),
         total_tokens_used: row.get("total_tokens_used").unwrap_or(0),
         owner_user_id: row.get("owner_user_id")?,
+        balance_micros: row.get("balance_micros")?,
     })
 }
 
@@ -744,13 +792,55 @@ pub fn update_token(
     allowed_models: Option<Vec<String>>,
     expires: Option<(String, Option<i64>)>, // (expires_type, custom_expires_at)
 ) -> Result<(), String> {
+    update_token_with_balance(
+        id,
+        username,
+        description,
+        enabled,
+        max_ips,
+        curfew_start,
+        curfew_end,
+        max_concurrency,
+        token_quota,
+        allowed_models,
+        expires,
+        None,
+    )
+}
+
+/// Like [`update_token`], plus `balance_micros`: `None` keeps it, `Some(None)` stops
+/// billing the key, `Some(Some(n))` sets the balance. Written in the same statement
+/// as `enabled` so the registered-key guard sees the final state.
+pub fn update_token_with_balance(
+    id: &str,
+    username: Option<String>,
+    description: Option<String>,
+    enabled: Option<bool>,
+    max_ips: Option<i32>,
+    curfew_start: Option<Option<String>>,
+    curfew_end: Option<Option<String>>,
+    max_concurrency: Option<i32>,
+    token_quota: Option<i64>,
+    allowed_models: Option<Vec<String>>,
+    expires: Option<(String, Option<i64>)>, // (expires_type, custom_expires_at)
+    balance_micros: Option<Option<i64>>,
+) -> Result<(), String> {
     validate_limits(max_concurrency.unwrap_or(0), token_quota.unwrap_or(0))?;
+    if let Some(balance) = balance_micros {
+        crate::modules::billing::validate_balance(balance)?;
+    }
     let allowed_models = allowed_models.map(normalize_allowed_models).transpose()?;
     let now = Utc::now().timestamp();
     let expires = expires
         .map(|(kind, custom)| resolve_expires_at(&kind, custom, now).map(|at| (kind, at)))
         .transpose()?;
-    let conn = connect_db()?;
+    let mut conn = connect_db()?;
+    let conn = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to update user token: {e}"))?;
+    let previous_balance = balance_micros
+        .map(|_| crate::modules::billing::current_balance(&conn, id))
+        .transpose()?;
 
     let mut query = "UPDATE user_tokens SET updated_at = ?1".to_string();
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
@@ -822,6 +912,12 @@ pub fn update_token(
         param_idx += 2;
     }
 
+    if let Some(balance) = balance_micros {
+        query.push_str(&format!(", balance_micros = ?{}", param_idx));
+        params_vec.push(Box::new(balance));
+        param_idx += 1;
+    }
+
     query.push_str(&format!(" WHERE id = ?{}", param_idx));
     params_vec.push(Box::new(id.to_string()));
 
@@ -830,8 +926,12 @@ pub fn update_token(
 
     conn.execute(&query, params_refs.as_slice())
         .map_err(|e| map_write_error("Failed to update user token", e))?;
+    if let (Some(previous), Some(target)) = (previous_balance, balance_micros) {
+        crate::modules::billing::record_admin_change(&conn, id, previous, target, now)?;
+    }
 
-    Ok(())
+    conn.commit()
+        .map_err(|e| format!("Failed to update user token: {e}"))
 }
 
 /// 续期令牌
@@ -845,7 +945,7 @@ pub fn renew_token(id: &str, expires_type: &str) -> Result<(), String> {
     // the guard trigger would allow it, so renewing a pending key just extends it.
     conn.execute(
         "UPDATE user_tokens SET expires_type = ?1, expires_at = ?2, updated_at = ?3,
-            enabled = CASE WHEN owner_user_id IS NULL OR (token_quota > 0 AND EXISTS (
+            enabled = CASE WHEN owner_user_id IS NULL OR ((token_quota > 0 OR balance_micros > 0) AND EXISTS (
                 SELECT 1 FROM portal_users p WHERE p.id = owner_user_id AND p.status = 'active'))
             THEN 1 ELSE enabled END
          WHERE id = ?4",
@@ -992,12 +1092,24 @@ pub fn record_token_usage_with_cache(
         .map_err(|e| format!("Failed to insert ip binding: {}", e))?;
     }
 
-    // 3. 插入 token_usage_logs 表
+    // 3. Charge billed keys in the same transaction as the usage they pay for.
+    let charge = crate::modules::billing::settle(
+        &tx,
+        token_id,
+        model,
+        i64::from(input_tokens),
+        i64::from(output_tokens),
+        cached_tokens.map(i64::from),
+        status,
+    )?;
+
+    // 4. 插入 token_usage_logs 表
     let log_id = Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO token_usage_logs (
-            id, token_id, ip_address, model, input_tokens, output_tokens, request_time, status, cached_tokens
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            id, token_id, ip_address, model, input_tokens, output_tokens, request_time, status, cached_tokens,
+            cost_micros, billing_mode
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             log_id,
             token_id,
@@ -1007,7 +1119,9 @@ pub fn record_token_usage_with_cache(
             output_tokens,
             now,
             status,
-            cached_tokens.map(i64::from)
+            cached_tokens.map(i64::from),
+            charge.map(|(cost, _)| cost),
+            charge.map(|(_, mode)| mode)
         ],
     )
     .map_err(|e| format!("Failed to insert usage log: {}", e))?;

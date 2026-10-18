@@ -299,10 +299,16 @@ fn record_user_token_usage(
     permit: &Option<std::sync::Arc<super::user_token_limits::UserTokenPermit>>,
 ) {
     if let Some(identity) = user_token_identity {
+        // Prefer the model admission checked and priced over the raw-URL guess.
+        let model = permit
+            .as_ref()
+            .and_then(|permit| permit.model())
+            .or(log.model.as_deref())
+            .unwrap_or("unknown");
         let result = crate::modules::user_token_db::record_token_usage_with_cache(
             &identity.token_id,
             log.client_ip.as_deref().unwrap_or("127.0.0.1"),
-            log.model.as_deref().unwrap_or("unknown"),
+            model,
             log.input_tokens.unwrap_or(0).min(i32::MAX as u32) as i32,
             log.output_tokens.unwrap_or(0).min(i32::MAX as u32) as i32,
             log.cached_tokens,
