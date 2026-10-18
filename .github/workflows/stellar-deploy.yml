@@ -183,3 +183,24 @@ jobs:
             -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
             -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
             "root@$DEPLOY_HOST" "deploy $IMAGE@$DIGEST $REVISION"
+
+  tag:
+    name: Tag deployments
+    # Runs only after a verified deployment; the write token stays out of the SSH job.
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Tag this and any untagged recent deployments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        # deploy-YYYYMMDD-HHMM-<short commit> in Beijing time; also backfills deployments
+        # from the last 30 days whose tag is missing. See deploy/stellar/README.md.
+        run: python3 deploy/stellar/tag_deployments.py

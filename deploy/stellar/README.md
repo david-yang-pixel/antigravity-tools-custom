@@ -15,6 +15,24 @@ a dependency change rebuilds that layer and takes noticeably longer.
 The upstream Pages workflow is manual-only; the custom workflow replaces the
 upstream push-to-main CI. Upstream PR checks remain available.
 
+## Deployment tags
+
+After a verified deployment, a separate job, the only one with `contents: write`
+(plus `actions: read` to list runs), runs `tag_deployments.py`. Every successful
+`deploy` job of this workflow on `main` gets an annotated tag
+`deploy-YYYYMMDD-HHMM-<short commit>` on the deployed commit, using the Beijing
+time the deploy job finished, e.g. `deploy-20261018-1830-3875e5c`. Several
+deployments a day get distinct, time-ordered tags.
+
+Tag names come only from the run history, so the job is idempotent: each run also
+tags any deployment from the last 30 days that has no tag yet, which backfills
+deployments made before this job existed and repairs a failed tag job on the next
+deployment. The current deployment's tag message records the image digest;
+backfilled tags reference the commit-tagged image instead. Names never start
+with `v`, which would trigger `release.yml`, and tags created with `GITHUB_TOKEN`
+do not start other workflows. A failed tag job leaves the deployment in place.
+List deployments with `git fetch --tags && git tag -l 'deploy-*'`.
+
 ## Credentials and notifications
 
 - `DEPLOY_SSH_KEY`: dedicated SSH private key, restricted on the server to the
