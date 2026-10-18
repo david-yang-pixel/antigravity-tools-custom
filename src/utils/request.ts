@@ -185,6 +185,8 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'set_portal_account_enabled': { url: '/api/user-accounts/:userId/status', method: 'POST' },
   'revoke_portal_sessions': { url: '/api/user-accounts/:userId/revoke-sessions', method: 'POST' },
   'send_portal_reset_email': { url: '/api/user-accounts/:userId/send-reset', method: 'POST' },
+  'get_model_prices': { url: '/api/model-prices', method: 'GET' },
+  'save_model_prices': { url: '/api/model-prices', method: 'POST' },
   'get_portal_settings': { url: '/api/portal-settings', method: 'GET' },
   'save_portal_settings': { url: '/api/portal-settings', method: 'POST' },
   'send_portal_test_email': { url: '/api/portal-settings/test-email', method: 'POST' },

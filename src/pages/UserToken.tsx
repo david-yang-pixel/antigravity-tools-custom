@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Trash2, RefreshCw, Copy, Activity, User, Settings, Shield, Clock, Users, Mail, UserCog, Hourglass } from 'lucide-react';
+import { Plus, Trash2, RefreshCw, Copy, Activity, User, Settings, Shield, Clock, Users, Mail, UserCog, Hourglass, Coins } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { request as invoke } from '../utils/request';
 import { showToast } from '../components/common/ToastContainer';
@@ -11,6 +11,9 @@ import { fromDateTimeLocal, nowSeconds, toDateTimeLocal } from '../components/us
 import { copyToClipboard } from '../utils/clipboard';
 import ModalDialog from '../components/common/ModalDialog';
 import PortalSettingsModal, { portalErrorText } from '../components/user-token/PortalSettingsModal';
+import ModelPricingModal from '../components/user-token/ModelPricingModal';
+import BalanceFields from '../components/user-token/BalanceFields';
+import { formatYuan, parseYuan, toYuan } from '../components/user-token/money';
 
 interface UserToken {
     id: string;
@@ -32,6 +35,8 @@ interface UserToken {
     total_requests: number;
     total_tokens_used: number;
     owner_user_id?: string | null;
+    /** Prepaid balance in micro-yuan; null = the key is not billed. */
+    balance_micros?: number | null;
     /** "admin" = created here; "registered" = self-registered usage-portal account. */
     source?: 'admin' | 'registered';
     owner_email?: string | null;
@@ -51,6 +56,7 @@ interface UserTokenStats {
 const tokenFilters = ['all', 'admin', 'registered', 'pending'] as const;
 type TokenFilter = typeof tokenFilters[number];
 const isRegistered = (token: UserToken) => token.source === 'registered';
+const isBilled = (token: UserToken) => token.balance_micros !== null && token.balance_micros !== undefined;
 
 // interface CreateTokenRequest omitted as it's not explicitly used for typing variables
 
@@ -65,6 +71,7 @@ const UserToken: React.FC = () => {
     const [creating, setCreating] = useState(false);
     const [filter, setFilter] = useState<TokenFilter>('all');
     const [showPortalSettings, setShowPortalSettings] = useState(false);
+    const [showPricing, setShowPricing] = useState(false);
     const [deleting, setDeleting] = useState<UserToken | null>(null);
 
     // Edit State
@@ -81,6 +88,8 @@ const UserToken: React.FC = () => {
     const [editCurfewEnd, setEditCurfewEnd] = useState('');
     const [editExpiresType, setEditExpiresType] = useState('keep'); // keep, day, week, month, never, custom
     const [editCustomExpires, setEditCustomExpires] = useState(''); // datetime-local value
+    const [editBilled, setEditBilled] = useState(false);
+    const [editBalance, setEditBalance] = useState('0');
     const [updating, setUpdating] = useState(false);
 
     // Create Form State
@@ -95,6 +104,8 @@ const UserToken: React.FC = () => {
     const [newCurfewStart, setNewCurfewStart] = useState('');
     const [newCurfewEnd, setNewCurfewEnd] = useState('');
     const [newCustomExpires, setNewCustomExpires] = useState(''); // datetime-local value
+    const [newBilled, setNewBilled] = useState(false);
+    const [newBalance, setNewBalance] = useState('0');
 
     const loadData = async () => {
         setLoading(true);
@@ -143,6 +154,11 @@ const UserToken: React.FC = () => {
             showToast(t('user_token.invalid_limits'), 'error');
             return;
         }
+        const newBalanceMicros = newBilled ? parseYuan(newBalance) : null;
+        if (newBilled && newBalanceMicros === null) {
+            showToast(t('billing.invalid_balance'), 'error');
+            return;
+        }
 
         setCreating(true);
         try {
@@ -162,7 +178,8 @@ const UserToken: React.FC = () => {
                     allowed_models: newRestricted ? newAllowedModels : [],
                     curfew_start: newCurfewStart || null,
                     curfew_end: newCurfewEnd || null,
-                    custom_expires_at: customExpiresAt || null
+                    custom_expires_at: customExpiresAt || null,
+                    balance_micros: newBalanceMicros
                 }
             });
             showToast(t('common.create_success') || 'Created successfully', 'success');
@@ -178,6 +195,8 @@ const UserToken: React.FC = () => {
             setNewCurfewStart('');
             setNewCurfewEnd('');
             setNewCustomExpires('');
+            setNewBilled(false);
+            setNewBalance('0');
             loadData();
         } catch (e) {
             console.error('Failed to create token', e);
@@ -231,6 +250,8 @@ const UserToken: React.FC = () => {
         setEditCurfewEnd(token.curfew_end ?? '');
         setEditExpiresType('keep');
         setEditCustomExpires(token.expires_at && token.expires_at > nowSeconds() ? toDateTimeLocal(token.expires_at) : '');
+        setEditBilled(isBilled(token));
+        setEditBalance(isBilled(token) ? toYuan(token.balance_micros!) : '0');
         setShowEditModal(true);
     };
 
@@ -260,10 +281,23 @@ const UserToken: React.FC = () => {
             return;
         }
 
-        // A registered key is on exactly while it has a quota; saving a quota activates it.
+        // Only send the balance when it was edited, so charges made while the dialog
+        // was open are not overwritten by the value loaded when it opened.
+        const wasBilled = isBilled(editingToken);
+        const balanceEdited = editBilled !== wasBilled
+            || (editBilled && editBalance !== toYuan(editingToken.balance_micros ?? 0));
+        const editBalanceMicros = editBilled ? parseYuan(editBalance) : null;
+        if (balanceEdited && editBilled && editBalanceMicros === null) {
+            showToast(t('billing.invalid_balance'), 'error');
+            return;
+        }
+
+        // An unbilled registered key is on exactly while it has a quota; saving a quota
+        // activates it. A billed one is activated by saving a positive balance.
         const editQuota = parseQuotaMillions(editTokenQuota) ?? 0;
-        const registeredEnabled = isRegistered(editingToken) && editingToken.account_status === 'active'
-            ? { enabled: editQuota > 0 } : {};
+        const registeredEnabled = !isRegistered(editingToken) || editingToken.account_status !== 'active' ? {}
+            : !editBilled ? { enabled: editQuota > 0 }
+            : balanceEdited && (editBalanceMicros ?? 0) > 0 ? { enabled: true } : {};
 
         setUpdating(true);
         try {
@@ -284,7 +318,9 @@ const UserToken: React.FC = () => {
                     ...(editExpiresType !== 'keep' && {
                         expires_type: editExpiresType,
                         custom_expires_at: editExpiresType === 'custom' ? fromDateTimeLocal(editCustomExpires) : null
-                    })
+                    }),
+                    // null stops billing; omitted keeps the current balance
+                    ...(balanceEdited && { balance_micros: editBalanceMicros })
                 }
             });
             showToast(t('common.update_success') || 'Updated successfully', 'success');
@@ -364,6 +400,12 @@ const UserToken: React.FC = () => {
 
                 <div className="flex items-center gap-2">
                     <a href="/usage" target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 px-2">{t('user_token.portal_link')}</a>
+                    <button
+                        onClick={() => setShowPricing(true)}
+                        className="px-3 py-2 hover:bg-gray-100 dark:hover:bg-base-200 rounded-lg text-sm text-gray-600 dark:text-gray-300 flex items-center gap-1.5 transition-colors"
+                    >
+                        <Coins size={16} />{t('billing.model_pricing')}
+                    </button>
                     <button
                         onClick={() => setShowPortalSettings(true)}
                         className="px-3 py-2 hover:bg-gray-100 dark:hover:bg-base-200 rounded-lg text-sm text-gray-600 dark:text-gray-300 flex items-center gap-1.5 transition-colors"
@@ -551,8 +593,13 @@ const UserToken: React.FC = () => {
                                     <td>
                                         <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">{token.total_requests} <span className="text-[10px] font-normal text-gray-400">reqs</span></div>
                                         <div className="text-[10px] text-gray-400 mt-0.5">
-                                            {toQuotaMillions(token.total_tokens_used)} / {token.token_quota > 0 || isRegistered(token) ? toQuotaMillions(token.token_quota) : t('user_token.unlimited')} {t('user_token.million_tokens')}
+                                            {toQuotaMillions(token.total_tokens_used)} / {token.token_quota > 0 || (isRegistered(token) && !isBilled(token)) ? toQuotaMillions(token.token_quota) : t('user_token.unlimited')} {t('user_token.million_tokens')}
                                         </div>
+                                        {isBilled(token) && (
+                                            <div className={`text-xs mt-1 font-medium ${token.balance_micros! <= 0 ? 'text-red-500' : 'text-emerald-600'}`}>
+                                                {t('billing.balance_label', { amount: formatYuan(token.balance_micros!) })}
+                                            </div>
+                                        )}
                                         {token.pending_activation && <div className="text-xs mt-1 text-amber-600">{t('user_token.quota_not_activated')}</div>}
                                         {token.token_quota > 0 && (
                                             <div className={`text-xs mt-1 ${token.total_tokens_used >= token.token_quota ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
@@ -733,6 +780,9 @@ const UserToken: React.FC = () => {
                             onMaxConcurrencyChange={setNewMaxConcurrency} onTokenQuotaChange={setNewTokenQuota}
                         />
 
+                        <BalanceFields prefix="create" billed={newBilled} balance={newBalance}
+                            onBilledChange={setNewBilled} onBalanceChange={setNewBalance} />
+
                         {/* Custom Expiration Time Picker */}
                         {newExpiresType === 'custom' && (
                             <div className="form-control w-full mb-3">
@@ -801,7 +851,9 @@ const UserToken: React.FC = () => {
                         {isRegistered(editingToken) && (
                             <div className={`mb-4 rounded-lg px-3 py-2.5 text-xs ${editingToken.pending_activation ? 'bg-amber-50 text-amber-800 dark:bg-amber-900/20 dark:text-amber-200' : 'bg-blue-50 text-blue-800 dark:bg-blue-900/20 dark:text-blue-200'}`}>
                                 <div className="flex items-center gap-1.5 font-medium"><Mail size={12} />{editingToken.owner_email} · {t(editingToken.account_status === 'disabled' ? 'user_token.account_disabled' : 'user_token.source_registered')}</div>
-                                <p className="mt-1">{t(editingToken.pending_activation ? 'user_token.activate_hint' : 'user_token.registered_edit_hint')}</p>
+                                <p className="mt-1">{t(editBilled
+                                    ? (editingToken.pending_activation ? 'billing.activate_hint' : 'billing.registered_edit_hint')
+                                    : (editingToken.pending_activation ? 'user_token.activate_hint' : 'user_token.registered_edit_hint'))}</p>
                             </div>
                         )}
 
@@ -894,8 +946,12 @@ const UserToken: React.FC = () => {
                             prefix="edit" maxConcurrency={editMaxConcurrency} tokenQuota={editTokenQuota}
                             onMaxConcurrencyChange={setEditMaxConcurrency} onTokenQuotaChange={setEditTokenQuota}
                             usedTokens={editingToken?.total_tokens_used}
-                            quotaHint={isRegistered(editingToken) ? t('user_token.registered_quota_hint') : undefined}
+                            quotaHint={isRegistered(editingToken) && !editBilled ? t('user_token.registered_quota_hint') : undefined}
                         />
+
+                        <BalanceFields prefix="edit" billed={editBilled} balance={editBalance}
+                            onBilledChange={setEditBilled} onBalanceChange={setEditBalance}
+                            currentBalance={editingToken.balance_micros} />
 
                         <div className="form-control w-full mb-3">
                             <label className="label">
@@ -939,6 +995,7 @@ const UserToken: React.FC = () => {
             )}
             <PortalSettingsModal open={showPortalSettings} models={modelChoices} modelLoadError={modelLoadError}
                 onClose={() => { setShowPortalSettings(false); loadData(); }} />
+            <ModelPricingModal open={showPricing} models={modelChoices} onClose={() => setShowPricing(false)} />
             <ModalDialog
                 isOpen={deleting !== null}
                 title={t('user_token.delete_registered_title')}

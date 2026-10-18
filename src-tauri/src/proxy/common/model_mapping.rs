@@ -612,7 +612,7 @@ pub async fn find_dynamic_model(
 /// - `claude-*-sonnet-*` matches `claude-3-5-sonnet-20241022` ✓
 /// - `*-thinking` matches `claude-opus-4-5-thinking` ✓
 /// - `a*b*c` matches `a123b456c` ✓
-fn wildcard_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
 
     // No wildcard - exact match

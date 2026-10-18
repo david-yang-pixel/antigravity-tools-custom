@@ -1026,6 +1026,11 @@ impl AxumServer {
                 "/user-tokens/:id",
                 delete(admin_delete_user_token).patch(admin_update_user_token),
             )
+            // Balance billing: per-model prices
+            .route(
+                "/model-prices",
+                get(admin_get_model_prices).post(admin_save_model_prices),
+            )
             // Usage-portal accounts and registration settings
             .route(
                 "/user-accounts/:userId/status",
@@ -2462,6 +2467,8 @@ async fn admin_create_user_token(
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     crate::modules::user_token_db::normalize_allowed_models(payload.allowed_models.clone())
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    crate::modules::billing::validate_balance(payload.balance_micros)
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     let token = crate::commands::user_token::create_user_token(payload)
         .await
         .map_err(|e| {
@@ -2519,6 +2526,10 @@ async fn admin_update_user_token(
     .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     if let Some(models) = &payload.allowed_models {
         crate::modules::user_token_db::normalize_allowed_models(models.clone())
+            .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    }
+    if let Some(balance) = payload.balance_micros {
+        crate::modules::billing::validate_balance(balance)
             .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     }
     if let Some(expires_type) = &payload.expires_type {
@@ -2580,6 +2591,27 @@ async fn admin_send_portal_reset_email(
         .await
         .map_err(portal_admin_error)?;
     Ok(StatusCode::OK)
+}
+
+async fn admin_get_model_prices() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let prices = crate::commands::user_token::get_model_prices()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e }),
+            )
+        })?;
+    Ok(Json(prices))
+}
+
+async fn admin_save_model_prices(
+    Json(payload): Json<crate::commands::user_token::SaveModelPricesRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let prices = crate::commands::user_token::save_model_prices(payload)
+        .await
+        .map_err(portal_admin_error)?;
+    Ok(Json(prices))
 }
 
 async fn admin_get_portal_settings() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>

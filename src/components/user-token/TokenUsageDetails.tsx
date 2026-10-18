@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toQuotaMillions } from './tokenQuota';
+import { formatYuan } from './money';
 
 export interface LogTimeRange { start_time?: number; end_time?: number; }
 
@@ -22,6 +23,9 @@ export interface UsageLogPage {
         cached_tokens: number | null;
         request_time: number;
         status: number;
+        /** Charge for this request; null when the key was not billed. */
+        cost_micros?: number | null;
+        billing_mode?: string | null;
     }[];
     page: number;
     page_size: number;
@@ -30,8 +34,10 @@ export interface UsageLogPage {
 const cell = 'px-5 py-3 tabular-nums';
 const tableContainer = 'overflow-x-auto bg-white border border-slate-200 rounded-xl';
 
-export default function TokenUsageDetails({ view, daily, weekly, logs, busy, onPage, onFilter }: {
+export default function TokenUsageDetails({ view, daily, weekly, logs, busy, showCost = false, onPage, onFilter }: {
     view: 'statistics' | 'logs';
+    /** Adds a per-request cost column for balance-billed keys. */
+    showCost?: boolean;
     daily: UsagePeriod[];
     weekly: UsagePeriod[];
     logs: UsageLogPage;
@@ -48,7 +54,7 @@ export default function TokenUsageDetails({ view, daily, weekly, logs, busy, onP
     const maxTotal = Math.max(1, ...periods.map(row => row.input_tokens + row.output_tokens));
     const pages = Math.max(1, Math.ceil(logs.total / logs.page_size));
     const cache = (value: number | null) => value === null ? t('token_portal.not_recorded') : toQuotaMillions(value);
-    const header = (keys: string[]) => <thead className="bg-slate-50 text-xs text-slate-500"><tr>{keys.map(k => <th key={k} scope="col" className="px-5 py-4 font-medium">{t(`token_portal.${k}`)}</th>)}</tr></thead>;
+    const header = (keys: string[]) => <thead className="bg-slate-50 text-xs text-slate-500"><tr>{keys.map(k => <th key={k} scope="col" className="px-5 py-4 font-medium">{t(k === 'cost' ? 'billing.cost' : `token_portal.${k}`)}</th>)}</tr></thead>;
 
     function filterLogs() {
         const start_time = start ? Math.floor(new Date(`${start}+08:00`).getTime() / 1000) : undefined;
@@ -97,12 +103,13 @@ export default function TokenUsageDetails({ view, daily, weekly, logs, busy, onP
             </form>
             <div className={tableContainer}>
                 <table className="w-full text-sm text-left whitespace-nowrap">
-                    {header(['time', 'model', 'status', 'input', 'output', 'cached', 'total'])}
+                    {header(['time', 'model', 'status', 'input', 'output', 'cached', 'total', ...(showCost ? ['cost'] : [])])}
                     <tbody className="divide-y divide-slate-100">{logs.items.map(row => <tr key={row.id}>
                         <td className={`${cell} text-xs text-slate-500`}>{new Date(row.request_time * 1000).toLocaleString(i18n.language, { timeZone: 'Asia/Shanghai' })}</td>
                         <th scope="row" className="px-5 py-3 font-mono text-xs font-medium">{row.model}</th>
                         <td className={cell}><span className={`rounded px-2 py-1 text-xs ${row.status >= 400 ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{row.status || '—'}</span></td>
                         <td className={cell}>{toQuotaMillions(row.input_tokens)}</td><td className={cell}>{toQuotaMillions(row.output_tokens)}</td><td className={cell}>{cache(row.cached_tokens)}</td><td className={`${cell} font-medium`}>{toQuotaMillions(row.input_tokens + row.output_tokens)}</td>
+                        {showCost && <td className={cell} title={row.billing_mode ? t(`billing.mode_${row.billing_mode}`) : undefined}>{row.cost_micros === null || row.cost_micros === undefined ? '—' : formatYuan(row.cost_micros)}</td>}
                     </tr>)}</tbody>
                 </table>
                 {logs.items.length === 0 && <p className="text-center text-sm text-slate-500 py-10">{t('token_portal.empty_logs')}</p>}

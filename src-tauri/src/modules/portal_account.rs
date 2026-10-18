@@ -375,7 +375,8 @@ fn consume_code(
     Ok(())
 }
 
-/// Creates the account and its single key (disabled, quota 0) in one transaction.
+/// Creates the account and its single key (disabled, billed from a zero balance)
+/// in one transaction.
 pub fn register(
     email: &str,
     code: &str,
@@ -435,6 +436,7 @@ pub fn register(
             allowed_models: defaults.allowed_models,
             owner_user_id: Some(user.id.clone()),
             enabled: false,
+            balance_micros: Some(0),
         },
     )?;
     tx.commit().map_err(db_err)?;
@@ -628,7 +630,7 @@ pub fn get_account(user_id: &str) -> Result<Option<PortalUser>, String> {
 }
 
 /// Disabling stops the key and signs the user out everywhere. Enabling restores
-/// the key only when it already has a quota.
+/// the key only when it already has a quota or a positive balance.
 pub fn set_account_enabled(user_id: &str, enabled: bool) -> Result<(), String> {
     let mut conn = tokens::connect_db()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -642,7 +644,7 @@ pub fn set_account_enabled(user_id: &str, enabled: bool) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         tx.execute(
             "UPDATE user_tokens SET enabled = 1, updated_at = ?2
-             WHERE owner_user_id = ?1 AND token_quota > 0",
+             WHERE owner_user_id = ?1 AND (token_quota > 0 OR balance_micros > 0)",
             params![user_id, now],
         )
         .map_err(|e| e.to_string())?;
@@ -762,17 +764,17 @@ mod tests {
     }
 
     #[test]
-    fn portal_registration_creates_one_disabled_zero_quota_key() {
+    fn portal_registration_creates_one_disabled_billed_key() {
         let now = 1_000_000;
         let (email, user, token) = registered("reg", now);
         assert_eq!(token.owner_user_id.as_deref(), Some(user.id.as_str()));
         assert!(!token.enabled);
         assert_eq!(token.token_quota, 0);
+        assert_eq!(token.balance_micros, Some(0));
         assert!(
-            token.quota_exhausted(),
-            "a registered key at quota 0 has no usage"
+            !token.quota_exhausted() && token.remaining_tokens().is_none(),
+            "a billed key is limited by its balance, not a token quota"
         );
-        assert_eq!(token.remaining_tokens(), Some(0));
         assert_eq!(token.max_concurrency, 2);
 
         // The code is single use and a second registration is rejected.
@@ -789,6 +791,30 @@ mod tests {
     #[test]
     fn portal_registered_key_cannot_be_enabled_without_quota() {
         let (_, user, token) = registered("guard", 1_000_000);
+        let set_billing = |balance: Option<i64>, enabled: Option<bool>| {
+            tokens::update_token_with_balance(
+                &token.id,
+                None,
+                None,
+                enabled,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(balance),
+            )
+        };
+        // A billed key may be enabled at quota 0: its balance limits usage instead.
+        set_billing(Some(0), Some(true)).unwrap();
+        assert!(tokens::get_token_by_id(&token.id).unwrap().unwrap().enabled);
+        // Billing cannot be switched off while that would leave it enabled without a quota.
+        assert!(set_billing(None, None).is_err());
+        set_billing(None, Some(false)).unwrap();
+
+        // Without billing, the token-quota guard applies as before.
         let enable = |quota: Option<i64>| {
             tokens::update_token(
                 &token.id,
