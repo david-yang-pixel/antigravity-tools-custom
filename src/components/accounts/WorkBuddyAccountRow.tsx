@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 export interface WorkBuddyAccount {
     id: string; uid: string; nickname: string; realm: 'cn' | 'global'; enabled: boolean;
     expires_at: number; models: { id: string; name: string }[]; last_error: string | null;
+    candidate_model_count?: number; models_verified_at?: number;
     status: string; in_flight: number; cooldown_until: number; cooldown_reason: string | null;
     health: { successes: number; failures: number; consecutive_failures: number; last_success_at: number; last_failure_at: number; last_error: string | null };
     management: {
@@ -52,6 +53,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                 <div className="flex items-center gap-2"><span className="max-w-48 truncate font-medium" title={account.nickname || account.uid}>{account.nickname || account.uid}</span>
                     <span className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] ${account.status === 'ready' ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>{t(`workbuddy.accounts.status_${account.status}`)}</span></div>
                 <div className={muted}>{t(`workbuddy.accounts.${account.realm}`)} · {t('workbuddy.accounts.model_count', { count: account.models.length })}</div>
+                {!account.models_verified_at && !!account.candidate_model_count && <div className="mt-1 text-xs text-amber-600">{t('workbuddy.models_not_verified')}</div>}
                 {errors.length > 0 && <button className="mt-1 text-xs text-amber-700 underline dark:text-amber-400" onClick={() => setExpanded(true)} aria-controls={detailId}>{t('workbuddy.accounts.needs_attention')}</button>}
             </th>
             <td className={`${cell} whitespace-nowrap tabular-nums`}>
@@ -100,7 +102,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.health')}</dt><dd className="mt-1">{total ? t('workbuddy.accounts.success_rate', { rate: Math.round(h.successes / total * 100), success: h.successes, total }) : t('workbuddy.accounts.health_hint')}</dd><dd className="mt-1 text-gray-500">{t('workbuddy.accounts.capacity', { count: account.models.length, active: account.in_flight })}</dd></div>
             </dl>
             {errors.length > 0 && <div role="status" className="mt-4 space-y-1 text-xs text-amber-700 dark:text-amber-400">{errors.map(error => <p key={error} className="break-words">{error}</p>)}</div>}
-            {account.models.length > 0 && <div className="mt-4 border-t border-gray-200 pt-3 dark:border-gray-700"><h3 className="text-xs font-medium">{t('workbuddy.accounts.models')}</h3><div className="mt-2 flex max-h-40 flex-wrap gap-x-4 gap-y-2 overflow-auto font-mono text-xs text-gray-500">{account.models.map(model => <span key={model.id}>{model.id}</span>)}</div></div>}
+            {account.models.length > 0 && <div className="mt-4 border-t border-gray-200 pt-3 dark:border-gray-700"><h3 className="text-xs font-medium">{account.models_verified_at ? <>{t('workbuddy.accounts.models')} · {date(account.models_verified_at)}</> : t('workbuddy.pending_verification')}</h3><div className="mt-2 flex max-h-40 flex-wrap gap-x-4 gap-y-2 overflow-auto font-mono text-xs text-gray-500">{account.models.map(model => <span key={model.id}>{model.id}</span>)}</div></div>}
         </td></tr>}
     </Fragment>;
 }

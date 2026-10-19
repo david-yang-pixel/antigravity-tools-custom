@@ -52,12 +52,14 @@ async fn upstream(headers: axum::http::HeaderMap, Json(body): Json<Value>) -> Re
     assert_eq!(body["model"], "claude-sonnet-4-6");
     assert_eq!(body["stream"], true);
     assert_eq!(body["stream_options"]["include_usage"], true);
-    if body["messages"][0]["content"] == "reject-before-generation" {
+    assert_eq!(body["messages"][0]["role"], "system");
+    let user_content = &body["messages"][1]["content"];
+    if user_content == "reject-before-generation" {
         return Response::builder().header(header::CONTENT_TYPE,"text/event-stream")
             .body(Body::from("data: {\"error\":{\"message\":\"upstream credential diagnostic must not leak\"}}\n\n")).unwrap();
     }
     if let Some(mode @ ("reject-after-generation" | "incomplete-after-generation")) =
-        body["messages"][0]["content"].as_str()
+        user_content.as_str()
     {
         let reject = mode == "reject-after-generation";
         let stream = async_stream::stream! {
@@ -75,7 +77,7 @@ async fn upstream(headers: axum::http::HeaderMap, Json(body): Json<Value>) -> Re
             .body(Body::from_stream(stream))
             .unwrap();
     }
-    assert_eq!(body["messages"][0]["content"], "hello");
+    assert_eq!(user_content, "hello");
     let events = format!(
         "data: {}\r\n\r\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
         json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"你好"},"finish_reason":null}]}),
@@ -388,6 +390,23 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    for method in [reqwest::Method::GET, reqwest::Method::POST] {
+        let denied = client
+            .request(method, format!("{base}/api/workbuddy-models/verify"))
+            .bearer_auth(&token.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+    let progress = client
+        .get(format!("{base}/api/workbuddy-models/verify"))
+        .bearer_auth("test-gateway-admin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(progress.status(), StatusCode::OK);
+    assert_eq!(progress.json::<Value>().await.unwrap()["running"], false);
     let view: Value = client
         .get(format!("{base}/api/workbuddy-settings"))
         .bearer_auth("test-gateway-admin")

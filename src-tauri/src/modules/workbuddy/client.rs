@@ -297,6 +297,18 @@ pub fn session_key(scope: &str, payload: &Value) -> String {
     format!("{:x}", Sha256::digest(format!("{scope}:{first}")))
 }
 
+pub(super) fn error_code(value: &Value) -> Option<i64> {
+    let code = value.get("code").or_else(|| value.pointer("/error/code"))?;
+    code.as_i64().or_else(|| {
+        let text = code.as_str()?;
+        if let Some(suffix) = text.strip_prefix("11-") {
+            format!("11{suffix}").parse().ok()
+        } else {
+            text.parse().ok()
+        }
+    })
+}
+
 pub async fn chat(
     account: &Account,
     model: &str,
@@ -348,6 +360,19 @@ pub async fn chat(
                     }
                 }
             }
+        }
+    }
+    if let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) {
+        // Native WorkBuddy requires a leading system message, even for an ordinary
+        // user-only request. Keep an existing system/developer prompt unchanged.
+        if messages
+            .first()
+            .is_none_or(|message| message["role"] != "system")
+        {
+            messages.insert(
+                0,
+                json!({"role":"system","content":"You are a helpful assistant."}),
+            );
         }
     }
     let conversation = session_key(scope, &payload);
@@ -414,16 +439,10 @@ pub async fn chat(
     )
     .await
     .map_err(|_| "WorkBuddy error response was interrupted or too large")?;
-    let channel_rejected = serde_json::from_slice::<Value>(&bytes)
+    let code = serde_json::from_slice::<Value>(&bytes)
         .ok()
-        .is_some_and(|value| {
-            value.get("code").is_some_and(|code| {
-                code.as_i64() == Some(11128)
-                    || code.as_str() == Some("11-128")
-                    || code.as_str() == Some("11128")
-            })
-        });
-    if channel_rejected {
+        .and_then(|value| error_code(&value));
+    if code == Some(11128) {
         return send("/console/chat/completions")?
             .send()
             .await
@@ -431,9 +450,20 @@ pub async fn chat(
     }
     let mut rejected = axum::http::Response::builder()
         .status(status)
-        .body(Vec::<u8>::new())
+        // Preserve only the numeric result code for model-availability decisions.
+        // Upstream messages may contain credential diagnostics and stay discarded.
+        .body(
+            code.map(|code| json!({"code":code}).to_string().into_bytes())
+                .unwrap_or_default(),
+        )
         .map_err(|_| "Invalid upstream response")?;
     *rejected.headers_mut() = response_headers;
+    rejected
+        .headers_mut()
+        .remove(reqwest::header::CONTENT_LENGTH);
+    rejected
+        .headers_mut()
+        .remove(reqwest::header::CONTENT_ENCODING);
     Ok(reqwest::Response::from(rejected))
 }
 
@@ -502,6 +532,9 @@ mod tests {
             id: "test".into(),
             name: "Test".into(),
         });
+        account
+            .verified_models
+            .insert("test".into(), accounts::now());
         let id = accounts::upsert(account).unwrap().id;
 
         // Waiting on a maintenance refresh must return by the request deadline,
@@ -542,6 +575,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.access_token, "fresh-secret");
+        assert!(updated.verified_models.contains_key("test"));
         assert_eq!(accounts::get(&id).unwrap().refresh_token, "rotated-secret");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -622,13 +656,65 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         let account = super::super::accounts::sync(&id, false).await.unwrap();
         assert_eq!(account.models.len(), 1);
-        assert_eq!(account.models[0].name, "Latest");
+        assert_eq!(account.candidate_model_count, 1);
+        assert_eq!(
+            super::super::accounts::get(&id).unwrap().models[0].name,
+            "Latest"
+        );
         let settings = super::super::load().unwrap();
         assert!(settings.enabled);
         assert_eq!(settings.models["native-model"], "native-model");
         super::super::login::cancel(&started.id).await.unwrap();
         assert!(super::super::login::poll(&started.id).await.is_err());
     }
+    #[tokio::test]
+    async fn workbuddy_leading_system_is_added_without_replacing_caller_instructions() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "STELLAR_TEST_WORKBUDDY_BASE",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let _mock = Mock(tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v2/chat/completions",
+                    post(|Json(body): Json<Value>| async move { Json(body) }),
+                ),
+            )
+            .await
+            .unwrap();
+        }));
+        let account =
+            super::super::accounts::parse_import(json!({"uid":"test","accessToken":"secret"}))
+                .unwrap();
+        for role in ["user", "system", "developer"] {
+            let payload = json!({"messages":[{"role":role,"content":"original content"}]});
+            let response = chat(
+                &account,
+                "test",
+                payload,
+                "test",
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["messages"][0]["role"], "system");
+            if role == "user" {
+                assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+                assert_eq!(
+                    body["messages"][1],
+                    json!({"role":"user","content":"original content"})
+                );
+            } else {
+                assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+                assert_eq!(body["messages"][0]["content"], "original content");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn workbuddy_only_explicit_channel_rejection_uses_console_path() {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();

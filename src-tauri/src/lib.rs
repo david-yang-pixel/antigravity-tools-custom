@@ -853,6 +853,8 @@ pub fn run() {
             commands::user_token::get_portal_settings,
             commands::workbuddy::get_workbuddy_settings,
             commands::workbuddy::save_workbuddy_settings,
+            commands::workbuddy::start_workbuddy_model_verification,
+            commands::workbuddy::get_workbuddy_model_verification,
             commands::workbuddy::list_workbuddy_accounts,
             commands::workbuddy::import_workbuddy_account,
             commands::workbuddy::update_workbuddy_account,

@@ -143,7 +143,7 @@ pub async fn run(
     account.management.last_sync_at = accounts::now();
     account.management.next_sync_at = accounts::now() + 900;
     accounts::save_observation(&mut account)?;
-    super::register_models(&account.models)?;
+    super::register_models(&account.available_models())?;
     accounts::view(account)
 }
 pub fn start() {

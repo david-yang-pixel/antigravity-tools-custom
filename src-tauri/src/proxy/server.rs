@@ -1057,6 +1057,11 @@ impl AxumServer {
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
             )
             .route(
+                "/workbuddy-models/verify",
+                get(admin_get_workbuddy_model_verification)
+                    .post(admin_start_workbuddy_model_verification),
+            )
+            .route(
                 "/portal-settings/test-email",
                 post(admin_send_portal_test_email),
             )
@@ -2669,6 +2674,21 @@ async fn admin_get_portal_settings() -> Result<impl IntoResponse, (StatusCode, J
 async fn admin_get_workbuddy_settings(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::workbuddy::get_workbuddy_settings()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+
+async fn admin_start_workbuddy_model_verification(
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::start_workbuddy_model_verification()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_get_workbuddy_model_verification(
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::get_workbuddy_model_verification()
         .await
         .map(Json)
         .map_err(portal_admin_error)

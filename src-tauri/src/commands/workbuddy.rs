@@ -14,6 +14,17 @@ pub async fn save_workbuddy_settings(request: SettingsUpdate) -> Result<Settings
         .map_err(|_| "WorkBuddy settings task failed")?
 }
 
+#[tauri::command]
+pub async fn start_workbuddy_model_verification(
+) -> Result<workbuddy::verification::Progress, String> {
+    workbuddy::verification::start()
+}
+#[tauri::command]
+pub async fn get_workbuddy_model_verification() -> Result<workbuddy::verification::Progress, String>
+{
+    workbuddy::verification::status()
+}
+
 use serde::Deserialize;
 use workbuddy::{
     accounts::{self, AccountView, Realm},
