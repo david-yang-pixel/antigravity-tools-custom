@@ -1238,9 +1238,17 @@ pub async fn handle_list_models(
     let model_ids =
         get_all_dynamic_models(&state.custom_mapping, Some(&state.token_manager), only_raw).await;
 
+    // WorkBuddy does not expose a native Gemini endpoint.
+    let workbuddy = crate::modules::workbuddy::load().ok();
+    let mapping = state.custom_mapping.read().await.clone();
     // 转换为 Gemini API 格式
     let models: Vec<_> = model_ids
         .into_iter()
+        .filter(|id| {
+            !workbuddy
+                .as_ref()
+                .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+        })
         .map(|id| {
             json!({
                 "name": format!("models/{}", id),
@@ -1266,6 +1274,8 @@ pub async fn handle_get_model(
 ) -> impl IntoResponse {
     use crate::proxy::common::model_mapping::find_dynamic_model;
 
+    let workbuddy = crate::modules::workbuddy::load().ok();
+    let mapping = state.custom_mapping.read().await.clone();
     let only_raw = *state.only_raw_quota_models.read().await;
     if let Some(matched_id) = find_dynamic_model(
         &state.custom_mapping,
@@ -1274,7 +1284,11 @@ pub async fn handle_get_model(
         &model_name,
     )
     .await
-    {
+    .filter(|id| {
+        !workbuddy
+            .as_ref()
+            .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+    }) {
         (
             StatusCode::OK,
             Json(json!({

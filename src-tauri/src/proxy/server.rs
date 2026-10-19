@@ -700,9 +700,13 @@ impl AxumServer {
             )
             // 应用 AI 服务特定的层
             // 注意：Axum layer 执行顺序是从下往上（洋葱模型）
-            // 请求: ip_filter -> auth -> user_token_limits -> monitor -> handler
+            // 请求: ip_filter -> auth -> user_token_limits -> monitor -> upstream routing -> handler
             // 响应: handler -> monitor -> user_token_limits -> auth -> ip_filter
             // monitor 需要在 auth 之后执行才能获取 UserTokenIdentity
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::proxy::upstream::workbuddy::route,
+            ))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 monitor_middleware,
@@ -1049,8 +1053,30 @@ impl AxumServer {
                 get(admin_get_portal_settings).post(admin_save_portal_settings),
             )
             .route(
+                "/workbuddy-settings",
+                get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
+            )
+            .route(
                 "/portal-settings/test-email",
                 post(admin_send_portal_test_email),
+            )
+            .route(
+                "/workbuddy-accounts",
+                get(admin_list_workbuddy_accounts).post(admin_import_workbuddy_account),
+            )
+            .route(
+                "/workbuddy-accounts/update",
+                post(admin_update_workbuddy_account),
+            )
+            .route(
+                "/workbuddy-accounts/delete",
+                post(admin_delete_workbuddy_account),
+            )
+            .route("/workbuddy-login/start", post(admin_start_workbuddy_login))
+            .route("/workbuddy-login/poll", post(admin_poll_workbuddy_login))
+            .route(
+                "/workbuddy-login/cancel",
+                post(admin_cancel_workbuddy_login),
             )
             // OAuth (Web) - Admin 接口
             .route("/auth/url", get(admin_prepare_oauth_url_web))
@@ -1882,6 +1908,15 @@ async fn admin_save_config(
     // 或者直接操作 AppState 里的各状态。
     // 在本重构中，各个状态已经在 AppState 中了。
 
+    state
+        .token_manager
+        .update_sticky_config(new_config.proxy.scheduling.clone())
+        .await;
+    state
+        .token_manager
+        .update_circuit_breaker_config(new_config.circuit_breaker.clone())
+        .await;
+
     // 更新模型映射
     *state.only_raw_quota_models.write().await = new_config.proxy.only_raw_quota_models;
     {
@@ -2630,6 +2665,79 @@ async fn admin_get_portal_settings() -> Result<impl IntoResponse, (StatusCode, J
             )
         })?;
     Ok(Json(view))
+}
+
+async fn admin_get_workbuddy_settings(
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::get_workbuddy_settings()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+
+async fn admin_save_workbuddy_settings(
+    Json(payload): Json<crate::modules::workbuddy::SettingsUpdate>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::save_workbuddy_settings(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+
+async fn admin_list_workbuddy_accounts(
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::list_workbuddy_accounts()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_import_workbuddy_account(
+    Json(payload): Json<crate::commands::workbuddy::ImportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::import_workbuddy_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_update_workbuddy_account(
+    Json(payload): Json<crate::commands::workbuddy::AccountAction>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::update_workbuddy_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_delete_workbuddy_account(
+    Json(payload): Json<crate::commands::workbuddy::AccountAction>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::delete_workbuddy_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_start_workbuddy_login(
+    Json(payload): Json<crate::commands::workbuddy::LoginRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::start_workbuddy_login(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_poll_workbuddy_login(
+    Json(payload): Json<crate::commands::workbuddy::LoginSession>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::poll_workbuddy_login(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_cancel_workbuddy_login(
+    Json(payload): Json<crate::commands::workbuddy::LoginSession>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::cancel_workbuddy_login(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
 }
 
 async fn admin_save_portal_settings(

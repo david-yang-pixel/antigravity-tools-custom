@@ -328,6 +328,7 @@ fn extract_cached_tokens(usage: &Value) -> Option<u32> {
     // Preserve explicit zero; NULL means the upstream never supplied cache telemetry.
     let usage = usage.get("usageMetadata").unwrap_or(usage);
     [
+        "prompt_cache_hit_tokens",
         "cache_read_input_tokens",
         "cachedContentTokenCount",
         "cached_content_token_count",
@@ -1016,9 +1017,11 @@ pub async fn monitor_middleware(
                         break;
                     }
                 } else if let Err(e) = chunk_res {
-                    if tx.send(Err(axum::Error::new(e))).await.is_err() {
-                        break;
-                    }
+                    // Headers may already be 200, but a failed body is not a
+                    // successful call for logging or per-call settlement.
+                    log.status = axum::http::StatusCode::BAD_GATEWAY.as_u16();
+                    let _ = tx.send(Err(axum::Error::new(e))).await;
+                    break;
                 }
             }
             drop(stream);
@@ -1800,6 +1803,119 @@ mod tests {
         assert_eq!(
             super::extract_cached_tokens(&json!({"usageMetadata": {"cachedContentTokenCount": 5}})),
             Some(5)
+        );
+    }
+
+    #[test]
+    fn workbuddy_usage_bills_client_model_price_and_persists_cost() {
+        use crate::modules::{billing, user_token_db as db};
+        use crate::proxy::monitor::prompt_log_tests::{sample_log, TestDataDir};
+        use serde_json::json;
+        let _dir = TestDataDir::new();
+        db::init_db().unwrap();
+        let token = db::create_token(
+            "workbuddy-billing".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            0,
+            0,
+            vec![],
+        )
+        .unwrap();
+        db::update_token_with_balance(
+            &token.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(1_000_000)),
+        )
+        .unwrap();
+        let identity = Some(super::UserTokenIdentity {
+            token_id: token.id.clone(),
+            token: token.token.clone(),
+            username: token.username.clone(),
+        });
+        let price = billing::Price::PerToken {
+            input_price_micros: 2_000_000,
+            output_price_micros: 8_000_000,
+            cached_price_micros: Some(500_000),
+        };
+        billing::save_prices(vec![
+            billing::ModelPrice {
+                pattern: "wb-sonnet".into(),
+                price: price.clone(),
+            },
+            billing::ModelPrice {
+                pattern: "claude-sonnet-4-6".into(),
+                price: billing::Price::PerCall {
+                    call_price_micros: 999_999,
+                },
+            },
+        ])
+        .unwrap();
+        // Chat, Responses and Anthropic report the same usage in different shapes.
+        for usage in [
+            json!({"prompt_tokens":1000,"completion_tokens":20,"prompt_cache_hit_tokens":600,
+                "cache_read_input_tokens":0,"prompt_cache_write_tokens":100,"credit":999}),
+            json!({"input_tokens":1000,"output_tokens":20,"input_tokens_details":{"cached_tokens":600}}),
+            json!({"input_tokens":300,"output_tokens":20,"cache_read_input_tokens":600,"cache_creation_input_tokens":100}),
+        ] {
+            let mut log = sample_log("workbuddy-usage", 0);
+            log.model = Some("wb-sonnet".into());
+            log.mapped_model = Some("claude-sonnet-4-6".into());
+            log.status = 200;
+            log.input_tokens = super::extract_input_tokens(&usage);
+            log.output_tokens = super::extract_output_tokens(&usage);
+            log.cached_tokens = super::extract_cached_tokens(&usage);
+            assert_eq!(
+                (log.input_tokens, log.output_tokens, log.cached_tokens),
+                (Some(1000), Some(20), Some(600))
+            );
+            super::record_user_token_usage(&identity, &log, None, &None);
+        }
+        // (400 uncached × ¥2 + 600 cached × ¥0.5 + 20 output × ¥8) / million.
+        let logs = db::usage_logs_for_token(&token.id, 1).unwrap();
+        assert_eq!(logs.total, 3);
+        assert!(logs
+            .items
+            .iter()
+            .all(|log| log.cost_micros == Some(1260) && log.model == "wb-sonnet"));
+        assert_eq!(
+            db::get_token_by_id(&token.id)
+                .unwrap()
+                .unwrap()
+                .balance_micros,
+            Some(1_000_000 - 3 * 1260)
+        );
+        // Per-call prices remain independent of usage.credit and token counts.
+        billing::save_prices(vec![billing::ModelPrice {
+            pattern: "wb-sonnet".into(),
+            price: billing::Price::PerCall {
+                call_price_micros: 50_000,
+            },
+        }])
+        .unwrap();
+        let mut log = sample_log("workbuddy-call", 0);
+        log.model = Some("wb-sonnet".into());
+        log.status = 200;
+        super::record_user_token_usage(&identity, &log, None, &None);
+        assert_eq!(
+            db::get_token_by_id(&token.id)
+                .unwrap()
+                .unwrap()
+                .balance_micros,
+            Some(946_220)
         );
     }
 

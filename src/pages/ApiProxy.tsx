@@ -1,3 +1,4 @@
+import { useSearchParams } from 'react-router-dom';
 import { useState, useEffect, useMemo, startTransition } from 'react';
 import { useTranslation } from 'react-i18next';
 import { request as invoke } from '../utils/request';
@@ -39,6 +40,8 @@ import ImageThinkingMode from '../components/settings/ImageThinkingMode';
 import ThinkingBudget from '../components/settings/ThinkingBudget';
 import MultimodalSettings from '../components/settings/MultimodalSettings';
 import AgentSettings from '../components/settings/AgentSettings';
+import WorkBuddySettings from '../components/proxy/WorkBuddySettings';
+import WorkBuddyScheduling from '../components/proxy/WorkBuddyScheduling';
 import { CircuitBreakerConfig } from '../types/config';
 
 interface ProxyStatus {
@@ -159,7 +162,9 @@ export default function ApiProxy() {
     });
 
     const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
-    const [activeMenuTab, setActiveMenuTab] = useState<'settings' | 'models' | 'cli' | 'protocols'>('settings');
+    const [searchParams] = useSearchParams();
+    const showWorkBuddy = searchParams.get('section') === 'workbuddy';
+    const [activeMenuTab, setActiveMenuTab] = useState<'settings' | 'models' | 'cli' | 'protocols'>(showWorkBuddy ? 'models' : 'settings');
     const [configLoading, setConfigLoading] = useState(true);
     const [configError, setConfigError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -2073,6 +2078,9 @@ print(response.choices[0].message.content)`;
                                 </CollapsibleCard>
 
                                 {/* 模型路由中心 紧随其后 */}
+                                <CollapsibleCard defaultExpanded={showWorkBuddy} title={t('workbuddy.title')} icon={<Share2 size={18} className="text-blue-500" />}>
+                                    <WorkBuddySettings onSaved={refreshModels} />
+                                </CollapsibleCard>
                                 {renderModelRouterSection()}
                             </div>
                         )}
@@ -2171,7 +2179,7 @@ print(response.choices[0].message.content)`;
                                                         <HelpTooltip text={t('proxy.config.scheduling.max_wait_tooltip')} />
                                                     </label>
                                                     <span className="text-xs font-mono text-indigo-600 font-bold">
-                                                        {appConfig.proxy.scheduling?.max_wait_seconds || 60}s
+                                                        {appConfig.proxy.scheduling?.max_wait_seconds ?? 60}s
                                                     </span>
                                                 </div>
                                                 <input
@@ -2181,7 +2189,7 @@ print(response.choices[0].message.content)`;
                                                     step="10"
                                                     disabled={(appConfig.proxy.scheduling?.mode || 'Balance') !== 'CacheFirst'}
                                                     className="range range-indigo range-xs"
-                                                    value={appConfig.proxy.scheduling?.max_wait_seconds || 60}
+                                                    value={appConfig.proxy.scheduling?.max_wait_seconds ?? 60}
                                                     onChange={(e) => updateSchedulingConfig({ max_wait_seconds: parseInt(e.target.value) })}
                                                 />
                                                 <div className="flex justify-between px-1 mt-1 text-[10px] text-gray-400 font-mono">
@@ -2200,7 +2208,7 @@ print(response.choices[0].message.content)`;
                                             <div className="bg-indigo-50 dark:bg-indigo-900/20 rounded-xl p-4 border border-indigo-200 dark:border-indigo-800">
                                                 <div className="flex items-center justify-between mb-3">
                                                     <label className="text-xs font-medium text-gray-700 dark:text-gray-300 inline-flex items-center gap-1">
-                                                        🔒 {t('proxy.config.scheduling.fixed_account', { defaultValue: 'Fixed Account Mode' })}
+                                                        🔒 Antigravity · {t('proxy.config.scheduling.fixed_account', { defaultValue: 'Fixed Account Mode' })}
                                                         <HelpTooltip text={t('proxy.config.scheduling.fixed_account_tooltip', { defaultValue: 'When enabled, all API requests will use only the selected account instead of rotating between accounts.' })} />
                                                     </label>
                                                     <input
@@ -2240,6 +2248,7 @@ print(response.choices[0].message.content)`;
                                                         {t('proxy.config.scheduling.start_proxy_first', { defaultValue: 'Start the proxy service to configure fixed account mode.' })}
                                                     </p>
                                                 )}
+                                                <WorkBuddyScheduling />
                                             </div>
                                         </div>
                                     </div>

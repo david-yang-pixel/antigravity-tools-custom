@@ -192,8 +192,11 @@ pub async fn internal_start_proxy_service(
     // 3. 加載賬號
     let active_accounts = token_manager.load_accounts().await.unwrap_or(0);
 
-    if active_accounts == 0 {
-        tracing::warn!("沒有可用賬號，反代邏輯將暫停，請通過管理界面添加。");
+    let workbuddy_ready = crate::modules::workbuddy::load()
+        .map(|settings| settings.enabled)
+        .unwrap_or(false);
+    if active_accounts == 0 && !workbuddy_ready {
+        tracing::warn!("没有可用账号或已启用的 WorkBuddy 上游，反代逻辑暂停。");
         return Ok(ProxyStatus {
             running: false,
             port: config.port,

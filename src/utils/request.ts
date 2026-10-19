@@ -188,6 +188,16 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_model_prices': { url: '/api/model-prices', method: 'GET' },
   'save_model_prices': { url: '/api/model-prices', method: 'POST' },
   'get_portal_settings': { url: '/api/portal-settings', method: 'GET' },
+  'get_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'GET' },
+  'save_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'POST' },
+  'list_workbuddy_accounts': { url: '/api/workbuddy-accounts', method: 'GET' },
+  'import_workbuddy_account': { url: '/api/workbuddy-accounts', method: 'POST' },
+  'update_workbuddy_account': { url: '/api/workbuddy-accounts/update', method: 'POST' },
+  'delete_workbuddy_account': { url: '/api/workbuddy-accounts/delete', method: 'POST' },
+  'start_workbuddy_login': { url: '/api/workbuddy-login/start', method: 'POST' },
+  'poll_workbuddy_login': { url: '/api/workbuddy-login/poll', method: 'POST' },
+  'cancel_workbuddy_login': { url: '/api/workbuddy-login/cancel', method: 'POST' },
+
   'save_portal_settings': { url: '/api/portal-settings', method: 'POST' },
   'send_portal_test_email': { url: '/api/portal-settings/test-email', method: 'POST' },
 

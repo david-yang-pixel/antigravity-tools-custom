@@ -16,6 +16,7 @@ pub mod security;
 pub mod proxy_pool;
 // 导出 user_token 命令
 pub mod user_token;
+pub mod workbuddy;
 // 导出 patch 命令
 pub mod patch;
 pub use patch::*;
@@ -503,6 +504,10 @@ pub async fn save_config(
         instance
             .axum_server
             .update_proxy_pool(config.proxy.proxy_pool.clone())
+            .await;
+        instance
+            .token_manager
+            .update_sticky_config(config.proxy.scheduling.clone())
             .await;
         // 更新熔断配置
         instance
