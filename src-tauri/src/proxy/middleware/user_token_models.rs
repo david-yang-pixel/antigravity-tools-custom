@@ -1,4 +1,4 @@
-//! Protocol-independent, exact client model-ID allowlist enforcement.
+//! Protocol-independent model extraction and billable/free catalog filtering.
 use axum::{
     body::{to_bytes, Body},
     extract::{FromRequest, FromRequestParts, Multipart, Path, Request},
@@ -20,12 +20,8 @@ fn invalid_model() -> Response {
     error(
         StatusCode::BAD_REQUEST,
         "model_required",
-        "Provide one explicit model ID for this restricted API key.",
+        "Provide one explicit model ID for this API key.",
     )
-}
-pub fn model_allowed(allowed: &[String], model: &str) -> bool {
-    let id = model.strip_prefix("models/").unwrap_or(model);
-    allowed.is_empty() || allowed.iter().any(|m| m == id)
 }
 pub fn is_model_list(request: &Request) -> bool {
     request.method() == Method::GET
@@ -37,18 +33,6 @@ pub fn is_model_list(request: &Request) -> bool {
                 | "/responses/models"
                 | "/v1beta/models"
         )
-}
-
-/// Exact allowlist check for a model read by [`requested_model`].
-pub fn ensure_allowed(allowed: &[String], model: Option<&str>) -> Result<(), Response> {
-    match model {
-        Some(model) if !allowed.is_empty() && !allowed.iter().any(|m| m == model) => Err(error(
-            StatusCode::FORBIDDEN,
-            "model_not_allowed",
-            "This API key is not permitted to use the requested model.",
-        )),
-        _ => Ok(()),
-    }
 }
 
 /// The one model a request targets, read without consuming it. `None` for routes
@@ -138,8 +122,12 @@ pub async fn requested_model(mut request: Request) -> Result<(Request, Option<St
     Ok((request, Some(model)))
 }
 
-pub async fn filter_model_list(response: Response, allowed: &[String]) -> Response {
-    if allowed.is_empty() || !response.status().is_success() {
+pub async fn filter_model_list(
+    response: Response,
+    free_models: &[String],
+    prices: &[crate::modules::billing::ModelPrice],
+) -> Response {
+    if !response.status().is_success() {
         return response;
     }
     let (mut parts, body) = response.into_parts();
@@ -164,7 +152,9 @@ pub async fn filter_model_list(response: Response, allowed: &[String]) -> Respon
                     .get("id")
                     .or_else(|| model.get("name"))
                     .and_then(Value::as_str)
-                    .is_some_and(|id| model_allowed(allowed, id))
+                    .is_some_and(|id| {
+                        crate::modules::billing::policy_for_model(free_models, prices, id).is_some()
+                    })
             });
         }
     }
@@ -189,10 +179,16 @@ mod tests {
             Ok(resolved) => resolved,
             Err(r) => return r,
         };
-        match ensure_allowed(&["allowed-model".into()], model.as_deref()) {
-            Ok(()) => next.run(request).await,
-            Err(r) => r,
+        if model.as_deref().is_some_and(|id| {
+            crate::modules::billing::policy_for_model(&["allowed-model".into()], &[], id).is_none()
+        }) {
+            return error(
+                StatusCode::FORBIDDEN,
+                "model_not_priced",
+                "Model unavailable",
+            );
         }
+        next.run(request).await
     }
     fn app() -> Router {
         Router::new()
@@ -294,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn user_token_models_filter_both_catalog_formats() {
         let response=Json(serde_json::json!({"data":[{"id":"allowed-model"},{"id":"denied"}],"models":[{"name":"models/allowed-model"},{"name":"models/denied"}]})).into_response();
-        let r = filter_model_list(response, &["allowed-model".into()]).await;
+        let r = filter_model_list(response, &["allowed-model".into()], &[]).await;
         let v: Value =
             serde_json::from_slice(&to_bytes(r.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(v["data"].as_array().unwrap().len(), 1);
@@ -318,7 +314,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             app().oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
+            StatusCode::OK
         );
         let body = "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nallowed-model\r\n--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ndenied\r\n--b--\r\n";
         let request = Request::builder()

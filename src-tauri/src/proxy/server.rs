@@ -2503,11 +2503,11 @@ async fn admin_user_token_models(State(state): State<AppState>) -> Json<Vec<Stri
 async fn admin_create_user_token(
     Json(payload): Json<crate::commands::user_token::CreateTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::modules::user_token_db::validate_limits(payload.max_concurrency, payload.token_quota)
+    crate::modules::user_token_db::validate_limits(payload.max_concurrency, 0)
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
-    crate::modules::user_token_db::normalize_allowed_models(payload.allowed_models.clone())
+    crate::modules::user_token_db::normalize_free_models(payload.free_models.clone())
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
-    crate::modules::billing::validate_balance(payload.balance_micros)
+    crate::modules::billing::validate_balance(Some(payload.balance_micros))
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     let token = crate::commands::user_token::create_user_token(payload)
         .await
@@ -2559,13 +2559,10 @@ async fn admin_update_user_token(
     Path(id): Path<String>,
     Json(payload): Json<crate::commands::user_token::UpdateTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::modules::user_token_db::validate_limits(
-        payload.max_concurrency.unwrap_or(0),
-        payload.token_quota.unwrap_or(0),
-    )
-    .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
-    if let Some(models) = &payload.allowed_models {
-        crate::modules::user_token_db::normalize_allowed_models(models.clone())
+    crate::modules::user_token_db::validate_limits(payload.max_concurrency.unwrap_or(0), 0)
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
+    if let Some(models) = &payload.free_models {
+        crate::modules::user_token_db::normalize_free_models(models.clone())
             .map_err(|error| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })))?;
     }
     if let Some(balance) = payload.balance_micros {
@@ -2583,7 +2580,9 @@ async fn admin_update_user_token(
     crate::commands::user_token::update_user_token(id, payload)
         .await
         .map_err(|e| {
-            let status = if e.starts_with(crate::modules::user_token_db::OWNED_KEY_REQUIRES_QUOTA) {
+            let status = if e
+                .starts_with(crate::modules::user_token_db::OWNED_KEY_REQUIRES_ACTIVE_ACCOUNT)
+            {
                 StatusCode::BAD_REQUEST
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR

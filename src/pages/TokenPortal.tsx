@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, AlertTriangle, ArrowRight, LogOut, RefreshCw } from 'lucide-react';
+import { Activity, ArrowRight, LogOut, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toQuotaMillions } from '../components/user-token/tokenQuota';
 import TokenConnectionDetails from '../components/user-token/TokenConnectionDetails';
@@ -25,17 +25,14 @@ interface Overview {
     username: string;
     token_hint: string;
     account_email: string | null;
-    pending_activation: boolean;
     expired: boolean;
     expires_at: number | null;
     max_concurrency: number;
-    token_quota: number;
     total_tokens_used: number;
-    remaining_tokens: number | null;
     total_requests: number;
-    /** Prepaid balance in micro-yuan; null when the key is not billed. */
+    /** Prepaid balance in micro-yuan. */
     balance_micros: number | null;
-    allowed_models: string[];
+    free_models: string[];
     available_models: string[];
     model_prices: (Price & { model: string })[];
     topup_orders: TopupOrder[];
@@ -155,8 +152,7 @@ export default function TokenPortal() {
             setLogRange(range);
             setKeyError(''); setNotice('');
             setOverview(result); setUpdatedAt(new Date());
-            if (firstLoad && returnedOrder && result.balance_micros !== null) setMenu('balance');
-            if (result.balance_micros === null) setMenu(current => current === 'balance' ? 'overview' : current);
+            if (firstLoad && returnedOrder) setMenu('balance');
             if (next.kind === 'account' && firstLoad) void loadAccountKey();
         } catch {
             if (!controller.signal.aborted && !silent) setError(t('token_portal.load_error'));
@@ -168,19 +164,15 @@ export default function TokenPortal() {
     const reload = (page = overview?.logs.page ?? 1, range: LogTimeRange = logRange) => { if (auth.current) void load(auth.current, page, range); };
     const isAccount = auth.current?.kind === 'account';
     const currentKey = auth.current?.kind === 'key' ? auth.current.token : accountKey;
-    const menus = portalMenus.filter(item => item !== 'balance' || overview?.balance_micros !== null);
+    const menus = portalMenus;
 
     const unlimited = t('user_token.unlimited');
     const million = (n: number) => `${toQuotaMillions(n)} M tokens`;
-    const billed = overview !== null && overview.balance_micros !== null;
-    const exhausted = overview?.remaining_tokens === 0 || (billed && (overview?.balance_micros ?? 0) <= 0);
-    const quotaUnlimited = overview?.remaining_tokens === null;
-    const status = overview?.pending_activation ? t('token_portal.pending_activation') : overview?.expired ? t('token_portal.expired') : exhausted ? t(billed ? 'billing.insufficient' : 'user_token.quota_exhausted') : t('token_portal.active');
+    const exhausted = overview !== null && (overview.balance_micros ?? 0) <= 0;
+    const status = overview?.expired ? t('token_portal.expired') : exhausted ? t('billing.insufficient') : t('token_portal.active');
     const priceOf = (model: string) => overview?.model_prices.find(price => price.model === model);
-    // The price list is public to every key once any price is set; only billed keys are charged by it.
-    const showPrices = billed || (overview?.model_prices.length ?? 0) > 0;
+    const isFreeModel = (model: string) => (overview?.free_models ?? []).some(free => free.replace(/^models\//, '') === model.replace(/^models\//, ''));
     const rows = overview?.models.filter(m => m.model.toLowerCase().includes(search.toLowerCase())) ?? [];
-    const usedPercent = overview && overview.token_quota > 0 ? Math.min(100, overview.total_tokens_used / overview.token_quota * 100) : 0;
     const date = (ts: number) => new Date(ts * 1000).toLocaleString(i18n.language, { timeZone: 'Asia/Shanghai' });
 
     return (
@@ -218,40 +210,30 @@ export default function TokenPortal() {
                             {updatedAt && <p className="mt-2 text-xs text-slate-400">{t('token_portal.updated')}: {updatedAt.toLocaleTimeString(i18n.language)}</p>}</div>
                     </section>
                     {error && <p role="alert" className="text-sm text-red-600 rounded-lg bg-red-50 px-4 py-3">{error}</p>}
-                    {overview.pending_activation && <p className="flex gap-2 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800"><AlertTriangle size={16} className="shrink-0 mt-0.5" />{billed && config?.topup?.enabled
-                        ? t('topup.pending_banner', { min: formatYuan(config.topup.min_amount_cents * 10_000) })
-                        : t(billed ? 'billing.pending_banner' : 'token_portal.pending_banner')}</p>}
                     <div id="portal-panel-overview" hidden={menu !== 'overview'} className="space-y-8">
                     <section aria-label={t('token_portal.summary')} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                        {billed && <button type="button" onClick={() => setMenu('balance')} aria-controls="portal-panel-balance" className="text-left bg-white border border-slate-200 rounded-xl p-5 hover:border-blue-300 hover:bg-blue-50/30 focus-visible:ring-2 focus-visible:ring-blue-500">
+                        <button type="button" onClick={() => setMenu('balance')} aria-controls="portal-panel-balance" className="text-left bg-white border border-slate-200 rounded-xl p-5 hover:border-blue-300 hover:bg-blue-50/30 focus-visible:ring-2 focus-visible:ring-blue-500">
                             <span className="flex items-center justify-between text-sm text-slate-500 mb-3">{t('billing.balance')}<ArrowRight size={16} aria-hidden="true" /></span>
                             <span className="block text-xl font-semibold tracking-tight break-words">{formatYuan(overview.balance_micros ?? 0)}</span>
-                        </button>}
+                        </button>
                         {[
                             [t('token_portal.used'), million(overview.total_tokens_used)],
-                            ...(billed && quotaUnlimited ? [] : [[t('token_portal.remaining'), quotaUnlimited ? unlimited : million(overview.remaining_tokens ?? 0)]]),
                             [t('token_portal.requests'), overview.total_requests.toLocaleString()],
                             [t('user_token.max_concurrency'), overview.max_concurrency === 0 ? unlimited : String(overview.max_concurrency)],
                         ].map(([label, value]) => <div key={label} className="bg-white border border-slate-200 rounded-xl p-5"><p className="text-sm text-slate-500 mb-3">{label}</p><p className="text-xl font-semibold tracking-tight break-words">{value}</p></div>)}
                     </section>
-                    {!(billed && quotaUnlimited) && <section className="bg-white border border-slate-200 rounded-xl px-5 py-5 space-y-3">
-                        <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{t('token_portal.quota')}</span><span>{quotaUnlimited ? unlimited : million(overview.token_quota)}</span></div>
-                        {overview.token_quota > 0 && <div role="progressbar" aria-label={t('token_portal.used')} aria-valuenow={Math.round(usedPercent)} aria-valuemin={0} aria-valuemax={100} className="h-2 rounded-full bg-slate-100 overflow-hidden"><div style={{ width: `${usedPercent}%` }} className={`h-full rounded-full ${exhausted ? 'bg-amber-500' : 'bg-blue-500'}`} /></div>}
-                        <p className="text-xs text-slate-500">{t('user_token.quota_settlement_hint')}</p>
-                    </section>}
-                    {(currentKey || isAccount) && <TokenConnectionDetails token={currentKey} account={isAccount ? { pending: overview.pending_activation, onRegenerate: regenerateKey } : undefined} />}
+                    {(currentKey || isAccount) && <TokenConnectionDetails token={currentKey} account={isAccount ? { onRegenerate: regenerateKey } : undefined} />}
                     </div>
-                    {billed && <div id="portal-panel-balance" hidden={menu !== 'balance'}>
+                    <div id="portal-panel-balance" hidden={menu !== 'balance'}>
                         <PortalTopup config={config?.topup} balanceMicros={overview.balance_micros ?? 0} expired={overview.expired}
                             active={menu === 'balance'} refreshKey={(updatedAt?.getTime() ?? 0) + paymentRefresh} request={portalRequest}
                             returnedOrder={returnedOrder} onReturnHandled={() => setReturnedOrder(null)} onSettled={() => reload()} />
-                    </div>}
+                    </div>
                     <section id="portal-panel-models" hidden={menu !== 'models'} className="space-y-3">
-                        <h2 className="text-lg font-semibold">{t('user_token.allowed_models')}</h2>
-                        {overview.allowed_models.length === 0 && <p className="text-sm text-slate-500">{t('token_portal.all_models')}</p>}
-                        {showPrices && <p className="text-sm text-slate-500">{t(billed ? 'billing.portal_prices_hint' : 'billing.portal_prices_hint_unbilled')}</p>}
+                        <h2 className="text-lg font-semibold">{t('token_portal.menu_models')}</h2>
+                        <p className="text-sm text-slate-500">{t('billing.portal_prices_hint')}</p>
                         {overview.available_models.length ? <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-1">
-                            {overview.available_models.map(model => <ModelPriceCard key={model} model={model} price={priceOf(model)} showPrice={showPrices} billed={billed} />)}
+                            {overview.available_models.map(model => <ModelPriceCard key={model} model={model} price={priceOf(model)} free={isFreeModel(model)} />)}
                         </div> : <p className="text-sm text-slate-500">{t('token_portal.empty_catalog')}</p>}
                     </section>
                     <div id="portal-panel-statistics" hidden={menu !== 'statistics'} className="space-y-8">
@@ -259,11 +241,11 @@ export default function TokenPortal() {
                         <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-lg font-semibold">{t('token_portal.by_model')}</h2><label className="sr-only" htmlFor="usage-model-filter">{t('token_portal.search')}</label><input id="usage-model-filter" type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder={t('token_portal.search')} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm w-full sm:w-64" /></div>
                         <div className="overflow-x-auto bg-white border border-slate-200 rounded-xl">
                             <table className="w-full text-sm text-left whitespace-nowrap">
-                                <thead className="bg-slate-50 text-xs text-slate-500"><tr>{['model','requests','input','output','cached','total',...(billed ? ['cost'] : []),'last_used'].map(k => <th key={k} className="px-5 py-4 font-medium" scope="col">{t(k === 'cost' ? 'billing.cost' : `token_portal.${k}`)}</th>)}</tr></thead>
+                                <thead className="bg-slate-50 text-xs text-slate-500"><tr>{['model','requests','input','output','cached','total','cost','last_used'].map(k => <th key={k} className="px-5 py-4 font-medium" scope="col">{t(k === 'cost' ? 'billing.cost' : `token_portal.${k}`)}</th>)}</tr></thead>
                                 <tbody className="divide-y divide-slate-100">{rows.map(row => <tr key={row.model}>
                                     <th scope="row" className="px-5 py-4 font-mono text-xs font-medium">{row.model}</th>
                                     <td className="px-5 py-4">{row.requests.toLocaleString()}{row.failed_requests > 0 && <span className="block text-xs text-slate-400 mt-1">{t('token_portal.failures', { count: row.failed_requests })}</span>}</td>
-                                    <td className="px-5 py-4 tabular-nums">{toQuotaMillions(row.input_tokens)}</td><td className="px-5 py-4 tabular-nums">{toQuotaMillions(row.output_tokens)}</td><td className="px-5 py-4 tabular-nums">{row.cached_tokens === null ? t('token_portal.not_recorded') : toQuotaMillions(row.cached_tokens)}{row.cached_tokens !== null && row.cache_recorded_requests < row.requests && <span className="block text-xs text-slate-400">{t('token_portal.partial_cache')}</span>}</td><td className="px-5 py-4 font-medium tabular-nums">{toQuotaMillions(row.input_tokens + row.output_tokens)}</td>{billed && <td className="px-5 py-4 tabular-nums">{row.cost_micros === null ? '—' : formatYuan(row.cost_micros)}</td>}<td className="px-5 py-4 text-xs text-slate-500">{date(row.last_used_at)}</td>
+                                    <td className="px-5 py-4 tabular-nums">{toQuotaMillions(row.input_tokens)}</td><td className="px-5 py-4 tabular-nums">{toQuotaMillions(row.output_tokens)}</td><td className="px-5 py-4 tabular-nums">{row.cached_tokens === null ? t('token_portal.not_recorded') : toQuotaMillions(row.cached_tokens)}{row.cached_tokens !== null && row.cache_recorded_requests < row.requests && <span className="block text-xs text-slate-400">{t('token_portal.partial_cache')}</span>}</td><td className="px-5 py-4 font-medium tabular-nums">{toQuotaMillions(row.input_tokens + row.output_tokens)}</td><td className="px-5 py-4 tabular-nums">{row.cost_micros === null ? '—' : formatYuan(row.cost_micros)}</td><td className="px-5 py-4 text-xs text-slate-500">{date(row.last_used_at)}</td>
                                 </tr>)}</tbody>
                             </table>
                             {rows.length === 0 && <p className="text-center text-sm text-slate-500 py-12">{t(overview.models.length ? 'token_portal.no_matches' : 'token_portal.empty')}</p>}
@@ -273,7 +255,7 @@ export default function TokenPortal() {
                     <TokenUsageDetails view="statistics" daily={overview.daily} weekly={overview.weekly} logs={overview.logs} busy={busy} onPage={page => reload(page)} />
                     </div>
                     <div id="portal-panel-logs" hidden={menu !== 'logs'}>
-                        <TokenUsageDetails view="logs" daily={overview.daily} weekly={overview.weekly} logs={overview.logs} busy={busy} showCost={billed} onPage={page => reload(page)} onFilter={range => reload(1, range)} />
+                        <TokenUsageDetails view="logs" daily={overview.daily} weekly={overview.weekly} logs={overview.logs} busy={busy} showCost onPage={page => reload(page)} onFilter={range => reload(1, range)} />
                     </div>
                 </main>
             )}

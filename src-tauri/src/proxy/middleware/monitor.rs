@@ -305,7 +305,7 @@ fn record_user_token_usage(
             .and_then(|permit| permit.model())
             .or(log.model.as_deref())
             .unwrap_or("unknown");
-        let result = crate::modules::user_token_db::record_token_usage_with_cache(
+        let result = crate::modules::user_token_db::record_token_usage_with_policy(
             &identity.token_id,
             log.client_ip.as_deref().unwrap_or("127.0.0.1"),
             model,
@@ -314,6 +314,7 @@ fn record_user_token_usage(
             log.cached_tokens,
             log.status as u16,
             user_agent,
+            permit.as_ref().and_then(|permit| permit.billing_policy()),
         );
         if let Err(error) = result {
             tracing::error!("Failed to persist user token usage: {error}");
@@ -1882,7 +1883,14 @@ mod tests {
                 (log.input_tokens, log.output_tokens, log.cached_tokens),
                 (Some(1000), Some(20), Some(600))
             );
-            super::record_user_token_usage(&identity, &log, None, &None);
+            let permit =
+                super::super::user_token_limits::UserTokenPermit::acquire(&token.id, 0).unwrap();
+            permit.set_billing_policy(
+                "wb-sonnet".into(),
+                billing::policy_for_model(&[], &billing::load_prices().unwrap(), "wb-sonnet")
+                    .unwrap(),
+            );
+            super::record_user_token_usage(&identity, &log, None, &Some(permit));
         }
         // (400 uncached × ¥2 + 600 cached × ¥0.5 + 20 output × ¥8) / million.
         let logs = db::usage_logs_for_token(&token.id, 1).unwrap();
@@ -1909,7 +1917,13 @@ mod tests {
         let mut log = sample_log("workbuddy-call", 0);
         log.model = Some("wb-sonnet".into());
         log.status = 200;
-        super::record_user_token_usage(&identity, &log, None, &None);
+        let permit =
+            super::super::user_token_limits::UserTokenPermit::acquire(&token.id, 0).unwrap();
+        permit.set_billing_policy(
+            "wb-sonnet".into(),
+            billing::policy_for_model(&[], &billing::load_prices().unwrap(), "wb-sonnet").unwrap(),
+        );
+        super::record_user_token_usage(&identity, &log, None, &Some(permit));
         assert_eq!(
             db::get_token_by_id(&token.id)
                 .unwrap()

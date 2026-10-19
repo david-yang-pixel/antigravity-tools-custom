@@ -3,7 +3,6 @@ import { CheckCircle2, CreditCard, Mail, RefreshCw, AlertTriangle } from 'lucide
 import { useTranslation } from 'react-i18next';
 import { request as invoke } from '../../utils/request';
 import { showToast } from '../common/ToastContainer';
-import ModelAccessFields from './ModelAccessFields';
 import { parseYuan, toYuan } from './money';
 
 type SmtpSecurity = 'tls' | 'starttls' | 'none';
@@ -12,7 +11,6 @@ interface PortalSettings {
     registration_enabled: boolean;
     allowed_email_domains: string[];
     default_max_concurrency: number;
-    default_allowed_models: string[];
     default_expires_type: string;
     smtp: {
         host: string;
@@ -45,8 +43,6 @@ interface PortalSettingsView extends PortalSettings {
 
 interface Props {
     open: boolean;
-    models: string[];
-    modelLoadError: boolean;
     onClose: () => void;
 }
 
@@ -73,18 +69,12 @@ const ENV_NAMES: Record<string, string> = {
 };
 const PAY_TYPES = ['alipay', 'wxpay'] as const;
 
-export function portalErrorText(t: (key: string) => string, error: unknown): string {
-    const text = String(error);
-    return text.startsWith('registered_token_requires_quota') ? t('user_token.registered_requires_quota') : text;
-}
-
 /** Registration switch, defaults for new accounts' keys, and SMTP for verification codes. */
-export default function PortalSettingsModal({ open, models, modelLoadError, onClose }: Props) {
+export default function PortalSettingsModal({ open, onClose }: Props) {
     const { t } = useTranslation();
     const [view, setView] = useState<PortalSettingsView | null>(null);
     const [form, setForm] = useState<PortalSettings | null>(null);
     const [domains, setDomains] = useState('');
-    const [restricted, setRestricted] = useState(false);
     const [password, setPassword] = useState('');
     const [paymentKey, setPaymentKey] = useState('');
     const [minAmount, setMinAmount] = useState('');
@@ -97,7 +87,6 @@ export default function PortalSettingsModal({ open, models, modelLoadError, onCl
         setView(next);
         setForm(next);
         setDomains(next.allowed_email_domains.join(', '));
-        setRestricted(next.default_allowed_models.length > 0);
         setPassword('');
         setPaymentKey('');
         // Yuan in the form, cents on the wire.
@@ -123,10 +112,6 @@ export default function PortalSettingsModal({ open, models, modelLoadError, onCl
 
     async function save(): Promise<boolean> {
         if (!form) return false;
-        if (restricted && form.default_allowed_models.length === 0) {
-            showToast(t('user_token.select_model_required'), 'error');
-            return false;
-        }
         const minCents = yuanToCents(minAmount);
         const maxCents = yuanToCents(maxAmount);
         if (minCents === null || maxCents === null || minCents < 1 || maxCents < minCents) {
@@ -137,9 +122,11 @@ export default function PortalSettingsModal({ open, models, modelLoadError, onCl
         try {
             const next = await invoke<PortalSettingsView>('save_portal_settings', {
                 request: {
-                    ...form,
+                    registration_enabled: form.registration_enabled,
+                    default_max_concurrency: form.default_max_concurrency,
+                    default_expires_type: form.default_expires_type,
+                    smtp: form.smtp,
                     allowed_email_domains: domains.split(/[\s,]+/).filter(Boolean),
-                    default_allowed_models: restricted ? form.default_allowed_models : [],
                     payment: { ...form.payment, min_amount_cents: minCents, max_amount_cents: maxCents },
                     ...(password ? { smtp_password: password } : {}),
                     ...(paymentKey ? { payment_key: paymentKey } : {}),
@@ -211,8 +198,6 @@ export default function PortalSettingsModal({ open, models, modelLoadError, onCl
                                 </select>
                             </div>
                         </div>
-                        <ModelAccessFields prefix="portal" restricted={restricted} selected={form.default_allowed_models} models={models} loadError={modelLoadError}
-                            onRestrictedChange={setRestricted} onSelectedChange={selected => setForm({ ...form, default_allowed_models: selected })} />
                     </section>
 
                     <section className="space-y-3 border-t border-gray-100 dark:border-base-200 pt-4">

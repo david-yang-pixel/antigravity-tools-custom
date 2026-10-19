@@ -13,8 +13,7 @@ export function toQuotaMillions(tokens: number): string {
     return fraction ? `${whole}.${fraction}` : String(whole);
 }
 
-export function validTokenLimits(concurrency: string, quota: string): boolean {
+export function validMaxConcurrency(concurrency: string): boolean {
     return /^\d+$/.test(concurrency)
-        && Number.isSafeInteger(Number(concurrency)) && Number(concurrency) <= 2147483647
-        && parseQuotaMillions(quota) !== null;
+        && Number.isSafeInteger(Number(concurrency)) && Number(concurrency) <= 2147483647;
 }

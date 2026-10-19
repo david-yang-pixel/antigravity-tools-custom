@@ -217,8 +217,10 @@ pub struct PortalSettings {
     pub registration_enabled: bool,
     /// Allowed email domains (subdomains included); empty allows every domain.
     pub allowed_email_domains: Vec<String>,
-    /// Limits copied onto each newly registered key. Quota always starts at 0.
+    /// Concurrency and expiry copied onto each newly registered key.
     pub default_max_concurrency: i32,
+    /// Obsolete access policy; never becomes a free-model default.
+    #[serde(skip)]
     pub default_allowed_models: Vec<String>,
     pub default_expires_type: String,
     pub smtp: SmtpSettings,
@@ -267,8 +269,7 @@ impl PortalSettings {
         ) {
             return Err("Default expiry must be day, week, month or never".into());
         }
-        self.default_allowed_models =
-            crate::modules::user_token_db::normalize_allowed_models(self.default_allowed_models)?;
+        self.default_allowed_models.clear();
         let smtp = &mut self.smtp;
         smtp.host = smtp.host.trim().to_string();
         smtp.username = smtp.username.trim().to_string();
@@ -500,6 +501,29 @@ pub fn save(update: PortalSettingsUpdate) -> Result<PortalSettingsView, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_settings_legacy_model_defaults_do_not_grant_free_use() {
+        let settings: PortalSettings = serde_json::from_value(serde_json::json!({
+            "default_allowed_models": ["legacy-model", "*"],
+            "default_max_concurrency": 3
+        }))
+        .unwrap();
+        assert!(settings.default_allowed_models.is_empty());
+        let normalized = settings.normalize().unwrap();
+        assert_eq!(normalized.default_max_concurrency, 3);
+        assert!(serde_json::to_value(normalized)
+            .unwrap()
+            .get("default_allowed_models")
+            .is_none());
+        let configured = PortalSettings {
+            default_allowed_models: vec!["legacy-model".into()],
+            ..Default::default()
+        }
+        .normalize()
+        .unwrap();
+        assert!(configured.default_allowed_models.is_empty());
+    }
 
     #[test]
     fn portal_settings_domain_matching_and_normalization() {
