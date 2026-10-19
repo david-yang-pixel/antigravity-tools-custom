@@ -154,8 +154,15 @@ docker build --build-arg USE_MIRROR=true -t antigravity-manager:latest -f docker
 | `ABV_SMTP_SECURITY` | `tls` | `tls`（465）、`starttls`（587）或 `none`（僅限內網中繼） |
 | `ABV_SMTP_USERNAME` / `ABV_SMTP_PASSWORD` | - | SMTP 登入帳號與密碼（授權碼） |
 | `ABV_SMTP_FROM` / `ABV_SMTP_FROM_NAME` | - | 寄件地址與寄件者名稱 |
+| `ABV_ZPAY_ENABLED` | `false` | 用量中心是否開放線上儲值（ZPay 等相容易支付的閘道） |
+| `ABV_ZPAY_GATEWAY` | `https://zpayz.cn` | 支付閘道位址，必須是 HTTPS（查單請求會帶上商戶密鑰） |
+| `ABV_ZPAY_PID` / `ABV_ZPAY_KEY` | - | 商戶 ID 與商戶密鑰（ZPay 後台「支付渠道 → API安全」） |
+| `ABV_ZPAY_PUBLIC_URL` | - | 本站公網位址，例如 `https://example.com`；回調位址為 `{位址}/api/pay/epay/notify`，用戶付款後返回 `{位址}/usage` |
+| `ABV_ZPAY_PAY_TYPES` | `alipay` | 提供的支付方式，逗號分隔：`alipay`、`wxpay`；只填已開通並簽約的渠道 |
+| `ABV_ZPAY_MIN_AMOUNT` / `ABV_ZPAY_MAX_AMOUNT` | `5` / `1000` | 單筆儲值金額範圍（元，最多兩位小數）；兩者需滿足 0.01 ≤ 最低 ≤ 最高 ≤ 100000，否則忽略 |
+| `ABV_ZPAY_SUBJECT` | `API 调用额度充值` | 支付頁顯示的商品名稱，需如實描述售賣內容（不可含 `&` 或 `=`） |
 
-> 以上用量中心設定也可以在管理後台「用戶 Token → 註冊設置」中修改，保存在數據目錄的 `portal_settings.json`；設置了環境變量的欄位以環境變量為準，後台顯示為鎖定。反向代理（如 Nginx）請以 `proxy_set_header X-Forwarded-For $remote_addr;` 覆蓋客戶端 IP，並傳遞 `X-Forwarded-Proto`，以確保登入限流與 Cookie 的 `Secure` 屬性正確生效。
+> 以上用量中心設定（含線上儲值）也可以在管理後台「用戶 Token → 註冊設置」中修改，保存在數據目錄的 `portal_settings.json`；設置了環境變量的欄位以環境變量為準，後台顯示為鎖定。反向代理（如 Nginx）請以 `proxy_set_header X-Forwarded-For $remote_addr;` 覆蓋客戶端 IP，並傳遞 `X-Forwarded-Proto`，以確保登入限流與 Cookie 的 `Secure` 屬性正確生效。
 
 ## 📂 數據持久化
 請務必將宿主機目錄掛載至容器內的 `/root/.antigravity_tools`，否則賬號和配置在容器重啟後會丟失。
