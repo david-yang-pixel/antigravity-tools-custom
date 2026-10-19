@@ -209,7 +209,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_account_proxy_binding': { url: '/api/proxy/pool/binding/:accountId', method: 'GET' },
 };
 
-export async function request<T>(cmd: string, args?: any): Promise<T> {
+export async function request<T>(cmd: string, args?: any, requestOptions?: { signal?: AbortSignal }): Promise<T> {
   // 1. Tauri 环境：直接使用 invoke ...
   if (isTauri) {
     try {
@@ -250,6 +250,7 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
 
   const options: RequestInit = {
     method: mapping.method,
+    signal: requestOptions?.signal,
     headers: {
       'Content-Type': 'application/json',
       ...(apiKey ? {

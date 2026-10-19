@@ -5,17 +5,24 @@ import { useTranslation } from 'react-i18next';
 import { request } from '../../utils/request';
 import { isTauri } from '../../utils/env';
 import ModalDialog from '../common/ModalDialog';
+import Pagination from '../common/Pagination';
 import { showToast } from '../common/ToastContainer';
 
 import WorkBuddyAccountRow, { type WorkBuddyAccount as Account, type AccountChanges } from './WorkBuddyAccountRow';
 
 interface Login { id: string; auth_url: string; expires_at: number }
+const PAGE_SIZE = 10;
 const button = 'inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed';
 const input = 'w-full rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm outline-none focus:border-blue-500';
 
 export default function WorkBuddyAccounts() {
     const { t } = useTranslation();
     const [accounts, setAccounts] = useState<Account[]>([]);
+    const [page, setPage] = useState(1);
+    const totalPages = Math.max(1, Math.ceil(accounts.length / PAGE_SIZE));
+    const currentPage = Math.min(page, totalPages);
+    const visibleAccounts = accounts.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+    useEffect(() => { setPage(current => Math.min(current, totalPages)); }, [totalPages]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [busy, setBusy] = useState('');
@@ -146,9 +153,10 @@ export default function WorkBuddyAccounts() {
                         {['account_column', 'credits', 'health', 'expires', 'maintenance_column', 'automation_column'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t(`workbuddy.accounts.${key}`)}</th>)}
                         <th scope="col" className="sticky right-0 bg-gray-50 px-4 py-3 text-right font-medium shadow-[-12px_0_12px_-12px_rgba(0,0,0,0.12)] dark:bg-gray-800">{t('common.actions')}</th>
                     </tr></thead>
-                    <tbody>{accounts.map(account => <WorkBuddyAccountRow key={account.id} account={account} now={now} busy={!!busy} onChange={changes => void action(account, changes)} onDelete={() => setDeleting(account)} />)}</tbody>
+                    <tbody>{visibleAccounts.map(account => <WorkBuddyAccountRow key={account.id} account={account} now={now} busy={!!busy} onChange={changes => void action(account, changes)} onDelete={() => setDeleting(account)} />)}</tbody>
                 </table>
             </div>}
+        {!loading && <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} totalItems={accounts.length} itemsPerPage={PAGE_SIZE} />}
         {accounts.length > 0 && <p className="text-xs leading-relaxed text-gray-500">{t('workbuddy.accounts.managed_hint')}</p>}
         <p className="text-xs leading-relaxed text-gray-500">{t('workbuddy.accounts.routing_hint')} <Link to="/api-proxy?section=workbuddy" className="text-blue-600 underline">{t('workbuddy.accounts.routing_link')}</Link></p>
         <ModalDialog isOpen={!!deleting} title={t('workbuddy.accounts.delete_title')} message={t('workbuddy.accounts.delete_hint', { name: deleting?.nickname || deleting?.uid })} type="confirm" isDestructive isLoading={!!busy} onConfirm={remove} onCancel={() => setDeleting(null)} />
