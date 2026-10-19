@@ -1,5 +1,30 @@
 {
   "topup": {
+    "pending_orders": "待付款訂單",
+    "pending_hint": "訂單有效期為建立後 24 小時。到期後從這裡移除，仍可在儲值紀錄中查看。",
+    "col_order": "訂單編號",
+    "continue_pay": "繼續付款",
+    "remaining": "剩餘 {{time}}",
+    "filter": "儲值紀錄狀態",
+    "filter_paid": "已入帳",
+    "filter_closed": "已關閉",
+    "filter_all": "全部",
+    "loading": "正在載入儲值紀錄…",
+    "load_error": "暫時無法載入儲值紀錄，請重新整理後再試。",
+    "history_unavailable": "儲值紀錄暫時無法使用。",
+    "empty_pending": "目前沒有待付款訂單。",
+    "empty_paid": "目前沒有已入帳的儲值紀錄。",
+    "empty_closed": "目前沒有已關閉的訂單。",
+    "empty_all": "目前沒有儲值紀錄。",
+    "pagination": "共 {{total}} 筆 · 第 {{page}} / {{pages}} 頁",
+    "previous": "上一頁",
+    "next": "下一頁",
+    "return_closed": "訂單已關閉，無法繼續付款。如已付款，請稍後重新整理以查看入帳情況。",
+    "error_order_expired": "訂單已過期，無法繼續付款。請重新發起儲值。",
+    "error_order_not_found": "找不到這筆訂單，請重新整理儲值紀錄。",
+    "error_payment_timeout": "支付請求逾時，訂單可能已建立。請關閉視窗，在待支付訂單中查看並繼續支付。",
+    "error_payment_check_failed": "暫時無法確認訂單的付款狀態，請稍後再試。",
+
     "button": "儲值",
     "hint": "線上付款後餘額即時到帳，最低 {{min}}。",
     "orders": "儲值紀錄",
@@ -23,7 +48,7 @@
     "return_checking": "正在確認付款結果…",
     "return_paid": "儲值成功，餘額已增加 {{amount}}。",
     "return_waiting": "暫未查到付款結果。如果已經付款，通常幾分鐘內會自動到帳，請稍後重新整理查看。",
-    "return_login": "付款已完成，請重新登入查看到帳情況。",
+    "return_login": "請重新登入查看付款結果；未完成的訂單可繼續付款。",
     "pending_banner": "帳號尚未開通，暫時無法呼叫 API。儲值 {{min}} 起即可自動開通。",
     "error_unavailable": "暫時無法發起付款，請稍後再試。",
     "error_topup_disabled": "線上儲值暫未開放。",
@@ -99,7 +124,9 @@
     "per_million_tokens": "/ 百萬 Token",
     "per_call_unit": "/ 次",
     "free": "免費",
-    "cost": "費用"
+    "cost": "費用",
+    "request_cost": "本次消費",
+    "request_cost_hint": "顯示每次請求完成時從餘額實際扣除的金額，精確到 ¥0.000001。¥0.00 表示未扣費；— 表示沒有記錄扣費金額。"
   },
   "common": {
     "empty": "空",
@@ -2066,6 +2093,7 @@
     "success": "已成功刪除思考塊快取，將在後續對話中自動重建。"
   },
   "token_portal": {
+    "menu_balance": "餘額",
     "menu_overview": "用量概覽",
     "menu_models": "可用模型",
     "menu_statistics": "用量統計",

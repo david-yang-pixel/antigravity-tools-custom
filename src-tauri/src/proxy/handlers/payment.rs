@@ -148,12 +148,15 @@ pub async fn reconcile_order(
     merchant: &Merchant,
     out_trade_no: &str,
 ) -> Result<bool, String> {
-    let remote = epay::query_order(client, merchant, out_trade_no).await?;
-    if !remote.paid {
-        return Ok(false);
-    }
+    let remote = match epay::query_order(client, merchant, out_trade_no).await? {
+        epay::OrderLookup::Missing => return Ok(false),
+        epay::OrderLookup::Found(remote) => remote,
+    };
     if remote.pid.as_deref().is_some_and(|pid| pid != merchant.pid) {
         return Err("order query answered for another merchant".into());
+    }
+    if !remote.paid {
+        return Ok(false);
     }
     let paid_cents = remote
         .amount_cents

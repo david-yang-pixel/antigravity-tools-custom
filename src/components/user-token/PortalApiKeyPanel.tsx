@@ -6,10 +6,11 @@ interface Props {
     token: string;
     pending: boolean;
     onRegenerate: () => Promise<boolean>;
+    embedded?: boolean;
 }
 
 /** The signed-in account's single API key: reveal, copy and regenerate. */
-export default function PortalApiKeyPanel({ token, pending, onRegenerate }: Props) {
+export default function PortalApiKeyPanel({ token, pending, onRegenerate, embedded = false }: Props) {
     const { t } = useTranslation();
     const [visible, setVisible] = useState(false);
     const [confirming, setConfirming] = useState(false);
@@ -32,9 +33,9 @@ export default function PortalApiKeyPanel({ token, pending, onRegenerate }: Prop
     }
 
     const button = 'inline-flex items-center gap-1.5 rounded-md px-2 py-2 text-xs hover:bg-slate-200 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50';
-    return <section className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-5" aria-labelledby="api-key-title">
+    return <section className={embedded ? 'space-y-3' : 'bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-5'} aria-labelledby="api-key-title">
         <div>
-            <h2 id="api-key-title" className="text-lg font-semibold">{t('token_portal.api_key_title')}</h2>
+            {embedded ? <h3 id="api-key-title" className="text-sm font-medium">{t('token_portal.api_key_title')}</h3> : <h2 id="api-key-title" className="text-lg font-semibold">{t('token_portal.api_key_title')}</h2>}
             <p className="text-xs text-slate-500 mt-2 leading-5">{t('token_portal.api_key_hint')}</p>
         </div>
         {pending && <p className="flex gap-2 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800"><AlertTriangle size={16} className="shrink-0 mt-0.5" />{t('token_portal.pending_key_hint')}</p>}
