@@ -6,6 +6,8 @@ import time
 import urllib.error
 import urllib.request
 
+from deploy import verify_portal_response
+
 
 def main():
     base = sys.argv[1]
@@ -45,6 +47,7 @@ def main():
     key = token['token']
     token_path = '/api/user-tokens/' + token['id']
     overview = request('/api/token-portal/me', key=key)
+    verify_portal_response(overview)
     assert overview['max_concurrency'] == 2
     assert overview['balance_micros'] == 0 and overview['free_models'] == []
     assert not {'token_quota', 'remaining_tokens', 'allowed_models'} & overview.keys()

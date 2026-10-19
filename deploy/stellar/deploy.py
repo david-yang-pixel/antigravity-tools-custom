@@ -65,6 +65,19 @@ def image_version(labels):
     return version
 
 
+def verify_portal_response(overview):
+    """Shared with isolated smoke tests so deployment checks track the live API."""
+    required = {'logs', 'daily', 'weekly', 'available_models', 'model_prices',
+                'max_concurrency', 'balance_micros', 'free_models'}
+    if not isinstance(overview, dict) or not required <= overview.keys():
+        raise RuntimeError('Portal response incomplete')
+    # Zero and negative balances are valid; null must never disable billing.
+    if (type(overview['balance_micros']) is not int
+            or not isinstance(overview['free_models'], list)
+            or not all(isinstance(model, str) for model in overview['free_models'])):
+        raise RuntimeError('Portal billing response invalid')
+
+
 def verify(image, version):
     state = json.loads(run(['docker', 'inspect', CONTAINER], capture_output=True).stdout)[0]
     if state['Image'] != inspect_image(image)['Id'] or state['State']['Health']['Status'] != 'healthy':
@@ -94,13 +107,12 @@ def verify(image, version):
     request('http://127.0.0.1:8045', '/api/user-tokens', key=admin)
     with sqlite3.connect((ROOT / 'data/user_tokens.db').as_uri() + '?mode=ro', uri=True) as db:
         columns = {row[1] for row in db.execute('PRAGMA table_info(user_tokens)')}
-        if not {'allowed_models', 'max_concurrency', 'token_quota'} <= columns:
+        if not {'balance_micros', 'free_models', 'max_concurrency'} <= columns:
             raise RuntimeError('Token schema migration missing')
         user = db.execute('SELECT token FROM user_tokens WHERE enabled = 1 LIMIT 1').fetchone()
     if user:
         overview = request('http://127.0.0.1:8045', '/api/token-portal/me', key=user[0])
-        if not {'logs', 'daily', 'weekly', 'available_models', 'token_quota'} <= overview.keys():
-            raise RuntimeError('Portal response incomplete')
+        verify_portal_response(overview)
 
 
 def deploy(image, revision, credential):

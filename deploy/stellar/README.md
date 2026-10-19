@@ -68,6 +68,10 @@ The expected `/health` version comes from the image's
 `org.opencontainers.image.version` label, which the workflow reads from
 `src-tauri/Cargo.toml`; an image without it is refused before the service stops.
 Reinstall the helper after changing `deploy.py`.
+The helper validates the current balance-billing schema (`balance_micros`,
+`free_models`, `max_concurrency`) and portal response. `smoke.py` imports the same
+portal validator and exercises it against the built server before publication;
+legacy quota and allowlist fields are not part of this API contract.
 
 The existing `/opt/antigravity-manager/compose.yaml`, `.env`, Nginx, port mapping,
 resource limits and data directory are reused. The old container's machine ID
@@ -85,8 +89,8 @@ They do not establish that all production model providers are available.
 
 If verification fails, the previous Compose/image is restarted automatically.
 The database is retained because this version uses additive migrations; no new
-usage is discarded. The old image does not enforce custom limits or expose the
-portal. Full snapshot restoration is a manual recovery operation, only when
+usage is discarded. Billing and portal behavior after rollback follow the restored
+image's version. Full snapshot restoration is a manual recovery operation, only when
 needed and explicitly authorized. Future destructive migrations must revisit
 this strategy. Backups and old images are retained; no broad Docker cleanup runs.
 
