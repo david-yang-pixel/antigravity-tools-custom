@@ -190,6 +190,8 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_portal_settings': { url: '/api/portal-settings', method: 'GET' },
   'get_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'GET' },
   'save_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'POST' },
+  'start_workbuddy_model_verification': { url: '/api/workbuddy-models/verify', method: 'POST' },
+  'get_workbuddy_model_verification': { url: '/api/workbuddy-models/verify', method: 'GET' },
   'list_workbuddy_accounts': { url: '/api/workbuddy-accounts', method: 'GET' },
   'import_workbuddy_account': { url: '/api/workbuddy-accounts', method: 'POST' },
   'update_workbuddy_account': { url: '/api/workbuddy-accounts/update', method: 'POST' },

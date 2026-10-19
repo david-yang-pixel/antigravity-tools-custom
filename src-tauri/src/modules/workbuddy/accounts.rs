@@ -8,7 +8,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
     path::PathBuf,
     sync::{Arc, LazyLock, Mutex, Weak},
@@ -52,6 +52,13 @@ pub struct Account {
     pub expires_at: i64,
     pub enabled: bool,
     pub models: Vec<Model>,
+    /// Successful probes are separate from the upstream candidate catalog.
+    #[serde(default)]
+    pub verified_models: HashMap<String, i64>,
+    #[serde(default)]
+    pub unavailable_models: HashSet<String>,
+    #[serde(default)]
+    pub models_verified_at: i64,
     pub last_error: Option<String>,
     pub revision: String,
     #[serde(default)]
@@ -66,6 +73,8 @@ pub struct AccountView {
     pub enabled: bool,
     pub expires_at: i64,
     pub models: Vec<Model>,
+    pub candidate_model_count: usize,
+    pub models_verified_at: i64,
     pub last_error: Option<String>,
     pub status: String,
     pub in_flight: usize,
@@ -82,6 +91,22 @@ pub struct Health {
     pub last_success_at: i64,
     pub last_failure_at: i64,
     pub last_error: Option<String>,
+}
+impl Account {
+    pub fn available_models(&self) -> Vec<Model> {
+        self.models
+            .iter()
+            .filter(|model| {
+                self.models_verified_at == 0 || self.verified_models.contains_key(&model.id)
+            })
+            .cloned()
+            .collect()
+    }
+    pub fn supports_model(&self, model: &str) -> bool {
+        // Unknown is not unavailable. Upgrades, reauthorization and transient
+        // probe failures must not make verification an admission prerequisite.
+        !self.unavailable_models.contains(model) && self.models.iter().any(|m| m.id == model)
+    }
 }
 #[derive(Default)]
 struct Runtime {
@@ -189,11 +214,16 @@ pub(super) fn view(account: Account) -> Result<AccountView, String> {
         "expired"
     } else if account.last_error.is_some() {
         "error"
-    } else if account.models.is_empty() {
+    } else if !account
+        .models
+        .iter()
+        .any(|model| account.supports_model(&model.id))
+    {
         "needs_models"
     } else {
         "ready"
     };
+    let models = account.available_models();
     Ok(AccountView {
         id: account.id,
         uid: account.uid,
@@ -201,7 +231,9 @@ pub(super) fn view(account: Account) -> Result<AccountView, String> {
         realm: account.realm,
         enabled: account.enabled,
         expires_at: account.expires_at,
-        models: account.models,
+        models,
+        candidate_model_count: account.models.len(),
+        models_verified_at: account.models_verified_at,
         last_error: account.last_error,
         status: status.into(),
         in_flight: entry.map(|e| e.in_flight).unwrap_or(0),
@@ -259,6 +291,9 @@ pub fn upsert(mut account: Account) -> Result<AccountView, String> {
             account.id = old.id.clone();
             account.enabled = old.enabled;
             account.models = old.models.clone();
+            account.verified_models = old.verified_models.clone();
+            account.unavailable_models = old.unavailable_models.clone();
+            account.models_verified_at = old.models_verified_at;
             account.management = old.management.clone();
             account.management.next_sync_at = 0;
             if account.device_token.is_empty() {
@@ -320,6 +355,9 @@ fn update_if_current(account: &mut Account) -> Result<(), String> {
     account.enabled = old.enabled;
     account.management = old.management.clone();
     account.models = old.models.clone();
+    account.verified_models = old.verified_models.clone();
+    account.unavailable_models = old.unavailable_models.clone();
+    account.models_verified_at = old.models_verified_at;
     account.revision = uuid::Uuid::new_v4().to_string();
     *old = account.clone();
     write(&accounts)
@@ -447,8 +485,48 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.management.auto_checkin = old.management.auto_checkin;
     account.management.keepalive = old.management.keepalive;
     old.models = account.models.clone();
+    // Maintenance does not turn catalog entries into successful verification results.
+    old.verified_models
+        .retain(|id, _| old.models.iter().any(|model| &model.id == id));
+    // A partial catalog sync must not erase a conclusive rejection. Only a
+    // successful explicit probe can restore access for the same account identity.
+    account.verified_models = old.verified_models.clone();
+    account.unavailable_models = old.unavailable_models.clone();
+    account.models_verified_at = old.models_verified_at;
     old.last_error = account.last_error.clone();
     old.management = account.management.clone();
+    write(&accounts)
+}
+pub(super) fn save_verified_models(
+    account: &Account,
+    models: &[Model],
+    unavailable: &[String],
+) -> Result<(), String> {
+    let _lock = STORE_LOCK
+        .lock()
+        .map_err(|_| "WorkBuddy account store unavailable")?;
+    let mut accounts = read()?;
+    let current = accounts
+        .iter_mut()
+        .find(|a| a.id == account.id && a.revision == account.revision && a.enabled)
+        .ok_or("WorkBuddy account changed during verification; fetch models again")?;
+    current.models_verified_at = now();
+    current
+        .unavailable_models
+        .extend(unavailable.iter().cloned());
+    for model in models {
+        current.unavailable_models.remove(&model.id);
+    }
+    current.verified_models = models
+        .iter()
+        .filter(|model| {
+            current
+                .models
+                .iter()
+                .any(|candidate| candidate.id == model.id)
+        })
+        .map(|model| (model.id.clone(), current.models_verified_at))
+        .collect();
     write(&accounts)
 }
 pub fn parse_import(value: Value) -> Result<Account, String> {
@@ -486,6 +564,9 @@ pub fn parse_import(value: Value) -> Result<Account, String> {
             .unwrap_or(0),
         enabled: true,
         models: Vec::new(),
+        verified_models: HashMap::new(),
+        unavailable_models: HashSet::new(),
+        models_verified_at: 0,
         last_error: None,
         revision: uuid::Uuid::new_v4().to_string(),
         management: super::maintenance::Management::default(),
@@ -608,6 +689,7 @@ mod tests {
         assert_eq!(updated.id, view.id);
         assert!(!updated.enabled);
         assert_eq!(updated.models.len(), 1);
+        assert_eq!(updated.candidate_model_count, 1);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

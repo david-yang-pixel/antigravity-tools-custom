@@ -55,13 +55,29 @@ pub(super) fn try_acquire(
     session: &str,
     policy: &Policy,
 ) -> Result<Option<Lease>, String> {
+    try_acquire_inner(model, session, policy, false)
+}
+
+fn try_acquire_inner(
+    model: &str,
+    session: &str,
+    policy: &Policy,
+    probe: bool,
+) -> Result<Option<Lease>, String> {
     let accounts: Vec<_> = all()?
         .into_iter()
-        .filter(|a| a.enabled && a.models.iter().any(|m| m.id == model))
+        .filter(|a| {
+            a.enabled
+                && if probe {
+                    a.models.iter().any(|m| m.id == model)
+                } else {
+                    a.supports_model(model)
+                }
+        })
         .filter(|a| policy.preferred.as_ref().is_none_or(|id| &a.id == id))
         .collect();
     if accounts.is_empty() {
-        return Err("No eligible WorkBuddy account for this model; check the fixed account, enablement and model sync".into());
+        return Err("No eligible WorkBuddy account for this model; check the fixed account, enablement and fetch verified models".into());
     }
     let mut pool = RUNTIME.lock().map_err(|_| "WorkBuddy pool unavailable")?;
     let mut sessions = SESSIONS
@@ -139,6 +155,29 @@ pub(super) fn try_acquire(
         finished: std::sync::atomic::AtomicBool::new(false),
         breaker: policy.breaker.clone(),
     }))
+}
+
+/// Explicit verification shares the real pool's capacity and cooldown state, but
+/// can retry models previously rejected for this account after permissions change.
+pub async fn acquire_probe(account: &Account, model: &str) -> Result<Lease, String> {
+    let policy = Policy {
+        preferred: Some(account.id.clone()),
+        breaker: crate::modules::config::load_app_config()?.circuit_breaker,
+        ..Policy::default()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(lease) = try_acquire_inner(model, "", &policy, true)? {
+            if lease.account.revision != account.revision {
+                return Err("WorkBuddy credentials changed while waiting to verify models".into());
+            }
+            return Ok(lease);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("WorkBuddy account is busy or cooling down; fetch models later".into());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 pub async fn acquire(

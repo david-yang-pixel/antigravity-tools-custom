@@ -4,6 +4,7 @@ pub mod client;
 pub mod login;
 pub mod maintenance;
 pub mod resources;
+pub mod verification;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -161,30 +162,55 @@ pub struct SettingsView {
     pub enabled: bool,
     pub models: BTreeMap<String, String>,
     pub available_models: Vec<String>,
+    pub verified_models: Vec<String>,
     pub account_count: usize,
     pub preferred_account_id: Option<String>,
     pub env_locked: Vec<&'static str>,
+    pub eligible_account_count: usize,
+    pub unverified_account_count: usize,
 }
 pub fn view() -> Result<SettingsView, String> {
     let mut settings = stored()?;
     let env_locked = overrides(&mut settings)?;
     settings.validate()?;
     remember_routes(&settings);
-    let accounts = accounts::list()?;
-    let mut models: Vec<String> = accounts
+    let accounts = accounts::all()?;
+    let eligible: Vec<_> = accounts
+        .iter()
+        .filter(|a| {
+            a.enabled
+                && settings
+                    .preferred_account_id
+                    .as_ref()
+                    .is_none_or(|id| &a.id == id)
+        })
+        .collect();
+    let mut models: Vec<String> = eligible
         .iter()
         .filter(|a| a.enabled)
-        .flat_map(|a| a.models.iter().map(|m| m.id.clone()))
+        .flat_map(|a| a.available_models().into_iter().map(|m| m.id))
         .collect();
     models.sort();
     models.dedup();
+    let verified_models = eligible
+        .iter()
+        .flat_map(|a| a.verified_models.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(SettingsView {
         enabled: settings.enabled,
         models: settings.models,
         available_models: models,
+        verified_models,
         account_count: accounts.len(),
         preferred_account_id: settings.preferred_account_id,
         env_locked,
+        eligible_account_count: eligible.len(),
+        unverified_account_count: eligible
+            .iter()
+            .filter(|a| a.models_verified_at == 0)
+            .count(),
     })
 }
 fn persist(settings: &Settings) -> Result<(), String> {
@@ -259,10 +285,28 @@ pub fn register_models(models: &[accounts::Model]) -> Result<(), String> {
     }
     persist(&settings)
 }
-pub fn extend_catalog(models: &mut Vec<String>) {
-    if let Ok(settings) = load() {
+pub fn extend_catalog(models: &mut Vec<String>, mapping: &HashMap<String, String>) {
+    if let Ok(settings) = view() {
+        // WorkBuddy routes take precedence at dispatch, including names shared
+        // with another provider's built-in catalog. Do not advertise a dead route.
+        models.retain(|id| {
+            settings
+                .models
+                .get(id)
+                .or_else(|| {
+                    crate::proxy::common::model_mapping::resolve_custom_model_route(id, mapping)
+                        .and_then(|alias| settings.models.get(&alias))
+                })
+                .is_none_or(|target| settings.enabled && settings.available_models.contains(target))
+        });
         if settings.enabled {
-            models.extend(settings.models.into_keys());
+            models.extend(
+                settings
+                    .models
+                    .into_iter()
+                    .filter(|(_, target)| settings.available_models.contains(target))
+                    .map(|(alias, _)| alias),
+            );
         }
     }
     models.sort();
