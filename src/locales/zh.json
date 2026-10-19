@@ -366,6 +366,26 @@
     "mini_view": "迷你悬浮窗"
   },
   "dashboard": {
+    "workbuddy_credits": {
+      "title": "WorkBuddy 积分",
+      "hint": "汇总各版本全部已导入账号的已同步可用积分，包含已禁用账号。每 30 秒更新显示。",
+      "cn": "WorkBuddy 国内版",
+      "global": "WorkBuddy 国际版",
+      "total": "已同步积分合计",
+      "subtotal": "已知积分小计",
+      "accounts": "{{count}} 个账号 · {{known}} 个有积分数据",
+      "empty": "暂无已导入账号",
+      "incomplete": "{{count}} 个账号暂无积分数据，未计入合计。",
+      "failed": "{{count}} 个账号最近积分同步失败。",
+      "stale": "含 {{count}} 个账号的旧数据：最近同步失败、超过 30 分钟未更新或更新时间未知。",
+      "oldest_update": "已计入数据的最早更新时间：{{time}}",
+      "loading": "加载中…",
+      "refresh": "刷新积分",
+      "retry": "重试",
+      "unavailable": "积分数据暂不可用",
+      "load_error": "无法加载 WorkBuddy 积分，请重试。",
+      "refresh_error": "无法刷新 WorkBuddy 积分，当前显示上次读取的数据，请重试。"
+    },
     "hello": "你好, 用户 👋",
     "refresh_quota": "刷新配额",
     "refreshing": "刷新中...",

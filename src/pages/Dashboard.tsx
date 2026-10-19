@@ -13,14 +13,13 @@ import {
     Sparkles,
     Users,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import AddAccountDialog from '../components/accounts/AddAccountDialog';
 import { showToast } from '../components/common/ToastContainer';
-import BestAccounts from '../components/dashboard/BestAccounts';
+import { WorkBuddyCreditOverview } from '../components/dashboard/WorkBuddyCreditSummary';
 import { findImageQuotaModel, findQuotaModel } from '../config/modelConfig';
-import CurrentAccount from '../components/dashboard/CurrentAccount';
 import { exportAccounts } from '../services/accountService';
 import { useAccountStore } from '../stores/useAccountStore';
 import { Account } from '../types/account';
@@ -36,10 +35,8 @@ function Dashboard() {
         currentAccount,
         fetchAccounts,
         fetchCurrentAccount,
-        switchAccount,
         addAccount,
-        refreshQuota,
-        loading
+        refreshQuota
     } = useAccountStore();
 
     useEffect(() => {
@@ -242,26 +239,6 @@ function Dashboard() {
             claude,
         };
     }, [accounts, onlyAvailable]);
-
-    const isSwitchingRef = useRef(false);
-
-    const handleSwitch = async (accountId: string) => {
-        if (loading || isSwitchingRef.current) return;
-
-        isSwitchingRef.current = true;
-        console.log('[Dashboard] handleSwitch called for', accountId);
-        try {
-            await switchAccount(accountId);
-            showToast(t('dashboard.toast.switch_success'), 'success');
-        } catch (error) {
-            console.error('切换账号失败:', error);
-            showToast(`${t('dashboard.toast.switch_error')}: ${error}`, 'error');
-        } finally {
-            setTimeout(() => {
-                isSwitchingRef.current = false;
-            }, 1000);
-        }
-    };
 
     const handleAddAccount = async (email: string, refreshToken: string) => {
         await addAccount(email, refreshToken);
@@ -757,19 +734,7 @@ function Dashboard() {
                     );
                 })()}
 
-                {/* 双栏布局 */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <CurrentAccount
-                        account={currentAccount}
-                        quotaView={quotaView}
-                        onSwitch={() => navigate('/accounts')}
-                    />
-                    <BestAccounts
-                        accounts={accounts}
-                        currentAccountId={currentAccount?.id}
-                        onSwitch={handleSwitch}
-                    />
-                </div>
+                <WorkBuddyCreditOverview />
 
                 {/* 快速链接 */}
                 <div className="grid grid-cols-2 gap-3">
