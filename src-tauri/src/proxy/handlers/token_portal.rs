@@ -24,20 +24,16 @@ struct UsageOverview {
     token_hint: String,
     /// Email of the signed-in account; absent when signed in with a key.
     account_email: Option<String>,
-    /// Registered key that the administrator has not enabled yet.
-    pending_activation: bool,
     expires_at: Option<i64>,
     expired: bool,
     max_concurrency: i32,
-    token_quota: i64,
     total_tokens_used: i64,
-    remaining_tokens: Option<i64>,
     total_requests: i64,
-    /// Prepaid balance in micro-yuan; absent when the key is not billed.
+    /// Prepaid balance in micro-yuan; every key starts with a zero balance.
     balance_micros: Option<i64>,
-    allowed_models: Vec<String>,
+    free_models: Vec<String>,
     available_models: Vec<String>,
-    /// Price of each available model that has one; the others are free.
+    /// Prices for available paid models; explicit free-model grants take precedence.
     model_prices: Vec<PortalModelPrice>,
     /// Most recent balance top-ups, newest first.
     topup_orders: Vec<payment::PublicOrder>,
@@ -278,7 +274,7 @@ fn session_account(
     let user = accounts::session_user(&secret, now())
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    // Pending (disabled, quota 0) keys are still visible to their own account.
+    // Account sessions retain access to their own key's history when the key is disabled.
     let token = db::get_token_by_owner(&user.id)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
@@ -292,40 +288,54 @@ async fn overview(
     headers: HeaderMap,
     Query(query): Query<PortalQuery>,
 ) -> Response {
-    let mut result = authenticate(&headers).and_then(|viewer| read_overview(viewer, &query));
-    if let Ok(data) = &mut result {
-        let only_raw = *state.only_raw_quota_models.read().await;
-        let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
-            &state.custom_mapping,
-            Some(&state.token_manager),
-            only_raw,
-        )
-        .await;
-        data.available_models = permitted_catalog(catalog, &data.allowed_models);
-    }
-    render(result.and_then(|mut data| {
-        data.model_prices = priced_models(&data.available_models)?;
-        Ok(data)
-    }))
+    let mut data = match authenticate(&headers).and_then(|viewer| read_overview(viewer, &query)) {
+        Ok(data) => data,
+        Err(status) => return render(Err(status)),
+    };
+    let only_raw = *state.only_raw_quota_models.read().await;
+    let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
+        &state.custom_mapping,
+        Some(&state.token_manager),
+        only_raw,
+    )
+    .await;
+    // Use one pricing snapshot for visibility and displayed prices.
+    let rules = match billing::load_prices() {
+        Ok(rules) => rules,
+        Err(_) => return render(Err(StatusCode::SERVICE_UNAVAILABLE)),
+    };
+    data.available_models = permitted_catalog(catalog, &data.free_models, &rules);
+    data.model_prices = priced_models(&data.available_models, &data.free_models, &rules);
+    render(Ok(data))
 }
 
-fn priced_models(models: &[String]) -> Result<Vec<PortalModelPrice>, StatusCode> {
-    let rules = billing::load_prices().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(models
+fn priced_models(
+    models: &[String],
+    free_models: &[String],
+    rules: &[billing::ModelPrice],
+) -> Vec<PortalModelPrice> {
+    models
         .iter()
-        .filter_map(|model| {
-            billing::match_price(&rules, model).map(|rule| PortalModelPrice {
-                model: model.clone(),
-                price: rule.price.clone(),
-            })
-        })
-        .collect())
+        .filter_map(
+            |model| match billing::policy_for_model(free_models, rules, model) {
+                Some(billing::BillingPolicy::Priced(price)) => Some(PortalModelPrice {
+                    model: model.clone(),
+                    price,
+                }),
+                _ => None,
+            },
+        )
+        .collect()
 }
 
-fn permitted_catalog(catalog: Vec<String>, allowed: &[String]) -> Vec<String> {
+fn permitted_catalog(
+    catalog: Vec<String>,
+    free_models: &[String],
+    rules: &[billing::ModelPrice],
+) -> Vec<String> {
     catalog
         .into_iter()
-        .filter(|model| allowed.is_empty() || allowed.contains(model))
+        .filter(|model| billing::policy_for_model(free_models, rules, model).is_some())
         .collect()
 }
 
@@ -371,7 +381,7 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let weekly = db::period_usage_for_token(&token.id, true, now)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    // Expired / exhausted keys can still view their own historical usage.
+    // Expired keys and keys with no balance can still view their own historical usage.
     // Disabled or deleted keys are revoked for key sign-in.
     let models =
         db::model_usage_for_token(&token.id).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
@@ -392,20 +402,17 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
     Ok(UsageOverview {
         token_hint: format!("••••{suffix}"),
         account_email,
-        pending_activation: token.owner_user_id.is_some() && !token.enabled,
         expires_at: token.expires_at,
         expired: token.expires_at.is_some_and(|ts| ts <= now),
         max_concurrency: token.max_concurrency,
-        token_quota: token.token_quota,
         total_tokens_used: token.total_tokens_used,
-        remaining_tokens: token.remaining_tokens(),
         total_requests: token.total_requests,
-        balance_micros: token.balance_micros,
-        available_models: token.allowed_models.clone(),
+        balance_micros: Some(token.balance_micros.unwrap_or(0)),
+        available_models: Vec::new(),
         model_prices: Vec::new(),
         topup_orders,
         username: token.username,
-        allowed_models: token.allowed_models,
+        free_models: token.free_models,
         logs,
         daily,
         weekly,
@@ -441,7 +448,7 @@ struct TopupRequest {
 }
 
 /// Creates a pending order and returns the signed cashier form the browser
-/// submits to the gateway. Only balance-billed keys can be topped up.
+/// submits to the gateway to add to the key's balance.
 async fn create_topup(
     headers: HeaderMap,
     ClientIp(ip): ClientIp,
@@ -455,9 +462,6 @@ async fn create_topup(
         Ok(Viewer::Account(user, token)) => (token, Some(user.id)),
         Err(status) => return error_response(status, "invalid_user_token", None),
     };
-    if !token.is_billed() {
-        return error_response(StatusCode::BAD_REQUEST, "topup_unavailable", None);
-    }
     // The balance of an expired key cannot be spent until an administrator renews it.
     if token.expires_at.is_some_and(|ts| ts <= now()) {
         return error_response(StatusCode::BAD_REQUEST, "topup_key_expired", None);
@@ -610,9 +614,6 @@ async fn resume_topup(headers: HeaderMap, Path(order_no): Path<String>) -> Respo
     }
     if !order.can_pay(now()) {
         return error_response(StatusCode::GONE, "order_expired", None);
-    }
-    if !token.is_billed() {
-        return error_response(StatusCode::BAD_REQUEST, "topup_unavailable", None);
     }
     if token.expires_at.is_some_and(|ts| ts <= now()) {
         return error_response(StatusCode::BAD_REQUEST, "topup_key_expired", None);
@@ -829,7 +830,7 @@ async fn register(
     }
     let defaults = accounts::RegistrationDefaults {
         max_concurrency: settings.default_max_concurrency,
-        allowed_models: settings.default_allowed_models,
+        allowed_models: Vec::new(),
         expires_type: settings.default_expires_type,
     };
     let now = now();
@@ -925,16 +926,82 @@ async fn regenerate_key(headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::monitor::prompt_log_tests::TestDataDir;
+
     #[test]
-    fn user_token_catalog_restricts_permissions_without_reintroducing_stale_ids() {
-        let catalog = vec!["upstream-a".into(), "upstream-b".into()];
-        assert_eq!(permitted_catalog(catalog.clone(), &[]), catalog);
+    fn user_token_portal_catalog_requires_explicit_free_grant_or_price() {
+        let catalog = vec![
+            "upstream-a".into(),
+            "upstream-b".into(),
+            "free-model".into(),
+            "Free-Model".into(),
+            "unpriced".into(),
+        ];
+        let rules = vec![billing::ModelPrice {
+            pattern: "upstream-*".into(),
+            price: billing::Price::PerCall {
+                call_price_micros: 1000,
+            },
+        }];
+        let free = vec!["models/free-model".into(), "old-alias".into()];
         assert_eq!(
-            permitted_catalog(catalog.clone(), &["upstream-b".into(), "old-alias".into()]),
-            vec!["upstream-b"]
+            permitted_catalog(catalog.clone(), &free, &rules),
+            vec!["upstream-a", "upstream-b", "free-model"]
         );
-        assert!(permitted_catalog(catalog, &["old-alias".into()]).is_empty());
-        assert!(permitted_catalog(vec![], &["old-alias".into()]).is_empty());
+        assert_eq!(
+            permitted_catalog(catalog.clone(), &[], &rules),
+            vec!["upstream-a", "upstream-b"]
+        );
+        assert_eq!(
+            permitted_catalog(catalog.clone(), &free, &[]),
+            vec!["free-model"]
+        );
+        assert!(permitted_catalog(catalog, &[], &[]).is_empty());
+        assert!(permitted_catalog(vec![], &free, &rules).is_empty());
+        assert_eq!(
+            permitted_catalog(
+                vec!["models/free-model".into()],
+                &["free-model".into()],
+                &[]
+            ),
+            vec!["models/free-model"]
+        );
+    }
+
+    #[test]
+    fn user_token_portal_prices_exclude_free_grants_and_use_specific_price() {
+        let rules = vec![
+            billing::ModelPrice {
+                pattern: "model-*".into(),
+                price: billing::Price::PerCall {
+                    call_price_micros: 1000,
+                },
+            },
+            billing::ModelPrice {
+                pattern: "model-paid".into(),
+                price: billing::Price::PerToken {
+                    input_price_micros: 2_000_000,
+                    output_price_micros: 8_000_000,
+                    cached_price_micros: Some(500_000),
+                },
+            },
+        ];
+        let models = vec![
+            "model-free".into(),
+            "model-paid".into(),
+            "model-other".into(),
+            "unpriced".into(),
+        ];
+        let prices = priced_models(&models, &["model-free".into()], &rules);
+        assert_eq!(prices.len(), 2);
+        assert_eq!(prices[0].model, "model-paid");
+        assert_eq!(prices[0].price, rules[1].price);
+        assert_eq!(prices[1].model, "model-other");
+        assert_eq!(prices[1].price, rules[0].price);
+        let dto = serde_json::to_value(prices).unwrap();
+        assert_eq!(dto[0]["mode"], "per_token");
+        assert_eq!(dto[0]["cached_price_micros"], 500_000);
+        assert_eq!(dto[1]["call_price_micros"], 1000);
     }
     use axum::{
         body::{to_bytes, Body},
@@ -972,15 +1039,36 @@ mod tests {
             None,
             None,
             2,
-            100,
-            vec!["model-a".into()],
+            0,
+            Vec::new(),
         )
         .unwrap()
     }
+    fn grant_free_models(token: &db::UserToken, models: &[&str]) {
+        db::update_token_with_policy(
+            &token.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(models.iter().map(|model| (*model).to_owned()).collect()),
+        )
+        .unwrap();
+    }
     #[tokio::test]
     async fn user_token_portal_only_returns_authenticated_keys_aggregates() {
+        let _dir = TestDataDir::new();
         let a = key("portal-a");
         let b = key("portal-b");
+        grant_free_models(&a, &["model-a", "model-b"]);
+        grant_free_models(&b, &["other-model"]);
         db::record_token_usage_and_ip(&a.id, "secret-ip", "model-a", 30, 20, 200, None).unwrap();
         db::record_token_usage_and_ip(&a.id, "secret-ip", "model-b", 10, 0, 429, None).unwrap();
         db::record_token_usage_and_ip(&b.id, "other-ip", "other-model", 999, 999, 200, None)
@@ -1012,8 +1100,16 @@ mod tests {
         }
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["total_tokens_used"], 60);
-        assert_eq!(v["remaining_tokens"], 40);
-        assert_eq!(v["pending_activation"], false);
+        assert_eq!(v["balance_micros"], 0);
+        assert_eq!(v["free_models"], serde_json::json!(["model-a", "model-b"]));
+        for obsolete in [
+            "token_quota",
+            "remaining_tokens",
+            "allowed_models",
+            "pending_activation",
+        ] {
+            assert!(v.get(obsolete).is_none());
+        }
         assert!(v["account_email"].is_null());
         assert_eq!(v["models"].as_array().unwrap().len(), 2);
         assert_eq!(v["models"][0]["input_tokens"], 30);
@@ -1021,6 +1117,7 @@ mod tests {
     }
     #[tokio::test]
     async fn user_token_portal_validates_time_filters() {
+        let _dir = TestDataDir::new();
         let a = key("time-filter");
         for query in [
             "start_time=2&end_time=1",
@@ -1042,8 +1139,10 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn user_token_portal_revocation_and_exhaustion() {
+    async fn user_token_portal_zero_balance_history_and_revocation() {
+        let _dir = TestDataDir::new();
         let a = key("revoked");
+        grant_free_models(&a, &["model-a"]);
         db::record_token_usage_and_ip(&a.id, "local", "model-a", 100, 10, 200, None).unwrap();
         let request = || {
             Request::builder()
@@ -1130,6 +1229,7 @@ mod tests {
 
     #[tokio::test]
     async fn payment_portal_history_and_resume_enforce_ownership_and_deadlines() {
+        let _dir = TestDataDir::new();
         let a = key("payment-owner-a");
         let b = key("payment-owner-b");
         let order = payment::create_order(&b.id, None, 100, "alipay", now()).unwrap();
@@ -1247,6 +1347,7 @@ mod tests {
 
     #[tokio::test]
     async fn payment_resume_reuses_order_and_refuses_unverified_or_paid_checkout() {
+        let _dir = TestDataDir::new();
         let owner = key("payment-resume");
         let order = payment::create_order(&owner.id, None, 125, "alipay", now()).unwrap();
         let (settings, gateway) =
@@ -1316,7 +1417,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portal_account_session_sees_pending_key_and_manages_it() {
+    async fn portal_account_session_manages_enabled_zero_balance_key() {
+        let _dir = TestDataDir::new();
         db::init_db().unwrap();
         let now = now();
         let email = format!("portal-{}@example.com", uuid::Uuid::new_v4().simple());
@@ -1333,17 +1435,23 @@ mod tests {
             accounts::register(&email, &code, "correct horse", defaults, now).unwrap();
         let secret = accounts::create_session(&user.id, "ip", None, now).unwrap();
 
-        // Account session sees its pending key; the key itself cannot sign in yet.
+        // A newly registered active account can use either sign-in method at zero balance.
         let (status, me) = call("GET", "/api/token-portal/me", Some(&secret), None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(me["account_email"], email.as_str());
-        assert_eq!(me["pending_activation"], true);
-        assert_eq!(me["token_quota"], 0);
-        // Registered keys are billed from a balance instead of a token quota.
         assert_eq!(me["balance_micros"], 0);
-        assert!(me["remaining_tokens"].is_null());
+        assert_eq!(me["free_models"], serde_json::json!([]));
+        assert!(token.enabled);
+        for obsolete in [
+            "token_quota",
+            "remaining_tokens",
+            "allowed_models",
+            "pending_activation",
+        ] {
+            assert!(me.get(obsolete).is_none());
+        }
         let (status, _) = call("GET", "/api/token-portal/me", None, Some(&token.token)).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(status, StatusCode::OK);
 
         let (status, revealed) = call("GET", "/api/token-portal/key", Some(&secret), None).await;
         assert_eq!(status, StatusCode::OK);

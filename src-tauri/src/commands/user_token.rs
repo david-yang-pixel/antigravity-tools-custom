@@ -4,13 +4,12 @@ use crate::modules::user_token_db::{self, TokenIpBinding, UserToken};
 use crate::modules::{portal_account, portal_mail, portal_settings};
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`).
-fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+/// An omitted balance preserves it; explicit null is never a billing opt-out.
+fn balance_update<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
 where
     D: Deserializer<'de>,
-    T: Deserialize<'de>,
 {
-    Option::<T>::deserialize(deserializer).map(Some)
+    i64::deserialize(deserializer).map(|value| Some(Some(value)))
 }
 
 /// Admin list row: the key plus who created it.
@@ -22,8 +21,6 @@ pub struct UserTokenView {
     pub source: &'static str,
     pub owner_email: Option<String>,
     pub account_status: Option<String>,
-    /// Registered key the administrator has not switched on yet.
-    pub pending_activation: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,15 +32,13 @@ pub struct CreateTokenRequest {
     #[serde(default)]
     pub max_concurrency: i32,
     #[serde(default)]
-    pub token_quota: i64,
-    #[serde(default)]
-    pub allowed_models: Vec<String>,
+    pub free_models: Vec<String>,
     pub curfew_start: Option<String>,
     pub curfew_end: Option<String>,
     pub custom_expires_at: Option<i64>, // 自定义过期时间戳 (秒)
-    /// Opening balance in micro-yuan; absent = the key is not billed.
+    /// Opening balance in micro-yuan; absent starts at zero and null is invalid.
     #[serde(default)]
-    pub balance_micros: Option<i64>,
+    pub balance_micros: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,15 +48,14 @@ pub struct UpdateTokenRequest {
     pub enabled: Option<bool>,
     pub max_ips: Option<i32>,
     pub max_concurrency: Option<i32>,
-    pub token_quota: Option<i64>,
-    pub allowed_models: Option<Vec<String>>,
+    pub free_models: Option<Vec<String>>,
     pub curfew_start: Option<Option<String>>,
     pub curfew_end: Option<Option<String>>,
     /// Absent keeps the current expiry; "custom" requires `custom_expires_at`.
     pub expires_type: Option<String>,
     pub custom_expires_at: Option<i64>, // 自定义过期时间戳 (秒)
-    /// Absent keeps the balance, `null` stops billing, a number sets the balance (micro-yuan).
-    #[serde(default, deserialize_with = "double_option")]
+    /// Absent keeps the balance, a number sets it (micro-yuan), and null is invalid.
+    #[serde(default, deserialize_with = "balance_update")]
     pub balance_micros: Option<Option<i64>>,
 }
 
@@ -89,9 +83,6 @@ pub async fn list_user_tokens() -> Result<Vec<UserTokenView>, String> {
                 } else {
                     "admin"
                 },
-                pending_activation: token.owner_user_id.is_some()
-                    && !token.enabled
-                    && account.as_ref().is_some_and(|a| a.is_active()),
                 owner_email: account.as_ref().map(|a| a.email.clone()),
                 account_status: account.map(|a| a.status),
                 token,
@@ -116,11 +107,12 @@ pub async fn create_user_token(request: CreateTokenRequest) -> Result<UserToken,
             curfew_start: request.curfew_start,
             curfew_end: request.curfew_end,
             max_concurrency: request.max_concurrency,
-            token_quota: request.token_quota,
-            allowed_models: request.allowed_models,
+            token_quota: 0,
+            allowed_models: Vec::new(),
+            free_models: request.free_models,
             owner_user_id: None,
             enabled: true,
-            balance_micros: request.balance_micros,
+            balance_micros: Some(request.balance_micros),
         },
     )?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -130,7 +122,7 @@ pub async fn create_user_token(request: CreateTokenRequest) -> Result<UserToken,
 /// 更新令牌
 #[tauri::command]
 pub async fn update_user_token(id: String, request: UpdateTokenRequest) -> Result<(), String> {
-    user_token_db::update_token_with_balance(
+    user_token_db::update_token_with_policy(
         &id,
         request.username,
         request.description,
@@ -139,12 +131,13 @@ pub async fn update_user_token(id: String, request: UpdateTokenRequest) -> Resul
         request.curfew_start,
         request.curfew_end,
         request.max_concurrency,
-        request.token_quota,
-        request.allowed_models,
+        None,
+        None,
         request
             .expires_type
             .map(|kind| (kind, request.custom_expires_at)),
         request.balance_micros,
+        request.free_models,
     )
 }
 
@@ -174,8 +167,6 @@ pub struct UserTokenStats {
     pub today_requests: i64,
     #[serde(default)]
     pub registered_tokens: usize,
-    #[serde(default)]
-    pub pending_tokens: usize,
 }
 
 /// 获取简单的统计信息
@@ -183,7 +174,6 @@ pub struct UserTokenStats {
 pub async fn get_user_token_summary() -> Result<UserTokenStats, String> {
     let views = list_user_tokens().await?;
     let registered_tokens = views.iter().filter(|v| v.source == "registered").count();
-    let pending_tokens = views.iter().filter(|v| v.pending_activation).count();
     let tokens: Vec<UserToken> = views.into_iter().map(|v| v.token).collect();
     let active_tokens = tokens.iter().filter(|t| t.enabled).count();
 
@@ -202,7 +192,6 @@ pub async fn get_user_token_summary() -> Result<UserTokenStats, String> {
         total_users: users.len(),
         today_requests: 0, // TODO: Implement daily stats query
         registered_tokens,
-        pending_tokens,
     })
 }
 
@@ -286,35 +275,88 @@ pub async fn send_portal_test_email(to: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::monitor::prompt_log_tests::TestDataDir;
     #[test]
-    fn user_token_legacy_payload_defaults_to_unlimited() {
+    fn user_token_legacy_payload_cannot_grant_free_models_or_disable_billing() {
         let create: CreateTokenRequest = serde_json::from_value(serde_json::json!({
-            "username": "legacy", "expires_type": "never", "max_ips": 0
+            "username": "legacy", "expires_type": "never", "max_ips": 0,
+            "token_quota": 100, "allowed_models": ["legacy-model"]
         }))
         .unwrap();
-        assert_eq!((create.max_concurrency, create.token_quota), (0, 0));
-        let update: UpdateTokenRequest =
-            serde_json::from_value(serde_json::json!({"username": "edit"})).unwrap();
-        assert_eq!((update.max_concurrency, update.token_quota), (None, None));
-        assert_eq!((create.balance_micros, update.balance_micros), (None, None));
+        assert_eq!(create.max_concurrency, 0);
+        assert!(create.free_models.is_empty());
+        assert_eq!(create.balance_micros, 0);
+        let update: UpdateTokenRequest = serde_json::from_value(serde_json::json!({
+            "username": "edit", "token_quota": 0, "allowed_models": ["legacy-model"]
+        }))
+        .unwrap();
+        assert_eq!(update.max_concurrency, None);
+        assert_eq!(update.free_models, None);
+        assert_eq!(update.balance_micros, None);
+        assert!(
+            serde_json::from_value::<CreateTokenRequest>(serde_json::json!({
+                "username": "null", "expires_type": "never", "max_ips": 0,
+                "balance_micros": null
+            }))
+            .is_err()
+        );
     }
 
     #[test]
-    fn user_token_balance_edit_distinguishes_absent_null_and_value() {
+    fn user_token_balance_edit_preserves_absent_and_rejects_null() {
         let parse = |body: serde_json::Value| {
             serde_json::from_value::<UpdateTokenRequest>(body)
                 .unwrap()
                 .balance_micros
         };
         assert_eq!(parse(serde_json::json!({})), None);
-        assert_eq!(
-            parse(serde_json::json!({"balance_micros": null})),
-            Some(None)
-        );
+        assert!(serde_json::from_value::<UpdateTokenRequest>(
+            serde_json::json!({"balance_micros": null})
+        )
+        .is_err());
         assert_eq!(
             parse(serde_json::json!({"balance_micros": 5})),
             Some(Some(5))
         );
+    }
+
+    #[tokio::test]
+    async fn user_token_commands_store_independent_free_policy_and_keep_omitted_balance() {
+        let _dir = TestDataDir::new();
+        user_token_db::init_db().unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "username": "billing-policy", "expires_type": "never", "max_ips": 0,
+            "free_models": ["models/free-model", "free-model"],
+            "allowed_models": ["legacy-model"], "token_quota": 100
+        }))
+        .unwrap();
+        let token = create_user_token(request).await.unwrap();
+        assert_eq!(token.balance_micros, Some(0));
+        assert_eq!(token.free_models, vec!["free-model"]);
+        assert!(token.allowed_models.is_empty());
+        assert_eq!(token.token_quota, 0);
+        update_user_token(
+            token.id.clone(),
+            serde_json::from_value(serde_json::json!({
+                "balance_micros": 12345, "free_models": []
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        update_user_token(
+            token.id.clone(),
+            serde_json::from_value(serde_json::json!({
+                "username": "renamed", "allowed_models": ["legacy-model"], "token_quota": 0
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let updated = user_token_db::get_token_by_id(&token.id).unwrap().unwrap();
+        assert_eq!(updated.balance_micros, Some(12345));
+        assert!(updated.free_models.is_empty() && updated.allowed_models.is_empty());
+        assert_eq!(updated.token, token.token);
     }
 }
 

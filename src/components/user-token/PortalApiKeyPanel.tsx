@@ -1,16 +1,15 @@
 import { useState } from 'react';
-import { AlertTriangle, Copy, Eye, EyeOff, RefreshCw } from 'lucide-react';
+import { Copy, Eye, EyeOff, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 interface Props {
     token: string;
-    pending: boolean;
     onRegenerate: () => Promise<boolean>;
     embedded?: boolean;
 }
 
 /** The signed-in account's single API key: reveal, copy and regenerate. */
-export default function PortalApiKeyPanel({ token, pending, onRegenerate, embedded = false }: Props) {
+export default function PortalApiKeyPanel({ token, onRegenerate, embedded = false }: Props) {
     const { t } = useTranslation();
     const [visible, setVisible] = useState(false);
     const [confirming, setConfirming] = useState(false);
@@ -38,7 +37,6 @@ export default function PortalApiKeyPanel({ token, pending, onRegenerate, embedd
             {embedded ? <h3 id="api-key-title" className="text-sm font-medium">{t('token_portal.api_key_title')}</h3> : <h2 id="api-key-title" className="text-lg font-semibold">{t('token_portal.api_key_title')}</h2>}
             <p className="text-xs text-slate-500 mt-2 leading-5">{t('token_portal.api_key_hint')}</p>
         </div>
-        {pending && <p className="flex gap-2 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800"><AlertTriangle size={16} className="shrink-0 mt-0.5" />{t('token_portal.pending_key_hint')}</p>}
         <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 border border-slate-200 p-3">
             <code className="flex-1 min-w-0 break-all text-sm">{token ? (visible ? token : `••••••••••••${token.slice(-4)}`) : '…'}</code>
             <button type="button" onClick={() => setVisible(!visible)} disabled={!token} aria-pressed={visible} className={button}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}{t(visible ? 'token_portal.hide_token' : 'token_portal.show_token')}</button>

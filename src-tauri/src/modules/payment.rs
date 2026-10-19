@@ -462,15 +462,7 @@ pub fn credit_paid_order(
             ],
         )
         .map_err(db)?;
-        // Paying activates a registered key still waiting for activation; keys an
-        // administrator disabled with the whole account stay off.
-        tx.execute(
-            "UPDATE user_tokens SET enabled = 1, updated_at = ?2
-             WHERE id = ?1 AND enabled = 0 AND owner_user_id IS NOT NULL
-             AND EXISTS (SELECT 1 FROM portal_users p WHERE p.id = owner_user_id AND p.status = 'active')",
-            params![token_id, now],
-        )
-        .map_err(db)?;
+        // Payment only credits funds. It must not undo key/account suspension.
     }
     tx.commit().map_err(db)?;
     Ok(Credit::Credited {
@@ -483,8 +475,9 @@ pub fn credit_paid_order(
 mod tests {
     use super::*;
     use crate::modules::user_token_db as tokens;
+    use crate::proxy::monitor::prompt_log_tests::TestDataDir;
 
-    fn billed_key(balance: Option<i64>) -> tokens::UserToken {
+    fn billed_key(balance: i64) -> tokens::UserToken {
         tokens::init_db().unwrap();
         let key = tokens::create_token(
             format!("pay-{}", uuid::Uuid::new_v4().simple()),
@@ -511,10 +504,10 @@ mod tests {
             None,
             None,
             None,
-            Some(balance),
+            Some(Some(balance)),
         )
         .unwrap();
-        key
+        tokens::get_token_by_id(&key.id).unwrap().unwrap()
     }
 
     fn balance(id: &str) -> Option<i64> {
@@ -533,7 +526,8 @@ mod tests {
 
     #[test]
     fn payment_deadline_survives_reload_and_paid_wins_over_expiry() {
-        let key = billed_key(Some(0));
+        let _dir = TestDataDir::new();
+        let key = billed_key(0);
         let order = create_order(&key.id, None, 100, "alipay", 10_000).unwrap();
         let deadline = 10_000 + ORDER_TTL_SECS;
         assert_eq!(order.expires_at, deadline);
@@ -562,8 +556,9 @@ mod tests {
 
     #[test]
     fn payment_history_pages_all_records_and_scopes_pending_and_filters() {
-        let a = billed_key(Some(0));
-        let b = billed_key(Some(0));
+        let _dir = TestDataDir::new();
+        let a = billed_key(0);
+        let b = billed_key(0);
         let now = 200_000;
         let mut paid_numbers = Vec::new();
         for i in 0..23 {
@@ -602,7 +597,8 @@ mod tests {
 
     #[test]
     fn payment_credit_is_exactly_once_and_checks_amount() {
-        let key = billed_key(Some(1_000));
+        let _dir = TestDataDir::new();
+        let key = billed_key(1_000);
         let order = create_order(&key.id, None, 500, "alipay", 1_000).unwrap();
         assert_eq!(order.credit_micros, 5_000_000);
         // Gateway trade numbers are unique, and the test database outlives a run.
@@ -653,7 +649,8 @@ mod tests {
 
     #[test]
     fn payment_concurrent_credits_add_once() {
-        let key = billed_key(Some(0));
+        let _dir = TestDataDir::new();
+        let key = billed_key(0);
         let order = create_order(&key.id, None, 1_234, "alipay", 2_000).unwrap();
         let trade = format!("T{}", order.out_trade_no);
         let handles: Vec<_> = (0..8)
@@ -678,7 +675,8 @@ mod tests {
 
     #[test]
     fn payment_late_payment_for_closed_order_still_credits() {
-        let key = billed_key(Some(0));
+        let _dir = TestDataDir::new();
+        let key = billed_key(0);
         let order = create_order(&key.id, None, 600, "alipay", 3_000).unwrap();
         let listed = |no: &str| {
             pending_orders(2_999, 3_001, 100)
@@ -707,7 +705,8 @@ mod tests {
     }
 
     #[test]
-    fn payment_activates_pending_registered_key_only() {
+    fn payment_preserves_registered_key_and_account_activation_state() {
+        let _dir = TestDataDir::new();
         use crate::modules::portal_account as accounts;
         tokens::init_db().unwrap();
         let now = 5_000_000;
@@ -724,19 +723,42 @@ mod tests {
         };
         let (user, key) =
             accounts::register(&email, &code, "correct horse", defaults, now).unwrap();
-        assert!(!key.enabled);
+        assert!(key.enabled, "email verification enables the registered key");
+        assert_eq!(key.balance_micros, Some(0));
+        assert!(key.free_models.is_empty());
         let order = create_order(&key.id, Some(&user.id), 500, "alipay", now).unwrap();
         credit_paid_order(&order.out_trade_no, None, 500, now + 1).unwrap();
         let paid = tokens::get_token_by_id(&key.id).unwrap().unwrap();
-        assert!(paid.enabled, "paying activates a pending registered key");
+        assert!(paid.enabled);
         assert_eq!(paid.balance_micros, Some(5_000_000));
 
-        // A disabled account keeps its key off even when a payment lands.
-        accounts::set_account_enabled(&user.id, false).unwrap();
+        // A late payment must not undo an administrator's key-level suspension.
+        tokens::update_token(
+            &key.id,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let second = create_order(&key.id, Some(&user.id), 500, "alipay", now + 2).unwrap();
         credit_paid_order(&second.out_trade_no, None, 500, now + 3).unwrap();
         let off = tokens::get_token_by_id(&key.id).unwrap().unwrap();
         assert!(!off.enabled);
         assert_eq!(off.balance_micros, Some(10_000_000));
+
+        // Account-level suspension also remains in place while money is credited.
+        accounts::set_account_enabled(&user.id, false).unwrap();
+        let third = create_order(&key.id, Some(&user.id), 500, "alipay", now + 4).unwrap();
+        credit_paid_order(&third.out_trade_no, None, 500, now + 5).unwrap();
+        let off = tokens::get_token_by_id(&key.id).unwrap().unwrap();
+        assert!(!off.enabled);
+        assert_eq!(off.balance_micros, Some(15_000_000));
     }
 }

@@ -3,7 +3,7 @@ import { Copy, Eye, EyeOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PortalApiKeyPanel from './PortalApiKeyPanel';
 
-export default function TokenConnectionDetails({ token, account }: { token: string; account?: { pending: boolean; onRegenerate: () => Promise<boolean> } }) {
+export default function TokenConnectionDetails({ token, account }: { token: string; account?: { onRegenerate: () => Promise<boolean> } }) {
     const { t } = useTranslation();
     const [visible, setVisible] = useState(false);
     const [feedback, setFeedback] = useState('');
@@ -22,7 +22,7 @@ export default function TokenConnectionDetails({ token, account }: { token: stri
     }
     return <section className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-5" aria-labelledby="connection-title">
         <div><h2 id="connection-title" className="text-lg font-semibold">{t('token_portal.connection_title')}</h2><p className="text-xs text-slate-500 mt-2 leading-5">{t('token_portal.base_url_hint')}</p></div>
-        {account ? <PortalApiKeyPanel token={token} pending={account.pending} onRegenerate={account.onRegenerate} embedded /> : <div className="space-y-2">
+        {account ? <PortalApiKeyPanel token={token} onRegenerate={account.onRegenerate} embedded /> : <div className="space-y-2">
             <p className="text-sm font-medium">{t('token_portal.current_token')}</p>
             <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 border border-slate-200 p-3">
                 <code className="flex-1 min-w-0 break-all text-sm">{visible ? token : `••••••••••••${token.slice(-4)}`}</code>

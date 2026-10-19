@@ -2,8 +2,8 @@
 //!
 //! Money is stored as integer micro-yuan (¥0.000001). Each model is billed in
 //! exactly one way — a fixed price per call or a price per million tokens —
-//! chosen by the most specific matching wildcard rule. Unpriced models are free.
-//! Keys without a balance (`balance_micros IS NULL`) are not billed at all.
+//! chosen by the most specific matching wildcard rule. Every user key is billed,
+//! except for its explicit free-model list. Unpriced, non-free models are denied.
 
 use crate::modules::user_token_db::connect_db;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -112,6 +112,32 @@ pub struct ModelPrice {
     pub pattern: String,
     #[serde(flatten)]
     pub price: Price,
+}
+
+/// Immutable admission decision carried through streaming and final accounting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BillingPolicy {
+    Free,
+    Priced(Price),
+}
+
+pub fn is_free_model(free_models: &[String], model: &str) -> bool {
+    let id = model.strip_prefix("models/").unwrap_or(model);
+    free_models
+        .iter()
+        .any(|free| free.strip_prefix("models/").unwrap_or(free) == id)
+}
+
+pub fn policy_for_model(
+    free_models: &[String],
+    rules: &[ModelPrice],
+    model: &str,
+) -> Option<BillingPolicy> {
+    if is_free_model(free_models, model) {
+        Some(BillingPolicy::Free)
+    } else {
+        match_price(rules, model).map(|rule| BillingPolicy::Priced(rule.price.clone()))
+    }
 }
 
 /// Called inside the user-token migration transaction.
@@ -328,7 +354,7 @@ pub(crate) fn current_balance(conn: &Connection, token_id: &str) -> Result<Optio
     .ok_or_else(|| "Token not found".to_string())
 }
 
-/// Records an administrator balance edit (`None` stops billing the key).
+/// Records an administrator balance edit; callers reject disabling billing.
 pub(crate) fn record_admin_change(
     conn: &Connection,
     token_id: &str,
@@ -343,37 +369,38 @@ pub(crate) fn record_admin_change(
     record_ledger(conn, token_id, delta, target, "admin", now)
 }
 
-/// Settles one finished request inside the usage transaction. Returns the
-/// charge and how it was priced, or `None` for keys that are not billed.
+/// Settle the admission-time policy in the same transaction as usage. No policy
+/// means a non-inference/denied request; configuration changes never reprice it.
 pub(crate) fn settle(
     conn: &Connection,
     token_id: &str,
-    model: &str,
+    policy: Option<&BillingPolicy>,
     input_tokens: i64,
     output_tokens: i64,
     cached_tokens: Option<i64>,
     status: u16,
 ) -> Result<Option<(i64, &'static str)>, String> {
-    // A key deleted mid-request is simply not billed.
-    let billed: Option<i64> = conn
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    // A deleted key cannot be charged; do not label its final usage as paid.
+    let exists: bool = conn
         .query_row(
-            "SELECT balance_micros FROM user_tokens WHERE id = ?1",
+            "SELECT EXISTS(SELECT 1 FROM user_tokens WHERE id = ?1)",
             params![token_id],
             |row| row.get(0),
         )
-        .optional()
-        .map_err(|e| e.to_string())?
-        .flatten();
-    if billed.is_none() {
+        .map_err(|e| e.to_string())?;
+    if !exists {
         return Ok(None);
     }
-    let rules = load_prices_with(conn)?;
-    let Some(rule) = match_price(&rules, model) else {
-        return Ok(Some((0, "free")));
+    let (cost, mode) = match policy {
+        BillingPolicy::Free => (0, "free"),
+        BillingPolicy::Priced(price) => (
+            price.cost(input_tokens, output_tokens, cached_tokens, status),
+            price.mode(),
+        ),
     };
-    let cost = rule
-        .price
-        .cost(input_tokens, output_tokens, cached_tokens, status);
     if cost > 0 {
         conn.execute(
             "UPDATE user_tokens SET balance_micros = balance_micros - ?1 WHERE id = ?2",
@@ -381,12 +408,34 @@ pub(crate) fn settle(
         )
         .map_err(|e| format!("Failed to charge balance: {e}"))?;
     }
-    Ok(Some((cost, rule.price.mode())))
+    Ok(Some((cost, mode)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settlement_of_deleted_key_has_no_charge() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_tokens (id TEXT PRIMARY KEY, balance_micros INTEGER);
+            INSERT INTO user_tokens VALUES ('deleted', 100);
+            DELETE FROM user_tokens WHERE id='deleted';",
+        )
+        .unwrap();
+        for policy in [
+            BillingPolicy::Free,
+            BillingPolicy::Priced(Price::PerCall {
+                call_price_micros: 10,
+            }),
+        ] {
+            assert_eq!(
+                settle(&conn, "deleted", Some(&policy), 20, 10, None, 200).unwrap(),
+                None
+            );
+        }
+    }
 
     fn per_token(input: i64, output: i64, cached: Option<i64>) -> Price {
         Price::PerToken {

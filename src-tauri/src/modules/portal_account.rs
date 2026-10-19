@@ -110,10 +110,11 @@ impl PortalUser {
     }
 }
 
-/// Defaults applied to the key created at registration. Quota is always 0: the
-/// administrator activates the account by granting one.
+/// Defaults applied after email verification. Every new key starts with zero
+/// balance and no free models; legacy model-access defaults are ignored.
 pub struct RegistrationDefaults {
     pub max_concurrency: i32,
+    /// Kept for internal compatibility; never copied to a new key.
     pub allowed_models: Vec<String>,
     pub expires_type: String,
 }
@@ -433,9 +434,10 @@ pub fn register(
             curfew_end: None,
             max_concurrency: defaults.max_concurrency,
             token_quota: 0,
-            allowed_models: defaults.allowed_models,
+            allowed_models: Vec::new(),
+            free_models: Vec::new(),
             owner_user_id: Some(user.id.clone()),
-            enabled: false,
+            enabled: true,
             balance_micros: Some(0),
         },
     )?;
@@ -629,8 +631,8 @@ pub fn get_account(user_id: &str) -> Result<Option<PortalUser>, String> {
     Ok(accounts_by_id()?.remove(user_id))
 }
 
-/// Disabling stops the key and signs the user out everywhere. Enabling restores
-/// the key only when it already has a quota or a positive balance.
+/// Disabling stops the key and signs the user out everywhere. Explicit enabling
+/// restores the key; balance checks remain the gateway's responsibility.
 pub fn set_account_enabled(user_id: &str, enabled: bool) -> Result<(), String> {
     let mut conn = tokens::connect_db()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -644,7 +646,7 @@ pub fn set_account_enabled(user_id: &str, enabled: bool) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         tx.execute(
             "UPDATE user_tokens SET enabled = 1, updated_at = ?2
-             WHERE owner_user_id = ?1 AND (token_quota > 0 OR balance_micros > 0)",
+             WHERE owner_user_id = ?1",
             params![user_id, now],
         )
         .map_err(|e| e.to_string())?;
@@ -711,6 +713,7 @@ pub(crate) fn purge_account(conn: &Connection, user_id: &str) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::monitor::prompt_log_tests::TestDataDir;
 
     fn defaults() -> RegistrationDefaults {
         RegistrationDefaults {
@@ -764,13 +767,15 @@ mod tests {
     }
 
     #[test]
-    fn portal_registration_creates_one_disabled_billed_key() {
+    fn portal_registration_creates_one_enabled_billed_key_without_free_models() {
+        let _dir = TestDataDir::new();
         let now = 1_000_000;
         let (email, user, token) = registered("reg", now);
         assert_eq!(token.owner_user_id.as_deref(), Some(user.id.as_str()));
-        assert!(!token.enabled);
+        assert!(token.enabled);
         assert_eq!(token.token_quota, 0);
         assert_eq!(token.balance_micros, Some(0));
+        assert!(token.free_models.is_empty() && token.allowed_models.is_empty());
         assert!(
             !token.quota_exhausted() && token.remaining_tokens().is_none(),
             "a billed key is limited by its balance, not a token quota"
@@ -789,7 +794,8 @@ mod tests {
     }
 
     #[test]
-    fn portal_registered_key_cannot_be_enabled_without_quota() {
+    fn portal_registered_key_activation_requires_active_account_not_quota_or_balance() {
+        let _dir = TestDataDir::new();
         let (_, user, token) = registered("guard", 1_000_000);
         let set_billing = |balance: Option<i64>, enabled: Option<bool>| {
             tokens::update_token_with_balance(
@@ -807,14 +813,14 @@ mod tests {
                 Some(balance),
             )
         };
-        // A billed key may be enabled at quota 0: its balance limits usage instead.
+        // An active account can have an enabled key with no balance or token quota.
         set_billing(Some(0), Some(true)).unwrap();
         assert!(tokens::get_token_by_id(&token.id).unwrap().unwrap().enabled);
-        // Billing cannot be switched off while that would leave it enabled without a quota.
+        // Neither disabling the key nor granting a legacy quota permits NULL billing.
         assert!(set_billing(None, None).is_err());
-        set_billing(None, Some(false)).unwrap();
+        assert!(set_billing(None, Some(false)).is_err());
+        set_billing(Some(0), Some(false)).unwrap();
 
-        // Without billing, the token-quota guard applies as before.
         let enable = |quota: Option<i64>| {
             tokens::update_token(
                 &token.id,
@@ -830,17 +836,18 @@ mod tests {
                 None,
             )
         };
-        let error = enable(None).unwrap_err();
-        assert!(error.contains(tokens::OWNED_KEY_REQUIRES_QUOTA), "{error}");
-        // Renewal extends a pending key without enabling it.
-        tokens::renew_token(&token.id, "month").unwrap();
+        // A routine migration does not re-enable a key disabled by an administrator.
+        tokens::init_db().unwrap();
         assert!(!tokens::get_token_by_id(&token.id).unwrap().unwrap().enabled);
+        // Explicit renewal and account activation use the same active-account rule.
+        tokens::renew_token(&token.id, "month").unwrap();
+        assert!(tokens::get_token_by_id(&token.id).unwrap().unwrap().enabled);
 
         enable(Some(500)).unwrap();
         let active = tokens::get_token_by_id(&token.id).unwrap().unwrap();
         assert!(active.enabled && !active.quota_exhausted());
-        // Taking the quota back to 0 while enabled is refused.
-        assert!(tokens::update_token(
+        // Legacy quota values no longer affect activation or runtime limits.
+        tokens::update_token(
             &token.id,
             None,
             None,
@@ -851,22 +858,41 @@ mod tests {
             None,
             Some(0),
             None,
-            None
+            None,
         )
-        .is_err());
+        .unwrap();
 
         set_account_enabled(&user.id, false).unwrap();
         assert!(!tokens::get_token_by_id(&token.id).unwrap().unwrap().enabled);
+        let error = enable(None).unwrap_err();
         assert!(
-            enable(None).is_err(),
-            "a disabled account keeps its key off"
+            error.contains(tokens::OWNED_KEY_REQUIRES_ACTIVE_ACCOUNT),
+            "{error}"
         );
+        tokens::renew_token(&token.id, "month").unwrap();
+        assert!(!tokens::get_token_by_id(&token.id).unwrap().unwrap().enabled);
         set_account_enabled(&user.id, true).unwrap();
         assert!(tokens::get_token_by_id(&token.id).unwrap().unwrap().enabled);
     }
 
     #[test]
+    fn portal_registration_ignores_legacy_model_defaults() {
+        let _dir = TestDataDir::new();
+        tokens::init_db().unwrap();
+        let now = 1_000_000;
+        let email = unique_email("legacy-policy");
+        let code = issue(&email, CodePurpose::Register, now);
+        let mut legacy = defaults();
+        legacy.allowed_models = vec!["legacy-model".into(), "*".into()];
+        let (_, token) = register(&email, &code, "correct horse", legacy, now).unwrap();
+        assert!(token.enabled && token.is_billed());
+        assert_eq!(token.balance_micros, Some(0));
+        assert!(token.free_models.is_empty() && token.allowed_models.is_empty());
+    }
+
+    #[test]
     fn portal_code_rules() {
+        let _dir = TestDataDir::new();
         tokens::init_db().unwrap();
         let now = 2_000_000;
         let email = unique_email("code");
@@ -914,6 +940,7 @@ mod tests {
 
     #[test]
     fn portal_login_lockout_reset_and_sessions() {
+        let _dir = TestDataDir::new();
         let now = 3_000_000;
         let (email, user, token) = registered("login", now);
         assert_eq!(login(&email, "correct horse", now).unwrap().id, user.id);
@@ -969,6 +996,7 @@ mod tests {
 
     #[test]
     fn portal_deleting_the_key_deletes_the_account() {
+        let _dir = TestDataDir::new();
         let now = 4_000_000;
         let (email, user, token) = registered("delete", now);
         tokens::delete_token(&token.id).unwrap();

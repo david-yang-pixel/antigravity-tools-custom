@@ -39,16 +39,22 @@ export default function ModelPricingModal({ open, models, onClose }: Props) {
     const { t } = useTranslation();
     const [rows, setRows] = useState<Row[] | null>(null);
     const [saving, setSaving] = useState(false);
+    const [loadError, setLoadError] = useState(false);
+    const [reload, setReload] = useState(0);
 
     useEffect(() => {
         if (!open) return;
-        setRows(null);
-        invoke<ModelPrice[]>('get_model_prices').then(prices => setRows(prices.map(toRow))).catch(e => showToast(String(e), 'error'));
-    }, [open]);
+        let cancelled = false;
+        setRows(null); setLoadError(false);
+        invoke<ModelPrice[]>('get_model_prices')
+            .then(prices => { if (!cancelled) setRows(prices.map(toRow)); })
+            .catch(() => { if (!cancelled) setLoadError(true); });
+        return () => { cancelled = true; };
+    }, [open, reload]);
 
     if (!open) return null;
     const update = (key: number, patch: Partial<Row>) => setRows(current => current && current.map(row => row.key === key ? { ...row, ...patch } : row));
-    const free = rows ? models.filter(model => !rows.some(row => row.pattern.trim() && wildcard(row.pattern.trim(), model))) : [];
+    const unpriced = rows ? models.filter(model => !rows.some(row => row.pattern.trim() && wildcard(row.pattern.trim(), model))) : [];
 
     function build(): ModelPrice[] | null {
         const prices: ModelPrice[] = [];
@@ -100,7 +106,10 @@ export default function ModelPricingModal({ open, models, onClose }: Props) {
             <div className="modal-box max-w-3xl">
                 <h3 className="font-bold text-lg">{t('billing.model_pricing')}</h3>
                 <p className="text-xs text-gray-500 mt-1 mb-4">{t('billing.model_pricing_hint')}</p>
-                {!rows ? <div className="py-12 flex justify-center"><RefreshCw className="animate-spin text-gray-400" /></div> : <div className="space-y-3">
+                {!rows ? loadError ? <div role="alert" className="py-8 text-center space-y-3">
+                    <p className="text-sm text-red-600">{t('billing.price_load_error')}</p>
+                    <button type="button" onClick={() => setReload(value => value + 1)} className="text-sm text-blue-600 underline focus-visible:ring-2 focus-visible:ring-blue-500">{t('common.refresh')}</button>
+                </div> : <div className="py-12 flex justify-center"><RefreshCw className="animate-spin text-gray-400" /></div> : <div className="space-y-3">
                     <datalist id="pricing-models">{models.map(model => <option key={model} value={model} />)}</datalist>
                     {rows.map(row => <div key={row.key} className="border border-gray-200 dark:border-base-300 rounded-xl p-3 space-y-3">
                         <div className="flex flex-wrap items-center gap-2">
@@ -128,9 +137,9 @@ export default function ModelPricingModal({ open, models, onClose }: Props) {
                     <button type="button" onClick={() => setRows([...rows, { key: nextKey++, pattern: '', mode: 'per_token', call: '', input: '', output: '', cached: '' }])}
                         className="text-sm text-blue-600 flex items-center gap-1"><Plus size={14} />{t('billing.add_rule')}</button>
                     <p className="text-xs text-gray-500">{t('billing.match_hint')}</p>
-                    {free.length > 0 && <details className="text-xs text-amber-700 dark:text-amber-300">
-                        <summary className="cursor-pointer">{t('billing.free_models', { count: free.length })}</summary>
-                        <p className="mt-2 font-mono break-all text-gray-500">{free.join(', ')}</p>
+                    {unpriced.length > 0 && <details className="text-xs text-amber-700 dark:text-amber-300">
+                        <summary className="cursor-pointer">{t('billing.unpriced_models', { count: unpriced.length })}</summary>
+                        <p className="mt-2 font-mono break-all text-gray-500">{unpriced.join(', ')}</p>
                     </details>}
                 </div>}
                 <div className="modal-action">

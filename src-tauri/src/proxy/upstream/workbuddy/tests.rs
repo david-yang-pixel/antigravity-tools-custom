@@ -586,6 +586,7 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
             .unwrap();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     }
+    assert_zero_balance_admin_policy(&client, &base).await;
     let disabled = client
         .post(format!("{base}/api/workbuddy-settings"))
         .bearer_auth("test-gateway-admin")
@@ -614,4 +615,164 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
     if let Some(server) = state.admin_server.write().await.take() {
         server.stop().await;
     };
+}
+
+async fn assert_zero_balance_admin_policy(client: &reqwest::Client, base: &str) {
+    use crate::modules::user_token_db as db;
+
+    let admin = "test-gateway-admin";
+    let model = "claude-sonnet-4-6";
+    // Exercise the same HTTP create/update endpoints used by the administrator UI.
+    let created = client
+        .post(format!("{base}/api/user-tokens"))
+        .bearer_auth(admin)
+        .json(&json!({"username":"zero-balance-policy","expires_type":"never","max_ips":0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let key: db::UserToken = created.json().await.unwrap();
+    assert_eq!(key.balance_micros, Some(0));
+    assert!(key.free_models.is_empty());
+    assert!(key.allowed_models.is_empty());
+    assert!(key.enabled);
+    let edit_url = format!("{base}/api/user-tokens/{}", key.id);
+
+    let token_count = db::list_tokens().unwrap().len();
+    let invalid = client
+        .post(format!("{base}/api/user-tokens"))
+        .bearer_auth(admin)
+        .json(&json!({"username":"invalid-null-balance","expires_type":"never","max_ips":0,"balance_micros":null}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let _ = invalid.text().await.unwrap();
+    assert_eq!(db::list_tokens().unwrap().len(), token_count);
+    let invalid = client
+        .patch(&edit_url)
+        .bearer_auth(admin)
+        .json(&json!({"balance_micros":null,"free_models":[model]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let _ = invalid.text().await.unwrap();
+    let unchanged = db::get_token_by_id(&key.id).unwrap().unwrap();
+    assert_eq!(unchanged.balance_micros, Some(0));
+    assert!(unchanged.free_models.is_empty());
+
+    // Legacy access lists/quotas neither grant free use nor bypass balance checks.
+    let legacy = client
+        .patch(&edit_url)
+        .bearer_auth(admin)
+        .json(&json!({"allowed_models":[model,"unpriced-workbuddy-model"],"token_quota":999999}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::OK);
+    let _ = legacy.text().await.unwrap();
+    assert!(db::get_token_by_id(&key.id)
+        .unwrap()
+        .unwrap()
+        .free_models
+        .is_empty());
+    for (requested_model, expected_status, expected_code) in [
+        (model, StatusCode::PAYMENT_REQUIRED, "insufficient_balance"),
+        (
+            "unpriced-workbuddy-model",
+            StatusCode::FORBIDDEN,
+            "model_not_priced",
+        ),
+    ] {
+        let denied = client
+            .post(format!("{base}/v1/chat/completions"))
+            .bearer_auth(&key.token)
+            .json(&json!({"model":requested_model,"messages":[{"role":"user","content":"hello"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), expected_status);
+        let body: Value = denied.json().await.unwrap();
+        assert_eq!(body["error"]["code"], expected_code);
+    }
+    assert_eq!(db::usage_logs_for_token(&key.id, 1).unwrap().total, 0);
+
+    let granted = client
+        .patch(&edit_url)
+        .bearer_auth(admin)
+        .json(&json!({"free_models":[format!("models/{model}")]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(granted.status(), StatusCode::OK);
+    let _ = granted.text().await.unwrap();
+    let granted_key = db::get_token_by_id(&key.id).unwrap().unwrap();
+    assert_eq!(granted_key.balance_micros, Some(0));
+    assert_eq!(granted_key.free_models, vec![model]);
+
+    // The explicit free grant overrides the existing positive model price in
+    // every supported HTTP/SSE protocol; real usage must still be recorded.
+    for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+        for streaming in [false, true] {
+            let body = to_bytes(request(path, model, streaming).into_body(), 10000)
+                .await
+                .unwrap();
+            let response = client
+                .post(format!("{base}{path}"))
+                .bearer_auth(&key.token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-upstream-provider"], "workbuddy");
+            assert!(response.text().await.unwrap().contains(model));
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while db::usage_logs_for_token(&key.id, 1).unwrap().total < 6 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let logs = db::usage_logs_for_token(&key.id, 1).unwrap();
+    assert_eq!(logs.total, 6);
+    assert!(logs.items.iter().all(|log| log.status == 200
+        && log.model == model
+        && log.input_tokens == 1000
+        && log.output_tokens == 20
+        && log.cached_tokens == Some(600)
+        && log.cost_micros == Some(0)
+        && log.billing_mode.as_deref() == Some("free")));
+    assert_eq!(
+        db::get_token_by_id(&key.id)
+            .unwrap()
+            .unwrap()
+            .balance_micros,
+        Some(0)
+    );
+
+    let removed = client
+        .patch(&edit_url)
+        .bearer_auth(admin)
+        .json(&json!({"free_models":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    let _ = removed.text().await.unwrap();
+    let denied = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&key.token)
+        .json(&json!({"model":model,"messages":[{"role":"user","content":"hello"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::PAYMENT_REQUIRED);
+    let body: Value = denied.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "insufficient_balance");
+    assert_eq!(db::usage_logs_for_token(&key.id, 1).unwrap().total, 6);
 }

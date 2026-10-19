@@ -20,9 +20,14 @@ pub struct UserToken {
     pub enabled: bool,
     pub expires_type: String, // "day", "week", "month", "never"
     pub expires_at: Option<i64>,
-    pub max_concurrency: i32,         // 0 = unlimited
-    pub allowed_models: Vec<String>,  // empty = all public model IDs
-    pub token_quota: i64,             // lifetime input + output tokens; 0 = unlimited
+    pub max_concurrency: i32, // 0 = unlimited
+    /// Legacy storage only; never grants free use or restricts available models.
+    pub allowed_models: Vec<String>,
+    /// Legacy storage only; accumulated usage is no longer capped by this value.
+    pub token_quota: i64,
+    /// Exact model IDs that this key can use without a balance charge.
+    #[serde(default)]
+    pub free_models: Vec<String>,
     pub max_ips: i32,                 // 0 = unlimited
     pub curfew_start: Option<String>, // "HH:MM" 宵禁开始时间
     pub curfew_end: Option<String>,   // "HH:MM" 宵禁结束时间
@@ -34,30 +39,28 @@ pub struct UserToken {
     /// Usage-portal account that registered this key; `None` for administrator keys.
     #[serde(default)]
     pub owner_user_id: Option<String>,
-    /// Prepaid balance in micro-yuan; `None` = this key is not billed.
+    /// Prepaid balance in micro-yuan. Persisted keys always have a balance;
+    /// the optional type remains for compatibility with older internal callers.
     #[serde(default)]
     pub balance_micros: Option<i64>,
 }
 
 impl UserToken {
-    /// Administrator keys use 0 as "unlimited"; a registered account's key never
-    /// gets that shortcut, so its quota of 0 means no usage at all — unless the key
-    /// is billed, in which case the balance governs usage instead.
+    /// Kept for legacy callers; balance and concurrency govern usage now.
     pub fn has_quota_limit(&self) -> bool {
-        self.token_quota > 0 || (self.owner_user_id.is_some() && !self.is_billed())
+        false
     }
 
     pub fn is_billed(&self) -> bool {
-        self.balance_micros.is_some()
+        true
     }
 
     pub fn quota_exhausted(&self) -> bool {
-        self.has_quota_limit() && self.total_tokens_used >= self.token_quota
+        false
     }
 
     pub fn remaining_tokens(&self) -> Option<i64> {
-        self.has_quota_limit()
-            .then(|| (self.token_quota - self.total_tokens_used).max(0))
+        None
     }
 }
 
@@ -73,24 +76,26 @@ pub struct NewToken {
     pub max_concurrency: i32,
     pub token_quota: i64,
     pub allowed_models: Vec<String>,
+    pub free_models: Vec<String>,
     pub owner_user_id: Option<String>,
     pub enabled: bool,
     pub balance_micros: Option<i64>,
 }
 
 /// Database-level rule: a registered account's key can only be enabled while its
-/// account is active and it has a positive quota or is billed from a balance.
+/// account is active. Balance authorization belongs to the request gateway.
 /// Enforced by triggers so every write path (admin edit, renewal, older binaries
 /// after a rollback) fails closed.
 const OWNED_KEY_ENABLE_BLOCKED: &str = "NEW.owner_user_id IS NOT NULL AND NEW.enabled <> 0 AND \
-    ((NEW.token_quota <= 0 AND NEW.balance_micros IS NULL) OR NOT EXISTS (SELECT 1 FROM portal_users p \
-    WHERE p.id = NEW.owner_user_id AND p.status = 'active'))";
-pub const OWNED_KEY_REQUIRES_QUOTA: &str = "registered_token_requires_quota";
+    NOT EXISTS (SELECT 1 FROM portal_users p \
+    WHERE p.id = NEW.owner_user_id AND p.status = 'active')";
+pub const OWNED_KEY_REQUIRES_ACTIVE_ACCOUNT: &str = "registered_token_requires_active_account";
+pub const BALANCE_BILLING_REQUIRED: &str = "balance_billing_required";
 
 pub(crate) fn map_write_error(context: &str, error: rusqlite::Error) -> String {
     let text = error.to_string();
-    if text.contains(OWNED_KEY_REQUIRES_QUOTA) {
-        format!("{OWNED_KEY_REQUIRES_QUOTA}: a registered user's token needs a quota above 0 or balance billing, and an active account, before it can be enabled")
+    if text.contains(OWNED_KEY_REQUIRES_ACTIVE_ACCOUNT) {
+        format!("{OWNED_KEY_REQUIRES_ACTIVE_ACCOUNT}: a registered user's token needs an active account before it can be enabled")
     } else {
         format!("{context}: {text}")
     }
@@ -201,6 +206,7 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
     // treating a missing quota column as unlimited.
     for (column, definition) in [
         ("allowed_models", "TEXT NOT NULL DEFAULT '[]'"),
+        ("free_models", "TEXT NOT NULL DEFAULT '[]'"),
         (
             "max_concurrency",
             "INTEGER NOT NULL DEFAULT 0 CHECK(max_concurrency >= 0)",
@@ -231,15 +237,27 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
     crate::modules::portal_account::migrate(&conn)?;
     crate::modules::billing::migrate(&conn)?;
     crate::modules::payment::migrate(&conn)?;
-    conn.execute_batch(&format!(
+    // Replace old guards before normalizing balances, without changing enabled,
+    // ownership, historical policies, usage, or an existing monetary balance.
+    conn.execute_batch(
         "DROP TRIGGER IF EXISTS user_tokens_owned_key_insert;
          DROP TRIGGER IF EXISTS user_tokens_owned_key_update;
-         CREATE TRIGGER user_tokens_owned_key_insert BEFORE INSERT ON user_tokens
+         UPDATE user_tokens SET balance_micros = 0 WHERE balance_micros IS NULL;",
+    )
+    .map_err(|e| format!("Failed to require token balances: {e}"))?;
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER user_tokens_owned_key_insert BEFORE INSERT ON user_tokens
          WHEN {OWNED_KEY_ENABLE_BLOCKED}
-         BEGIN SELECT RAISE(ABORT, '{OWNED_KEY_REQUIRES_QUOTA}'); END;
+         BEGIN SELECT RAISE(ABORT, '{OWNED_KEY_REQUIRES_ACTIVE_ACCOUNT}'); END;
          CREATE TRIGGER user_tokens_owned_key_update BEFORE UPDATE ON user_tokens
          WHEN {OWNED_KEY_ENABLE_BLOCKED}
-         BEGIN SELECT RAISE(ABORT, '{OWNED_KEY_REQUIRES_QUOTA}'); END;"
+         BEGIN SELECT RAISE(ABORT, '{OWNED_KEY_REQUIRES_ACTIVE_ACCOUNT}'); END;
+         CREATE TRIGGER IF NOT EXISTS user_tokens_balance_insert BEFORE INSERT ON user_tokens
+         WHEN NEW.balance_micros IS NULL
+         BEGIN SELECT RAISE(ABORT, '{BALANCE_BILLING_REQUIRED}'); END;
+         CREATE TRIGGER IF NOT EXISTS user_tokens_balance_update BEFORE UPDATE ON user_tokens
+         WHEN NEW.balance_micros IS NULL
+         BEGIN SELECT RAISE(ABORT, '{BALANCE_BILLING_REQUIRED}'); END;"
     ))
     .map_err(|e| format!("Failed to install registered token guard: {e}"))?;
 
@@ -368,6 +386,11 @@ pub fn validate_limits(max_concurrency: i32, token_quota: i64) -> Result<(), Str
 
 /// Exact client-facing model IDs; aliases remain subject to the administrator's routing.
 pub fn normalize_allowed_models(models: Vec<String>) -> Result<Vec<String>, String> {
+    normalize_free_models(models)
+}
+
+/// Free use is opt-in for exact model IDs; historical access lists never feed it.
+pub fn normalize_free_models(models: Vec<String>) -> Result<Vec<String>, String> {
     if models.len() > 256 {
         return Err("Select no more than 256 models".into());
     }
@@ -390,10 +413,14 @@ pub fn normalize_allowed_models(models: Vec<String>) -> Result<Vec<String>, Stri
 }
 
 fn read_allowed_models(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<String>> {
-    let raw: String = row.get("allowed_models")?;
+    read_model_list(row, "allowed_models")
+}
+
+fn read_model_list(row: &rusqlite::Row<'_>, column: &str) -> rusqlite::Result<Vec<String>> {
+    let raw: String = row.get(column)?;
     serde_json::from_str(&raw).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
-            row.as_ref().column_index("allowed_models").unwrap_or(0),
+            row.as_ref().column_index(column).unwrap_or(0),
             rusqlite::types::Type::Text,
             Box::new(error),
         )
@@ -630,6 +657,7 @@ pub fn create_token(
             max_concurrency,
             token_quota,
             allowed_models,
+            free_models: Vec::new(),
             owner_user_id: None,
             enabled: true,
             balance_micros: None,
@@ -639,8 +667,10 @@ pub fn create_token(
 
 pub fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, String> {
     validate_limits(spec.max_concurrency, spec.token_quota)?;
-    crate::modules::billing::validate_balance(spec.balance_micros)?;
+    let balance_micros = Some(spec.balance_micros.unwrap_or(0));
+    crate::modules::billing::validate_balance(balance_micros)?;
     let allowed_models = normalize_allowed_models(spec.allowed_models)?;
+    let free_models = normalize_free_models(spec.free_models)?;
     let now = Utc::now().timestamp();
     let expires_at = resolve_expires_at(&spec.expires_type, spec.custom_expires_at, now)?;
 
@@ -656,6 +686,7 @@ pub fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, Stri
         max_concurrency: spec.max_concurrency,
         token_quota: spec.token_quota,
         allowed_models,
+        free_models,
         curfew_start: spec.curfew_start,
         curfew_end: spec.curfew_end,
         created_at: now,
@@ -664,7 +695,7 @@ pub fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, Stri
         total_requests: 0,
         total_tokens_used: 0,
         owner_user_id: spec.owner_user_id,
-        balance_micros: spec.balance_micros,
+        balance_micros,
     };
 
     conn.execute(
@@ -672,8 +703,8 @@ pub fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, Stri
             id, token, username, description, enabled, expires_type, expires_at, max_ips,
             curfew_start, curfew_end,
             created_at, updated_at, total_requests, total_tokens_used, max_concurrency, token_quota, allowed_models,
-            owner_user_id, balance_micros
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            owner_user_id, balance_micros, free_models
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             user_token.id,
             user_token.token,
@@ -694,6 +725,7 @@ pub fn insert_token(conn: &Connection, spec: NewToken) -> Result<UserToken, Stri
             serde_json::to_string(&user_token.allowed_models).map_err(|e| e.to_string())?,
             user_token.owner_user_id,
             user_token.balance_micros,
+            serde_json::to_string(&user_token.free_models).map_err(|e| e.to_string())?,
         ],
     )
     .map_err(|e| map_write_error("Failed to insert user token", e))?;
@@ -723,6 +755,7 @@ fn token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserToken> {
         max_concurrency: row.get("max_concurrency")?,
         token_quota: row.get("token_quota")?,
         allowed_models: read_allowed_models(row)?,
+        free_models: read_model_list(row, "free_models")?,
         curfew_start: row.get("curfew_start").unwrap_or(None),
         curfew_end: row.get("curfew_end").unwrap_or(None),
         created_at: row.get("created_at")?,
@@ -731,7 +764,7 @@ fn token_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserToken> {
         total_requests: row.get("total_requests").unwrap_or(0),
         total_tokens_used: row.get("total_tokens_used").unwrap_or(0),
         owner_user_id: row.get("owner_user_id")?,
-        balance_micros: row.get("balance_micros")?,
+        balance_micros: Some(row.get::<_, Option<i64>>("balance_micros")?.unwrap_or(0)),
     })
 }
 
@@ -809,8 +842,8 @@ pub fn update_token(
     )
 }
 
-/// Like [`update_token`], plus `balance_micros`: `None` keeps it, `Some(None)` stops
-/// billing the key, `Some(Some(n))` sets the balance. Written in the same statement
+/// Like [`update_token`], plus `balance_micros`: `None` keeps it, `Some(None)` is
+/// rejected, `Some(Some(n))` sets the balance. Written in the same statement
 /// as `enabled` so the registered-key guard sees the final state.
 pub fn update_token_with_balance(
     id: &str,
@@ -826,11 +859,51 @@ pub fn update_token_with_balance(
     expires: Option<(String, Option<i64>)>, // (expires_type, custom_expires_at)
     balance_micros: Option<Option<i64>>,
 ) -> Result<(), String> {
+    update_token_with_policy(
+        id,
+        username,
+        description,
+        enabled,
+        max_ips,
+        curfew_start,
+        curfew_end,
+        max_concurrency,
+        token_quota,
+        allowed_models,
+        expires,
+        balance_micros,
+        None,
+    )
+}
+
+/// Atomically changes balance and the independent free-model policy. Legacy
+/// quota/access-list parameters are stored for rollback compatibility only.
+pub fn update_token_with_policy(
+    id: &str,
+    username: Option<String>,
+    description: Option<String>,
+    enabled: Option<bool>,
+    max_ips: Option<i32>,
+    curfew_start: Option<Option<String>>,
+    curfew_end: Option<Option<String>>,
+    max_concurrency: Option<i32>,
+    token_quota: Option<i64>,
+    allowed_models: Option<Vec<String>>,
+    expires: Option<(String, Option<i64>)>,
+    balance_micros: Option<Option<i64>>,
+    free_models: Option<Vec<String>>,
+) -> Result<(), String> {
     validate_limits(max_concurrency.unwrap_or(0), token_quota.unwrap_or(0))?;
+    if balance_micros == Some(None) {
+        return Err(format!(
+            "{BALANCE_BILLING_REQUIRED}: balance cannot be null"
+        ));
+    }
     if let Some(balance) = balance_micros {
         crate::modules::billing::validate_balance(balance)?;
     }
     let allowed_models = allowed_models.map(normalize_allowed_models).transpose()?;
+    let free_models = free_models.map(normalize_free_models).transpose()?;
     let now = Utc::now().timestamp();
     let expires = expires
         .map(|(kind, custom)| resolve_expires_at(&kind, custom, now).map(|at| (kind, at)))
@@ -890,6 +963,14 @@ pub fn update_token_with_balance(
         param_idx += 1;
     }
 
+    if let Some(models) = free_models {
+        query.push_str(&format!(", free_models = ?{}", param_idx));
+        params_vec.push(Box::new(
+            serde_json::to_string(&models).map_err(|e| e.to_string())?,
+        ));
+        param_idx += 1;
+    }
+
     if let Some(start) = curfew_start {
         query.push_str(&format!(", curfew_start = ?{}", param_idx));
         params_vec.push(Box::new(start));
@@ -942,12 +1023,12 @@ pub fn renew_token(id: &str, expires_type: &str) -> Result<(), String> {
     let expires_at = resolve_expires_at(expires_type, None, now)?;
     let conn = connect_db()?;
 
-    // Renewal re-enables administrator keys; a registered key is re-enabled only when
-    // the guard trigger would allow it, so renewing a pending key just extends it.
+    // Explicit renewal re-enables keys only while their owner account is active.
+    // Monetary authorization remains independent from account/key activation.
     conn.execute(
         "UPDATE user_tokens SET expires_type = ?1, expires_at = ?2, updated_at = ?3,
-            enabled = CASE WHEN owner_user_id IS NULL OR ((token_quota > 0 OR balance_micros > 0) AND EXISTS (
-                SELECT 1 FROM portal_users p WHERE p.id = owner_user_id AND p.status = 'active'))
+            enabled = CASE WHEN owner_user_id IS NULL OR EXISTS (
+                SELECT 1 FROM portal_users p WHERE p.id = owner_user_id AND p.status = 'active')
             THEN 1 ELSE enabled END
          WHERE id = ?4",
         params![expires_type, expires_at, now, id],
@@ -1044,6 +1125,34 @@ pub fn record_token_usage_with_cache(
     status: u16,
     user_agent: Option<String>,
 ) -> Result<(), String> {
+    let token = get_token_by_id(token_id)?.ok_or("Token not found")?;
+    let rules = crate::modules::billing::load_prices()?;
+    let policy = crate::modules::billing::policy_for_model(&token.free_models, &rules, model)
+        .ok_or("Model has no price or free entitlement")?;
+    record_token_usage_with_policy(
+        token_id,
+        ip,
+        model,
+        input_tokens,
+        output_tokens,
+        cached_tokens,
+        status,
+        user_agent,
+        Some(&policy),
+    )
+}
+
+pub fn record_token_usage_with_policy(
+    token_id: &str,
+    ip: &str,
+    model: &str,
+    input_tokens: i32,
+    output_tokens: i32,
+    cached_tokens: Option<u32>,
+    status: u16,
+    user_agent: Option<String>,
+    policy: Option<&crate::modules::billing::BillingPolicy>,
+) -> Result<(), String> {
     let mut conn = connect_db()?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1097,7 +1206,7 @@ pub fn record_token_usage_with_cache(
     let charge = crate::modules::billing::settle(
         &tx,
         token_id,
-        model,
+        policy,
         i64::from(input_tokens),
         i64::from(output_tokens),
         cached_tokens.map(i64::from),
@@ -1243,9 +1352,30 @@ pub fn get_username_for_ip(ip: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::monitor::prompt_log_tests::TestDataDir;
+
+    fn set_test_free_models(id: &str, models: &[&str]) {
+        update_token_with_policy(
+            id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(models.iter().map(|model| (*model).to_string()).collect()),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn user_token_usage_logs_cache_pagination_and_calendar_boundaries() {
+        let _dir = TestDataDir::new();
         init_db().unwrap();
         let a = create_token(
             "calendar-a".into(),
@@ -1273,6 +1403,8 @@ mod tests {
             vec![],
         )
         .unwrap();
+        set_test_free_models(&a.id, &["model-a"]);
+        set_test_free_models(&b.id, &["other-model"]);
         let conn = connect_db().unwrap();
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-14T12:00:00+08:00")
             .unwrap()
@@ -1381,6 +1513,7 @@ mod tests {
 
     #[test]
     fn test_create_and_query_token() {
+        let _dir = TestDataDir::new();
         let _ = init_db(); // Ensure DB is initialized
 
         // Use a random username to avoid collisions in existing DB runs during dev
@@ -1410,6 +1543,7 @@ mod tests {
 
     #[test]
     fn test_never_expire_token_validation() {
+        let _dir = TestDataDir::new();
         let _ = init_db();
         let username = format!("NeverExpireUser_{}", Uuid::new_v4());
         let token_res = create_token(
@@ -1447,15 +1581,188 @@ mod tests {
             VALUES ('legacy-id', 'test-key', 'legacy', 'never', 1, 1, 12345);").unwrap();
         init_db_connection(&mut conn).unwrap();
         init_db_connection(&mut conn).unwrap();
-        let values: (String, i64, i32, i64) = conn.query_row(
-            "SELECT token, total_tokens_used, max_concurrency, token_quota FROM user_tokens WHERE id = 'legacy-id'",
-            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        let values: (String, i64, i32, i64, i64, String) = conn.query_row(
+            "SELECT token, total_tokens_used, max_concurrency, token_quota, balance_micros, free_models FROM user_tokens WHERE id = 'legacy-id'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         ).unwrap();
-        assert_eq!(values, ("test-key".into(), 12345, 0, 0));
+        assert_eq!(values, ("test-key".into(), 12345, 0, 0, 0, "[]".into()));
+    }
+
+    #[test]
+    fn user_token_balance_migration_preserves_history_and_disabled_keys() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_db_connection(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO portal_users (id, email, password_hash, status, created_at, updated_at)
+             VALUES ('owner', 'migration@example.com', 'test-hash', 'active', 1, 1);
+             DROP TRIGGER user_tokens_balance_update;
+             INSERT INTO user_tokens (id, token, username, enabled, expires_type, created_at,
+                 updated_at, total_requests, total_tokens_used, allowed_models, token_quota,
+                 balance_micros, owner_user_id)
+             VALUES ('legacy', 'legacy-value', 'legacy', 0, 'never', 1, 2, 9, 12345,
+                 '[\"legacy-model\"]', 42, 0, 'owner');
+             UPDATE user_tokens SET balance_micros = NULL WHERE id = 'legacy';
+             INSERT INTO user_tokens (id, token, username, enabled, expires_type, created_at,
+                 updated_at, balance_micros, free_models)
+             VALUES ('funded', 'funded-value', 'funded', 1, 'never', 1, 2, 1234567, '[\"explicit-free\"]'),
+                 ('debt', 'debt-value', 'debt', 0, 'never', 1, 2, -12345, '[]');
+             INSERT INTO token_usage_logs (id, token_id, model, input_tokens, output_tokens,
+                 request_time, status, cost_micros, billing_mode)
+             VALUES ('historical-usage', 'funded', 'model', 10, 20, 3, 200, 123, 'per_token');
+             INSERT INTO balance_ledger (id, token_id, delta_micros, balance_after, reason, created_at)
+             VALUES ('historical-charge', 'funded', -123, 1234567, 'usage', 3);",
+        ).unwrap();
+        init_db_connection(&mut conn).unwrap();
+        init_db_connection(&mut conn).unwrap();
+        let legacy = conn
+            .query_row(
+                "SELECT * FROM user_tokens WHERE id = 'legacy'",
+                [],
+                token_from_row,
+            )
+            .unwrap();
+        assert_eq!(legacy.token, "legacy-value");
+        assert!(!legacy.enabled);
+        assert_eq!(
+            (
+                legacy.created_at,
+                legacy.updated_at,
+                legacy.total_requests,
+                legacy.total_tokens_used
+            ),
+            (1, 2, 9, 12345)
+        );
+        assert_eq!(legacy.balance_micros, Some(0));
+        assert_eq!(legacy.allowed_models, vec!["legacy-model"]);
+        assert_eq!(legacy.token_quota, 42);
+        assert!(legacy.free_models.is_empty());
+        assert!(legacy.is_billed());
+        assert!(!legacy.has_quota_limit() && !legacy.quota_exhausted());
+        assert_eq!(legacy.remaining_tokens(), None);
+        let funded = conn
+            .query_row(
+                "SELECT * FROM user_tokens WHERE id = 'funded'",
+                [],
+                token_from_row,
+            )
+            .unwrap();
+        assert_eq!(funded.balance_micros, Some(1234567));
+        assert_eq!(funded.free_models, vec!["explicit-free"]);
+        let debt = conn
+            .query_row(
+                "SELECT * FROM user_tokens WHERE id = 'debt'",
+                [],
+                token_from_row,
+            )
+            .unwrap();
+        assert_eq!(debt.balance_micros, Some(-12345));
+        assert!(!debt.enabled);
+        let historical: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT cost_micros FROM token_usage_logs WHERE id = 'historical-usage'),
+                (SELECT delta_micros FROM balance_ledger WHERE id = 'historical-charge')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(historical, (123, -123));
+        assert!(conn
+            .execute(
+                "UPDATE user_tokens SET balance_micros = NULL WHERE id = 'funded'",
+                []
+            )
+            .is_err());
+        assert!(conn.execute(
+            "INSERT INTO user_tokens (id, token, username, expires_type, created_at, updated_at)
+             VALUES ('null-balance', 'null-value', 'null', 'never', 1, 1)", [],
+        ).is_err());
+    }
+
+    #[test]
+    fn user_token_free_policy_is_independent_and_null_balance_updates_are_atomic() {
+        let _dir = TestDataDir::new();
+        init_db().unwrap();
+        let token = create_token(
+            "free-policy-test".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            2,
+            1,
+            vec!["legacy-model".into()],
+        )
+        .unwrap();
+        assert!(token.free_models.is_empty());
+        assert_eq!(token.balance_micros, Some(0));
+        update_token_with_policy(
+            &token.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(123)),
+            Some(vec!["models/free-model".into(), "free-model".into()]),
+        )
+        .unwrap();
+        // A rejected NULL balance must not partially apply the accompanying free list.
+        assert!(update_token_with_policy(
+            &token.id,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(None),
+            Some(vec!["must-not-apply".into()]),
+        )
+        .unwrap_err()
+        .contains(BALANCE_BILLING_REQUIRED));
+        let updated = get_token_by_id(&token.id).unwrap().unwrap();
+        assert_eq!(updated.balance_micros, Some(123));
+        assert!(updated.enabled);
+        assert_eq!(updated.free_models, vec!["free-model"]);
+        assert_eq!(updated.allowed_models, vec!["legacy-model"]);
+        assert_eq!(updated.token, token.token);
+        update_token_with_policy(
+            &token.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Vec::new()),
+        )
+        .unwrap();
+        let cleared = get_token_by_id(&token.id).unwrap().unwrap();
+        assert!(cleared.free_models.is_empty());
+        assert_eq!(cleared.balance_micros, Some(123));
+        assert!(normalize_free_models(vec!["*".into()]).is_err());
+        assert!(normalize_free_models(vec![" ".into()]).is_err());
     }
 
     #[test]
     fn user_token_limits_persist_edit_clear_and_validate() {
+        let _dir = TestDataDir::new();
         init_db().unwrap();
         let t = create_token(
             "settings-test".into(),
@@ -1470,6 +1777,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
+        set_test_free_models(&t.id, &["test"]);
         record_token_usage_and_ip(&t.id, "127.0.0.1", "test", 20, 30, 200, None).unwrap();
         update_token(
             &t.id,
@@ -1553,6 +1861,7 @@ mod tests {
 
     #[test]
     fn user_token_concurrent_usage_is_not_lost() {
+        let _dir = TestDataDir::new();
         init_db().unwrap();
         let t = create_token(
             "settlement-test".into(),
@@ -1567,6 +1876,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
+        set_test_free_models(&t.id, &["test"]);
         let threads: Vec<_> = (0..16)
             .map(|_| {
                 let id = t.id.clone();
@@ -1583,6 +1893,7 @@ mod tests {
     }
     #[test]
     fn user_token_model_policy_persists_edits_and_preserves_usage() {
+        let _dir = TestDataDir::new();
         init_db().unwrap();
         let t = create_token(
             "models-test".into(),
@@ -1602,6 +1913,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.allowed_models, vec!["model-a", "model-b"]);
+        assert!(t.free_models.is_empty());
+        set_test_free_models(&t.id, &["model-a"]);
         record_token_usage_and_ip(&t.id, "local", "model-a", 10, 5, 200, None).unwrap();
         update_token(
             &t.id,
@@ -1619,6 +1932,7 @@ mod tests {
         .unwrap();
         let read = get_token_by_value(&t.token).unwrap().unwrap();
         assert_eq!(read.allowed_models, vec!["model-c"]);
+        assert_eq!(read.free_models, vec!["model-a"]);
         assert_eq!(read.total_tokens_used, 15);
         update_token(
             &t.id,
@@ -1685,6 +1999,7 @@ mod tests {
 
     #[test]
     fn user_token_expiry_edit_keeps_or_replaces_expiry() {
+        let _dir = TestDataDir::new();
         init_db().unwrap();
         let t = create_token(
             format!("expiry-edit-{}", Uuid::new_v4()),
@@ -1767,6 +2082,7 @@ mod tests {
 
     #[test]
     fn user_token_custom_renewal_never_clears_expiry() {
+        let _dir = TestDataDir::new();
         init_db().unwrap();
         let expires_at = Utc::now().timestamp() + 60;
         let t = create_token(
