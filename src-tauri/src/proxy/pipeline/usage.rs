@@ -52,7 +52,8 @@ impl CanonicalUsage {
             .unwrap_or(0) as u32;
 
         let cached = usage
-            .get("cache_read_input_tokens")
+            .get("prompt_cache_hit_tokens")
+            .or_else(|| usage.get("cache_read_input_tokens"))
             .or_else(|| usage.get("cachedContentTokenCount"))
             .or_else(|| usage.get("cached_content_token_count"))
             .or_else(|| usage.get("total_cached_tokens"))
@@ -135,6 +136,9 @@ impl CanonicalUsage {
         // 如果输入数据是 Anthropic 格式（raw_input 存的是 uncached），做加和还原全量
         let (canonical_total_input, uncached_input) = if let Some(cr) = usage
             .get("cache_read_input_tokens")
+            // OpenAI prompt_tokens already includes cached reads/writes. Some
+            // providers additionally emit Anthropic-shaped compatibility fields.
+            .filter(|_| usage.get("prompt_tokens").is_none())
             .and_then(|v| v.as_u64())
         {
             let cc = usage

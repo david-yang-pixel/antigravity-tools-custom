@@ -6246,6 +6246,39 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             }
         };
 
+        // WorkBuddy's HTTP adapter is outside this legacy WebSocket path. Never
+        // silently send one of its aliases to the Google account scheduler.
+        let workbuddy_error = if let Some(model) = normalized.get("model").and_then(Value::as_str) {
+            let mapping = state.custom_mapping.read().await;
+            match crate::modules::workbuddy::load() {
+                Ok(settings) if settings.target_model(model, &mapping).is_some() => Some((
+                    "invalid_request_error",
+                    "workbuddy_requires_http",
+                    "WorkBuddy models require HTTP/SSE Responses, not WebSocket.",
+                )),
+                Err(_)
+                    if crate::modules::workbuddy::known_model_on_configuration_error(
+                        model, &mapping,
+                    ) =>
+                {
+                    Some((
+                        "server_error",
+                        "workbuddy_configuration_invalid",
+                        "Repair the WorkBuddy upstream configuration in admin settings.",
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some((kind, code, message)) = workbuddy_error {
+            let event = json!({"type":"error","error":{
+                "type":kind,"code":code,"message":message
+            }});
+            let _ = socket.send(Message::Text(event.to_string())).await;
+            continue;
+        }
         let openai_body = convert_codex_to_openai_request(normalized);
         let response_result = handle_chat_completions(
             State(state.clone()),

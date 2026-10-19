@@ -516,7 +516,7 @@ pub async fn get_all_dynamic_models(
             .unwrap_or_default()
             .into_iter()
             .collect();
-        models.sort();
+        crate::modules::workbuddy::extend_catalog(&mut models);
         return models;
     }
     let mut model_ids = HashSet::new();
@@ -569,7 +569,7 @@ pub async fn get_all_dynamic_models(
         .into_iter()
         .filter(|id| custom_keys.contains(id) || is_model_compliant_with_baseline(id))
         .collect();
-    sorted_ids.sort();
+    crate::modules::workbuddy::extend_catalog(&mut sorted_ids);
     sorted_ids
 }
 
