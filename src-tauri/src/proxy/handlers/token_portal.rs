@@ -76,7 +76,12 @@ pub fn routes() -> Router<AppState> {
         .route("/api/token-portal/key", get(reveal_key))
         .route("/api/token-portal/key/regenerate", post(regenerate_key))
         .route("/api/token-portal/topup", post(create_topup))
+        .route("/api/token-portal/topup/orders", get(topup_orders))
         .route("/api/token-portal/topup/orders/:order", get(topup_order))
+        .route(
+            "/api/token-portal/topup/orders/:order/pay",
+            post(resume_topup),
+        )
 }
 
 /// Who is looking at the portal.
@@ -370,8 +375,11 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
     // Disabled or deleted keys are revoked for key sign-in.
     let models =
         db::model_usage_for_token(&token.id).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let topup_orders =
-        payment::recent_orders(&token.id, 10).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let topup_orders = payment::recent_orders(&token.id, 10)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .into_iter()
+        .map(|order| order.for_display(now))
+        .collect();
     let suffix: String = token
         .token
         .chars()
@@ -458,12 +466,9 @@ async fn create_topup(
         Ok(settings) => settings.payment,
         Err(error) => return portal_error(PortalError::Unavailable(error)),
     };
-    let Some(merchant) = payment_settings
-        .merchant()
-        .filter(|_| payment_settings.is_ready())
-    else {
+    if !payment_settings.is_ready() {
         return error_response(StatusCode::BAD_REQUEST, "topup_disabled", None);
-    };
+    }
     if !payment_settings.pay_types.contains(&body.pay_type) {
         return error_response(StatusCode::BAD_REQUEST, "invalid_pay_type", None);
     }
@@ -502,25 +507,170 @@ async fn create_topup(
         Ok(order) => order,
         Err(error) => return portal_error(error),
     };
+    cashier_response(&payment_settings, order, now())
+}
+
+/// Always rebuild the form from the stored order, never from browser-supplied
+/// amounts or methods. Both new payments and resumed payments use this gate.
+fn cashier_response(
+    settings: &portal_settings::PaymentSettings,
+    order: payment::PublicOrder,
+    now: i64,
+) -> Response {
+    if order.status == "paid" {
+        return order_response(order, now);
+    }
+    if !order.can_pay(now) {
+        return error_response(StatusCode::GONE, "order_expired", None);
+    }
+    let Some(merchant) = settings.merchant().filter(|_| settings.is_ready()) else {
+        return error_response(StatusCode::BAD_REQUEST, "topup_disabled", None);
+    };
+    if !settings.pay_types.contains(&order.pay_type) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_pay_type", None);
+    }
     let name = format!(
         "{} {} 元",
-        payment_settings.subject,
-        epay::format_money(cents)
+        settings.subject,
+        epay::format_money(order.amount_cents)
     );
     let (action, fields) = epay::submit_form(
         &merchant,
-        &body.pay_type,
+        &order.pay_type,
         &order.out_trade_no,
-        &payment_settings.notify_url(),
-        &payment_settings.return_url(),
+        &settings.notify_url(),
+        &settings.return_url(),
         &name,
-        cents,
+        order.amount_cents,
     );
     ok_json(serde_json::json!({
         "order": order,
         "action": action,
         "fields": fields,
+        "server_time": now,
     }))
+}
+
+fn order_response(order: payment::PublicOrder, now: i64) -> Response {
+    ok_json(serde_json::json!({ "order": order.for_display(now), "server_time": now }))
+}
+
+#[derive(Default, Deserialize)]
+struct TopupOrdersQuery {
+    #[serde(default)]
+    status: payment::OrderFilter,
+    page: Option<u32>,
+    page_size: Option<u32>,
+}
+
+async fn topup_orders(headers: HeaderMap, Query(query): Query<TopupOrdersQuery>) -> Response {
+    let token = match authenticate(&headers) {
+        Ok(Viewer::Key(token) | Viewer::Account(_, token)) => token,
+        Err(status) => return error_response(status, "invalid_user_token", None),
+    };
+    match blocking(move || {
+        payment::order_page(
+            &token.id,
+            query.status,
+            query.page.unwrap_or(1),
+            query.page_size.unwrap_or(10),
+            now(),
+        )
+        .map_err(PortalError::Unavailable)
+    })
+    .await
+    {
+        Ok(page) => ok_json(serde_json::to_value(page).expect("order page is serializable")),
+        Err(error) => portal_error(error),
+    }
+}
+
+/// Restores the same order's cashier form, after checking ownership and asking
+/// the gateway whether it was paid while the user was away. It never inserts an
+/// order or extends the original deadline.
+async fn resume_topup(headers: HeaderMap, Path(order_no): Path<String>) -> Response {
+    let token = match authenticate(&headers) {
+        Ok(Viewer::Key(token) | Viewer::Account(_, token)) => token,
+        Err(status) => return error_response(status, "invalid_user_token", None),
+    };
+    if order_no.is_empty() || order_no.len() > 32 || !order_no.bytes().all(|b| b.is_ascii_digit()) {
+        return error_response(StatusCode::NOT_FOUND, "order_not_found", None);
+    }
+    let lookup = {
+        let (token_id, order_no) = (token.id.clone(), order_no.clone());
+        move || payment::order_for_token(&token_id, &order_no).map_err(PortalError::Unavailable)
+    };
+    let order = match blocking(lookup).await {
+        Ok(Some(order)) => order,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "order_not_found", None),
+        Err(error) => return portal_error(error),
+    };
+    if order.status == "paid" {
+        return order_response(order, now());
+    }
+    if !order.can_pay(now()) {
+        return error_response(StatusCode::GONE, "order_expired", None);
+    }
+    if !token.is_billed() {
+        return error_response(StatusCode::BAD_REQUEST, "topup_unavailable", None);
+    }
+    if token.expires_at.is_some_and(|ts| ts <= now()) {
+        return error_response(StatusCode::BAD_REQUEST, "topup_key_expired", None);
+    }
+    if let Err(limited) = rate_limit("topup-resume", &token.id, 30, 600) {
+        return limited;
+    }
+    let settings =
+        match blocking(|| portal_settings::load().map_err(PortalError::Unavailable)).await {
+            Ok(settings) => settings.payment,
+            Err(error) => return portal_error(error),
+        };
+    resume_with_settings(&token.id, order, &settings).await
+}
+
+async fn resume_with_settings(
+    token_id: &str,
+    order: payment::PublicOrder,
+    settings: &portal_settings::PaymentSettings,
+) -> Response {
+    let Some(merchant) = settings.merchant().filter(|_| settings.is_ready()) else {
+        return error_response(StatusCode::BAD_REQUEST, "topup_disabled", None);
+    };
+    if !settings.pay_types.contains(&order.pay_type) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_pay_type", None);
+    }
+    let client = match epay::http_client() {
+        Ok(client) => client,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "payment_check_failed",
+                None,
+            )
+        }
+    };
+    if crate::proxy::handlers::payment::reconcile_order(&client, &merchant, &order.out_trade_no)
+        .await
+        .is_err()
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "payment_check_failed",
+            None,
+        );
+    }
+    // A callback can settle the order during the network request. Reload it and
+    // check the clock again before issuing a signed form.
+    let token_id = token_id.to_string();
+    match blocking(move || {
+        payment::order_for_token(&token_id, &order.out_trade_no).map_err(PortalError::Unavailable)
+    })
+    .await
+    {
+        Ok(Some(order)) => cashier_response(settings, order, now()),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "order_not_found", None),
+        Err(error) => portal_error(error),
+    }
 }
 
 /// Status of one of the viewer's orders. An unpaid order is checked with the
@@ -550,7 +700,7 @@ async fn topup_order(headers: HeaderMap, Path(order_no): Path<String>) -> Respon
         || rate_limit("topup-check", &order_no, 30, 600).is_err()
         || rate_limit("topup-check-key", &token.id, 60, 600).is_err()
     {
-        return ok_json(serde_json::json!({ "order": order }));
+        return order_response(order, now());
     }
     let merchant = portal_settings::load()
         .ok()
@@ -563,7 +713,7 @@ async fn topup_order(headers: HeaderMap, Path(order_no): Path<String>) -> Respon
         }
     }
     match blocking(lookup).await {
-        Ok(Some(order)) => ok_json(serde_json::json!({ "order": order })),
+        Ok(Some(order)) => order_response(order, now()),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "order_not_found", None),
         Err(error) => portal_error(error),
     }
@@ -804,6 +954,12 @@ mod tests {
             .route("/api/token-portal/auth/logout", post(logout))
             .route("/api/token-portal/key", get(reveal_key))
             .route("/api/token-portal/key/regenerate", post(regenerate_key))
+            .route("/api/token-portal/topup/orders", get(topup_orders))
+            .route("/api/token-portal/topup/orders/:order", get(topup_order))
+            .route(
+                "/api/token-portal/topup/orders/:order/pay",
+                post(resume_topup),
+            )
     }
     fn key(name: &str) -> db::UserToken {
         db::init_db().unwrap();
@@ -970,6 +1126,193 @@ mod tests {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn payment_portal_history_and_resume_enforce_ownership_and_deadlines() {
+        let a = key("payment-owner-a");
+        let b = key("payment-owner-b");
+        let order = payment::create_order(&b.id, None, 100, "alipay", now()).unwrap();
+        let expired =
+            payment::create_order(&a.id, None, 100, "alipay", now() - payment::ORDER_TTL_SECS)
+                .unwrap();
+        let path = format!("/api/token-portal/topup/orders/{}/pay", order.out_trade_no);
+        assert_eq!(
+            call("POST", &path, None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call("POST", &path, None, Some(&a.token)).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, body) = call(
+            "POST",
+            &format!(
+                "/api/token-portal/topup/orders/{}/pay",
+                expired.out_trade_no
+            ),
+            None,
+            Some(&a.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body["error"]["code"], "order_expired");
+        let (status, body) = call(
+            "GET",
+            &format!(
+                "/api/token-portal/topup/orders?status=all&token_id={}",
+                b.id
+            ),
+            None,
+            Some(&a.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["orders"][0]["out_trade_no"], expired.out_trade_no);
+        assert_eq!(body["orders"][0]["status"], "closed");
+        assert_eq!(body["pending_orders"], serde_json::json!([]));
+        assert!(body.get("server_time").unwrap().is_i64());
+        let text = body.to_string();
+        for forbidden in [&a.token, &b.token, &a.id, &b.id, &order.out_trade_no] {
+            assert!(!text.contains(forbidden));
+        }
+        for query in ["status=bogus", "page=-1", "page_size=99999999999"] {
+            assert_eq!(
+                call(
+                    "GET",
+                    &format!("/api/token-portal/topup/orders?{query}"),
+                    None,
+                    Some(&a.token)
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        // A paid order never yields another signed payment form, even after expiry.
+        payment::credit_paid_order(&expired.out_trade_no, None, 100, now()).unwrap();
+        let (status, body) = call(
+            "POST",
+            &format!(
+                "/api/token-portal/topup/orders/{}/pay",
+                expired.out_trade_no
+            ),
+            None,
+            Some(&a.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["order"]["status"], "paid");
+        assert!(body.get("fields").is_none());
+    }
+
+    async fn payment_gateway(
+        body: serde_json::Value,
+    ) -> (
+        portal_settings::PaymentSettings,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/api.php",
+            get(move || {
+                let body = body.clone();
+                async move { Json(body) }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            portal_settings::PaymentSettings {
+                enabled: true,
+                gateway: format!("http://{addr}"),
+                pid: "testmerchant".into(),
+                key: "test-only-key".into(),
+                public_url: "http://localhost:1420".into(),
+                ..Default::default()
+            },
+            task,
+        )
+    }
+
+    async fn payment_json(response: Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn payment_resume_reuses_order_and_refuses_unverified_or_paid_checkout() {
+        let owner = key("payment-resume");
+        let order = payment::create_order(&owner.id, None, 125, "alipay", now()).unwrap();
+        let (settings, gateway) =
+            payment_gateway(serde_json::json!({"code": 1, "status": 0})).await;
+        let (status, body) =
+            payment_json(resume_with_settings(&owner.id, order.clone(), &settings).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fields"]["out_trade_no"], order.out_trade_no);
+        assert_eq!(body["fields"]["money"], "1.25");
+        assert_eq!(body["fields"]["type"], "alipay");
+        assert_eq!(body["order"]["expires_at"], order.expires_at);
+        assert!(!body.to_string().contains("test-only-key"));
+        let fields: std::collections::BTreeMap<String, String> =
+            serde_json::from_value(body["fields"].clone()).unwrap();
+        assert!(epay::verify(&fields, &settings.key));
+        assert_eq!(payment::recent_orders(&owner.id, 10).unwrap().len(), 1);
+        gateway.abort();
+
+        // A navigation/connection interruption can leave a local order that
+        // never reached the gateway. Explicit absence permits the same checkout.
+        let (settings, gateway) =
+            payment_gateway(serde_json::json!({"code": 0, "msg": "订单号不存在"})).await;
+        let (status, body) =
+            payment_json(resume_with_settings(&owner.id, order.clone(), &settings).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fields"]["out_trade_no"], order.out_trade_no);
+        assert_eq!(body["order"]["expires_at"], order.expires_at);
+        assert_eq!(payment::recent_orders(&owner.id, 10).unwrap().len(), 1);
+        gateway.abort();
+
+        let (settings, gateway) =
+            payment_gateway(serde_json::json!({"code": -1, "msg": "unavailable"})).await;
+        let (status, body) =
+            payment_json(resume_with_settings(&owner.id, order.clone(), &settings).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "payment_check_failed");
+        assert!(body.get("fields").is_none());
+        gateway.abort();
+
+        // The gateway knows it was paid but its notification hasn't arrived yet.
+        let (settings, gateway) = payment_gateway(
+            serde_json::json!({"code": 1, "status": 1, "money": "1.25", "pid": "testmerchant"}),
+        )
+        .await;
+        let (status, body) =
+            payment_json(resume_with_settings(&owner.id, order.clone(), &settings).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["order"]["status"], "paid");
+        assert!(body.get("fields").is_none());
+        assert_eq!(
+            db::get_token_by_id(&owner.id)
+                .unwrap()
+                .unwrap()
+                .balance_micros,
+            Some(1_250_000)
+        );
+        let (_, body) = payment_json(resume_with_settings(&owner.id, order, &settings).await).await;
+        assert_eq!(body["order"]["status"], "paid");
+        assert_eq!(
+            db::get_token_by_id(&owner.id)
+                .unwrap()
+                .unwrap()
+                .balance_micros,
+            Some(1_250_000)
+        );
+        gateway.abort();
     }
 
     #[tokio::test]

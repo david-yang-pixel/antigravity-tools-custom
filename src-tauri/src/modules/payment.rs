@@ -71,17 +71,36 @@ pub struct PublicOrder {
     pub pay_type: String,
     pub status: String,
     pub created_at: i64,
+    /// Fixed at creation time; re-opening the cashier never extends it.
+    pub expires_at: i64,
     pub paid_at: Option<i64>,
 }
 
+impl PublicOrder {
+    pub fn can_pay(&self, now: i64) -> bool {
+        self.status == "pending" && now < self.expires_at
+    }
+
+    /// Hide expired orders immediately, even if gateway reconciliation is delayed.
+    /// Keep the stored order for reconciliation and late payment notifications.
+    pub fn for_display(mut self, now: i64) -> Self {
+        if self.status == "pending" && now >= self.expires_at {
+            self.status = "closed".into();
+        }
+        self
+    }
+}
+
 fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublicOrder> {
+    let created_at: i64 = row.get("created_at")?;
     Ok(PublicOrder {
         out_trade_no: row.get("out_trade_no")?,
         amount_cents: row.get("amount_cents")?,
         credit_micros: row.get("credit_micros")?,
         pay_type: row.get("pay_type")?,
         status: row.get("status")?,
-        created_at: row.get("created_at")?,
+        created_at,
+        expires_at: created_at.saturating_add(ORDER_TTL_SECS),
         paid_at: row.get("paid_at")?,
     })
 }
@@ -114,6 +133,7 @@ pub fn create_order(
         pay_type: pay_type.to_string(),
         status: "pending".into(),
         created_at: now,
+        expires_at: now.saturating_add(ORDER_TTL_SECS),
         paid_at: None,
     };
     connect_db()?
@@ -159,6 +179,100 @@ pub fn recent_orders(token_id: &str, limit: u32) -> Result<Vec<PublicOrder>, Str
         .query_map(params![token_id, limit], order_from_row)
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderFilter {
+    #[default]
+    Paid,
+    Closed,
+    All,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderPage {
+    pub orders: Vec<PublicOrder>,
+    /// Separate from history pagination, so new orders cannot bury an unpaid one.
+    pub pending_orders: Vec<PublicOrder>,
+    pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+    pub server_time: i64,
+}
+
+/// Owner-scoped history without the overview's ten-order limit. All reads share
+/// a snapshot so a concurrent payment cannot move a row between count and page.
+pub fn order_page(
+    token_id: &str,
+    filter: OrderFilter,
+    page: u32,
+    page_size: u32,
+    now: i64,
+) -> Result<OrderPage, String> {
+    let mut conn = connect_db()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let cutoff = now.saturating_sub(ORDER_TTL_SECS);
+    let filter = match filter {
+        OrderFilter::Paid => "paid",
+        OrderFilter::Closed => "closed",
+        OrderFilter::All => "all",
+    };
+    const CONDITION: &str = "token_id = ?1 AND
+        (?2 = 'all' OR (?2 = 'paid' AND status = 'paid') OR
+        (?2 = 'closed' AND (status = 'closed' OR (status = 'pending' AND created_at <= ?3))))";
+    let total: i64 = tx
+        .query_row(
+            &format!("SELECT COUNT(*) FROM payment_orders WHERE {CONDITION}"),
+            params![token_id, filter, cutoff],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let page_size = page_size.clamp(1, 50);
+    let last_page = ((total.max(1) - 1) / i64::from(page_size) + 1).min(i64::from(u32::MAX)) as u32;
+    let page = page.clamp(1, last_page);
+    let orders = {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT * FROM payment_orders WHERE {CONDITION}
+             ORDER BY created_at DESC, out_trade_no DESC LIMIT ?4 OFFSET ?5"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(
+                params![
+                    token_id,
+                    filter,
+                    cutoff,
+                    page_size,
+                    i64::from(page - 1) * i64::from(page_size)
+                ],
+                order_from_row,
+            )
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| row.map(|order| order.for_display(now)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    let pending_orders = {
+        let mut stmt = tx.prepare(
+            "SELECT * FROM payment_orders WHERE token_id = ?1 AND status = 'pending' AND created_at > ?2
+             ORDER BY created_at DESC, out_trade_no DESC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![token_id, cutoff], order_from_row)
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    Ok(OrderPage {
+        orders,
+        pending_orders,
+        total,
+        page,
+        page_size,
+        server_time: now,
+    })
 }
 
 /// Unpaid orders created in `[since, until]` with their creation time, least
@@ -415,6 +529,75 @@ mod tests {
         assert!(a.bytes().all(|c| c.is_ascii_digit()));
         assert!(a.starts_with("2025"));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn payment_deadline_survives_reload_and_paid_wins_over_expiry() {
+        let key = billed_key(Some(0));
+        let order = create_order(&key.id, None, 100, "alipay", 10_000).unwrap();
+        let deadline = 10_000 + ORDER_TTL_SECS;
+        assert_eq!(order.expires_at, deadline);
+        assert!(order.can_pay(deadline - 1));
+        assert!(!order.can_pay(deadline));
+        assert_eq!(order.clone().for_display(deadline).status, "closed");
+        let reloaded = order_for_token(&key.id, &order.out_trade_no)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.expires_at, deadline);
+        assert_eq!(
+            reloaded.status, "pending",
+            "display expiry must preserve reconciliation"
+        );
+        credit_paid_order(&order.out_trade_no, None, 100, deadline + 1).unwrap();
+        let paid = order_for_token(&key.id, &order.out_trade_no)
+            .unwrap()
+            .unwrap();
+        assert_eq!(paid.for_display(deadline + 2).status, "paid");
+        assert_eq!(balance(&key.id), Some(1_000_000));
+        assert_eq!(
+            credit_paid_order(&order.out_trade_no, None, 100, deadline + 2).unwrap(),
+            Credit::AlreadyPaid
+        );
+    }
+
+    #[test]
+    fn payment_history_pages_all_records_and_scopes_pending_and_filters() {
+        let a = billed_key(Some(0));
+        let b = billed_key(Some(0));
+        let now = 200_000;
+        let mut paid_numbers = Vec::new();
+        for i in 0..23 {
+            let order = create_order(&a.id, None, 100, "alipay", now - 50 + i).unwrap();
+            credit_paid_order(&order.out_trade_no, None, 100, now - 20).unwrap();
+            paid_numbers.push(order.out_trade_no);
+        }
+        create_order(&b.id, None, 999, "wxpay", now).unwrap();
+        let active = create_order(&a.id, None, 200, "alipay", now - 10).unwrap();
+        let expired = create_order(&a.id, None, 300, "alipay", now - ORDER_TTL_SECS).unwrap();
+        let closed = create_order(&a.id, None, 400, "alipay", now - 5).unwrap();
+        close_order(&closed.out_trade_no, now).unwrap();
+        let mut listed = Vec::new();
+        for page in 1..=3 {
+            let result = order_page(&a.id, OrderFilter::Paid, page, 10, now).unwrap();
+            assert_eq!(result.total, 23);
+            assert_eq!(result.page, page);
+            assert_eq!(result.server_time, now);
+            assert_eq!(result.pending_orders.len(), 1);
+            assert_eq!(result.pending_orders[0].out_trade_no, active.out_trade_no);
+            listed.extend(result.orders.into_iter().map(|order| order.out_trade_no));
+        }
+        paid_numbers.reverse();
+        assert_eq!(listed, paid_numbers);
+        let result = order_page(&a.id, OrderFilter::Closed, 1, 10, now).unwrap();
+        assert_eq!(result.total, 2);
+        assert_eq!(result.orders[0].out_trade_no, closed.out_trade_no);
+        assert_eq!(result.orders[1].out_trade_no, expired.out_trade_no);
+        assert!(result.orders.iter().all(|o| o.status == "closed"));
+        let all = order_page(&a.id, OrderFilter::All, u32::MAX, 10, now).unwrap();
+        assert_eq!((all.total, all.page, all.orders.len()), (26, 3, 6));
+        let empty = order_page("unknown-owner", OrderFilter::All, 0, 0, now).unwrap();
+        assert_eq!((empty.page, empty.page_size, empty.total), (1, 1, 0));
+        assert!(empty.orders.is_empty() && empty.pending_orders.is_empty());
     }
 
     #[test]

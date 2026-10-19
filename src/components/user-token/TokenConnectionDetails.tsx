@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Copy, Eye, EyeOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import PortalApiKeyPanel from './PortalApiKeyPanel';
 
-export default function TokenConnectionDetails({ token }: { token: string }) {
+export default function TokenConnectionDetails({ token, account }: { token: string; account?: { pending: boolean; onRegenerate: () => Promise<boolean> } }) {
     const { t } = useTranslation();
     const [visible, setVisible] = useState(false);
     const [feedback, setFeedback] = useState('');
@@ -21,14 +22,14 @@ export default function TokenConnectionDetails({ token }: { token: string }) {
     }
     return <section className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-5" aria-labelledby="connection-title">
         <div><h2 id="connection-title" className="text-lg font-semibold">{t('token_portal.connection_title')}</h2><p className="text-xs text-slate-500 mt-2 leading-5">{t('token_portal.base_url_hint')}</p></div>
-        <div className="space-y-2">
+        {account ? <PortalApiKeyPanel token={token} pending={account.pending} onRegenerate={account.onRegenerate} embedded /> : <div className="space-y-2">
             <p className="text-sm font-medium">{t('token_portal.current_token')}</p>
             <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 border border-slate-200 p-3">
                 <code className="flex-1 min-w-0 break-all text-sm">{visible ? token : `••••••••••••${token.slice(-4)}`}</code>
                 <button type="button" onClick={() => setVisible(!visible)} aria-pressed={visible} className="inline-flex items-center gap-1.5 rounded-md px-2 py-2 text-xs hover:bg-slate-200 focus-visible:ring-2 focus-visible:ring-blue-500">{visible ? <EyeOff size={15} /> : <Eye size={15} />}{t(visible ? 'token_portal.hide_token' : 'token_portal.show_token')}</button>
                 <button type="button" onClick={() => void copy(token, 'Token')} className="inline-flex items-center gap-1.5 rounded-md px-2 py-2 text-xs hover:bg-slate-200 focus-visible:ring-2 focus-visible:ring-blue-500"><Copy size={15} />{t('token_portal.copy_token')}</button>
             </div>
-        </div>
+        </div>}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {protocols.map(protocol => <div key={protocol.name} className="rounded-lg border border-slate-200 p-4 space-y-2 min-w-0">
                 <h3 className="font-medium text-sm">{protocol.name}</h3>

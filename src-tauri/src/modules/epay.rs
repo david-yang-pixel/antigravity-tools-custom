@@ -111,6 +111,13 @@ pub struct RemoteOrder {
     pub pid: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderLookup {
+    /// The local order exists, but the browser never reached the cashier.
+    Missing,
+    Found(RemoteOrder),
+}
+
 /// The gateway mixes numbers and strings for the same field.
 fn loose_string(value: &serde_json::Value) -> Option<String> {
     match value {
@@ -122,22 +129,33 @@ fn loose_string(value: &serde_json::Value) -> Option<String> {
 }
 
 /// Interprets an `api.php?act=order` response body.
-pub fn parse_order_response(body: &str) -> Result<RemoteOrder, String> {
+pub fn parse_order_response(body: &str) -> Result<OrderLookup, String> {
     let json: serde_json::Value = serde_json::from_str(body.trim())
         .map_err(|_| "order query returned a non-JSON body".to_string())?;
     let field = |name: &str| json.get(name).and_then(loose_string);
+    // Only the gateway's explicit missing-order response permits retrying an
+    // order that never reached its cashier. Other errors are not proof of nonpayment.
+    if field("code").as_deref() == Some("0") && field("msg").as_deref() == Some("订单号不存在")
+    {
+        return Ok(OrderLookup::Missing);
+    }
     if field("code").as_deref() != Some("1") {
         return Err(format!(
             "order query failed: {}",
             field("msg").unwrap_or_else(|| "unknown error".into())
         ));
     }
-    Ok(RemoteOrder {
-        paid: field("status").as_deref() == Some("1"),
+    let paid = match field("status").as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => return Err("order query returned an unknown payment status".into()),
+    };
+    Ok(OrderLookup::Found(RemoteOrder {
+        paid,
         amount_cents: field("money").as_deref().and_then(parse_money),
         trade_no: field("trade_no"),
         pid: field("pid"),
-    })
+    }))
 }
 
 /// One shared client (connection pool) for every gateway call.
@@ -160,7 +178,7 @@ pub async fn query_order(
     client: &reqwest::Client,
     merchant: &Merchant,
     out_trade_no: &str,
-) -> Result<RemoteOrder, String> {
+) -> Result<OrderLookup, String> {
     let url = format!("{}/api.php", merchant.gateway);
     let response = client
         .get(url)
@@ -172,7 +190,9 @@ pub async fn query_order(
         ])
         .send()
         .await
-        .map_err(|e| format!("order query request failed: {}", e.without_url()))?;
+        .map_err(|e| format!("order query request failed: {}", e.without_url()))?
+        .error_for_status()
+        .map_err(|e| format!("order query response failed: {}", e.without_url()))?;
     let body = response
         .text()
         .await
@@ -291,19 +311,27 @@ mod tests {
         .unwrap();
         assert_eq!(
             paid,
-            RemoteOrder {
+            OrderLookup::Found(RemoteOrder {
                 paid: true,
                 amount_cents: Some(500),
                 trade_no: Some("2026101912345".into()),
                 pid: Some("1001".into()),
-            }
+            })
         );
         let unpaid = parse_order_response(r#"{"code":"1","status":"0","money":5}"#).unwrap();
+        let OrderLookup::Found(unpaid) = unpaid else {
+            panic!("existing order")
+        };
         assert!(!unpaid.paid);
         assert_eq!(unpaid.amount_cents, Some(500));
-        assert!(parse_order_response(r#"{"code":0,"msg":"订单号不存在"}"#)
-            .unwrap_err()
-            .contains("订单号不存在"));
+        assert_eq!(
+            parse_order_response(r#"{"code":0,"msg":"订单号不存在"}"#).unwrap(),
+            OrderLookup::Missing
+        );
+        assert!(parse_order_response(r#"{"code":0,"msg":"商户密钥错误"}"#).is_err());
+        assert!(parse_order_response(r#"{"msg":"订单号不存在"}"#).is_err());
+        assert!(parse_order_response(r#"{"code":1}"#).is_err());
+        assert!(parse_order_response(r#"{"code":1,"status":2}"#).is_err());
         assert!(parse_order_response("<html>ThinkPHP error</html>").is_err());
     }
 }

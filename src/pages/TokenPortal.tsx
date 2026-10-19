@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, AlertTriangle, LogOut, RefreshCw } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowRight, LogOut, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toQuotaMillions } from '../components/user-token/tokenQuota';
 import TokenConnectionDetails from '../components/user-token/TokenConnectionDetails';
 import TokenUsageDetails, { LogTimeRange, UsageLogPage, UsagePeriod } from '../components/user-token/TokenUsageDetails';
 import PortalAuthForms from '../components/user-token/PortalAuthForms';
-import PortalApiKeyPanel from '../components/user-token/PortalApiKeyPanel';
 import { PortalConfig, portalCall } from '../components/user-token/portalApi';
 import { formatYuan, Price } from '../components/user-token/money';
 import ModelPriceCard from '../components/user-token/ModelPriceCard';
@@ -46,7 +45,7 @@ interface Overview {
     models: ModelUsage[];
 }
 
-const portalMenus = ['overview', 'apikey', 'models', 'statistics', 'logs'] as const;
+const portalMenus = ['overview', 'balance', 'models', 'statistics', 'logs'] as const;
 type PortalMenu = typeof portalMenus[number];
 /** Key sign-in sends the key as Bearer; account sign-in relies on the session cookie. */
 type Auth = { kind: 'key'; token: string } | { kind: 'account' };
@@ -68,6 +67,18 @@ export default function TokenPortal() {
     const pending = useRef<AbortController | null>(null);
     // Read once on arrival: the payment gateway returns users here with the order number.
     const [returnedOrder, setReturnedOrder] = useState(takeReturnedOrder);
+    const [paymentRefresh, setPaymentRefresh] = useState(0);
+    useEffect(() => {
+        const restore = (event: PageTransitionEvent) => {
+            if (!event.persisted) return;
+            const order = takeReturnedOrder();
+            setReturnedOrder(order);
+            if (order) setMenu('balance');
+            setPaymentRefresh(value => value + 1);
+        };
+        window.addEventListener('pageshow', restore);
+        return () => window.removeEventListener('pageshow', restore);
+    }, []);
     const portalRequest = useCallback((path: string, init?: RequestInit) => {
         const current = auth.current;
         return fetch(`/api/token-portal/${path}`, {
@@ -144,6 +155,8 @@ export default function TokenPortal() {
             setLogRange(range);
             setKeyError(''); setNotice('');
             setOverview(result); setUpdatedAt(new Date());
+            if (firstLoad && returnedOrder && result.balance_micros !== null) setMenu('balance');
+            if (result.balance_micros === null) setMenu(current => current === 'balance' ? 'overview' : current);
             if (next.kind === 'account' && firstLoad) void loadAccountKey();
         } catch {
             if (!controller.signal.aborted && !silent) setError(t('token_portal.load_error'));
@@ -155,7 +168,7 @@ export default function TokenPortal() {
     const reload = (page = overview?.logs.page ?? 1, range: LogTimeRange = logRange) => { if (auth.current) void load(auth.current, page, range); };
     const isAccount = auth.current?.kind === 'account';
     const currentKey = auth.current?.kind === 'key' ? auth.current.token : accountKey;
-    const menus = portalMenus.filter(item => item !== 'apikey' || isAccount);
+    const menus = portalMenus.filter(item => item !== 'balance' || overview?.balance_micros !== null);
 
     const unlimited = t('user_token.unlimited');
     const million = (n: number) => `${toQuotaMillions(n)} M tokens`;
@@ -210,30 +223,28 @@ export default function TokenPortal() {
                         : t(billed ? 'billing.pending_banner' : 'token_portal.pending_banner')}</p>}
                     <div id="portal-panel-overview" hidden={menu !== 'overview'} className="space-y-8">
                     <section aria-label={t('token_portal.summary')} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        {billed && <button type="button" onClick={() => setMenu('balance')} aria-controls="portal-panel-balance" className="text-left bg-white border border-slate-200 rounded-xl p-5 hover:border-blue-300 hover:bg-blue-50/30 focus-visible:ring-2 focus-visible:ring-blue-500">
+                            <span className="flex items-center justify-between text-sm text-slate-500 mb-3">{t('billing.balance')}<ArrowRight size={16} aria-hidden="true" /></span>
+                            <span className="block text-xl font-semibold tracking-tight break-words">{formatYuan(overview.balance_micros ?? 0)}</span>
+                        </button>}
                         {[
-                            ...(billed ? [[t('billing.balance'), formatYuan(overview.balance_micros ?? 0)]] : []),
                             [t('token_portal.used'), million(overview.total_tokens_used)],
                             ...(billed && quotaUnlimited ? [] : [[t('token_portal.remaining'), quotaUnlimited ? unlimited : million(overview.remaining_tokens ?? 0)]]),
                             [t('token_portal.requests'), overview.total_requests.toLocaleString()],
                             [t('user_token.max_concurrency'), overview.max_concurrency === 0 ? unlimited : String(overview.max_concurrency)],
                         ].map(([label, value]) => <div key={label} className="bg-white border border-slate-200 rounded-xl p-5"><p className="text-sm text-slate-500 mb-3">{label}</p><p className="text-xl font-semibold tracking-tight break-words">{value}</p></div>)}
                     </section>
-                    {billed && <section className="bg-white border border-slate-200 rounded-xl px-5 py-5 space-y-2">
-                        <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{t('billing.balance')}</span><span className={`font-semibold ${exhausted ? 'text-amber-700' : ''}`}>{formatYuan(overview.balance_micros ?? 0)}</span></div>
-                        <p className="text-xs text-slate-500">{t('billing.portal_balance_hint')}</p>
-                        {/* An expired key's balance cannot be spent, so it is not offered a top-up. */}
-                        <PortalTopup config={overview.expired ? undefined : config?.topup} orders={overview.topup_orders ?? []} request={portalRequest}
-                            returnedOrder={returnedOrder} onReturnHandled={() => setReturnedOrder(null)} onSettled={() => reload()} />
-                    </section>}
                     {!(billed && quotaUnlimited) && <section className="bg-white border border-slate-200 rounded-xl px-5 py-5 space-y-3">
                         <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{t('token_portal.quota')}</span><span>{quotaUnlimited ? unlimited : million(overview.token_quota)}</span></div>
                         {overview.token_quota > 0 && <div role="progressbar" aria-label={t('token_portal.used')} aria-valuenow={Math.round(usedPercent)} aria-valuemin={0} aria-valuemax={100} className="h-2 rounded-full bg-slate-100 overflow-hidden"><div style={{ width: `${usedPercent}%` }} className={`h-full rounded-full ${exhausted ? 'bg-amber-500' : 'bg-blue-500'}`} /></div>}
                         <p className="text-xs text-slate-500">{t('user_token.quota_settlement_hint')}</p>
                     </section>}
-                    {currentKey && <TokenConnectionDetails token={currentKey} />}
+                    {(currentKey || isAccount) && <TokenConnectionDetails token={currentKey} account={isAccount ? { pending: overview.pending_activation, onRegenerate: regenerateKey } : undefined} />}
                     </div>
-                    {isAccount && <div id="portal-panel-apikey" hidden={menu !== 'apikey'}>
-                        <PortalApiKeyPanel token={accountKey} pending={overview.pending_activation} onRegenerate={regenerateKey} />
+                    {billed && <div id="portal-panel-balance" hidden={menu !== 'balance'}>
+                        <PortalTopup config={config?.topup} balanceMicros={overview.balance_micros ?? 0} expired={overview.expired}
+                            active={menu === 'balance'} refreshKey={(updatedAt?.getTime() ?? 0) + paymentRefresh} request={portalRequest}
+                            returnedOrder={returnedOrder} onReturnHandled={() => setReturnedOrder(null)} onSettled={() => reload()} />
                     </div>}
                     <section id="portal-panel-models" hidden={menu !== 'models'} className="space-y-3">
                         <h2 className="text-lg font-semibold">{t('user_token.allowed_models')}</h2>
