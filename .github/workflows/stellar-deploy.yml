@@ -82,11 +82,59 @@ jobs:
             grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/test-results"
           done
 
-  build:
-    name: Build and smoke-test image
+  binary:
+    name: Compile server binary
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
+    # The image docker/Dockerfile compiles in (backend-builder), so the binary links
+    # against the same glibc and libraries as the debian:bookworm-slim runtime. The
+    # runner's own Ubuntu has a newer glibc the runtime image does not provide.
+    container: rust:1-slim-bookworm
+    steps:
+      - name: Install build dependencies
+        # Keep in step with backend-builder in docker/Dockerfile.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates xz-utils pkg-config \
+            build-essential curl file libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev perl cmake golang-go clang libclang-dev
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Build frontend
+        run: |
+          npm ci --legacy-peer-deps --no-audit --no-fund
+          npm run build
+      # Caches each compiled dependency, so a Cargo.lock change only recompiles the
+      # crates that changed instead of all of them.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: bookworm-release
+      - name: Compile release binary
+        working-directory: src-tauri
+        run: cargo build --locked --release --bin antigravity-tools
+      - name: Stage image inputs
+        run: |
+          mkdir -p ci-dist
+          cp src-tauri/target/release/antigravity-tools ci-dist/
+          cp -r dist ci-dist/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-build
+          path: ci-dist
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    name: Build and smoke-test image
+    needs: binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -94,6 +142,10 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-build
+          path: ci-dist
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -113,6 +165,8 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          # Packages the binary and frontend compiled by the binary job.
+          target: prebuilt
           platforms: linux/amd64
           load: true
           tags: stellar-ai:test
@@ -122,10 +176,9 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          # Registry cache uploads only layers it does not already hold, so the large
-          # toolchain and compiled-dependency layers are written once per Cargo.lock change.
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
+          # Only the runtime package layer is worth caching now.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:runtimecache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:runtimecache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
       - name: Smoke test isolated container
         run: |
           set -euo pipefail
@@ -142,6 +195,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          target: prebuilt
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
@@ -151,7 +205,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-from: type=registry,ref=${{ env.IMAGE }}:runtimecache
 
   deploy:
     needs: [quality, rust-quality, build]

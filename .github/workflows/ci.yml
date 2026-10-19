@@ -46,7 +46,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-latest, windows-2025, macos-latest]
+        # PR checks run on Linux only to keep them fast; macOS and Windows are
+        # compiled by the release workflow when a version is tagged.
+        platform: [ubuntu-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -96,7 +98,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-latest, windows-2025, macos-latest]
+        # PR checks run on Linux only to keep them fast; macOS and Windows are
+        # compiled by the release workflow when a version is tagged.
+        platform: [ubuntu-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

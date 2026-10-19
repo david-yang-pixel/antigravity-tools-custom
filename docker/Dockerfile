@@ -94,8 +94,10 @@ RUN cargo build --locked --release --bin antigravity-tools && \
     cp target/release/antigravity-tools /tmp/antigravity-tools && \
     cargo clean --release -p antigravity-tools
 
-# --- Final Runtime Stage ---
-FROM debian:bookworm-slim
+# --- Runtime Base Stage ---
+# Shared by both images below, so a prebuilt and a from-source image only differ
+# in where the binary and frontend come from.
+FROM debian:bookworm-slim AS runtime-base
 ARG USE_MIRROR=auto
 WORKDIR /app
 
@@ -120,12 +122,6 @@ RUN apt-get update && apt-get install -y \
     librsvg2-2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binary from builder
-COPY --from=backend-release /tmp/antigravity-tools /app/antigravity-tools
-
-# Copy frontend dist from builder
-COPY --from=frontend-builder /app/dist /app/dist
-
 # Set environment variables
 ENV ABV_DIST_PATH=/app/dist
 ENV RUST_LOG=info
@@ -140,3 +136,20 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # Run the application in headless mode
 ENTRYPOINT ["/app/antigravity-tools", "--headless"]
+
+# --- Prebuilt Runtime Stage (`--target prebuilt`) ---
+# For CI that compiled the binary in rust:1-slim-bookworm (same glibc and
+# libraries as backend-builder) and built the frontend: expects
+# ci-dist/antigravity-tools and ci-dist/dist in the build context.
+FROM runtime-base AS prebuilt
+COPY --chmod=0755 ci-dist/antigravity-tools /app/antigravity-tools
+COPY ci-dist/dist /app/dist
+
+# --- Final Runtime Stage (default target: build everything from source) ---
+FROM runtime-base
+
+# Copy binary from builder
+COPY --from=backend-release /tmp/antigravity-tools /app/antigravity-tools
+
+# Copy frontend dist from builder
+COPY --from=frontend-builder /app/dist /app/dist
