@@ -2310,6 +2310,8 @@
       "checkin_already": "Already checked in today",
       "checkin_pending": "Pending today",
       "checkin_failed": "Check-in failed",
+      "last_checkin_attempt": "Last attempt: {{time}}",
+      "checkin_attempt_unknown": "Attempt time not recorded",
       "checkin_unsupported": "Unavailable for global accounts",
       "last_keepalive": "Last successful keepalive",
       "next_sync": "Next sync",

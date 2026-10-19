@@ -244,7 +244,10 @@ mod tests {
                         assert_eq!(h["authorization"], "Bearer fresh");
                         assert_eq!(h["x-user-id"], "managed");
                         c.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({"code":10001,"data":null}))
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            Json(json!({"code":10001,"msg":"今天已签到，请明天再来"})),
+                        )
                     }
                 }),
             )
@@ -283,6 +286,8 @@ mod tests {
         let id=accounts::upsert(accounts::parse_import(json!({"uid":"managed","accessToken":"old","refreshToken":"r","expiresAt":accounts::now()+3600})).unwrap()).unwrap().id;
         let a = run(&id, false, false, true).await.unwrap();
         assert_eq!(a.management.checkin_status, "already");
+        assert!(a.management.checkin_error.is_none());
+        assert!(a.management.checkin_at > 0);
         assert_eq!(a.management.credits.unwrap().available, 42.0);
         assert!(a.management.last_keepalive_at > 0);
         // Reloading persisted state must suppress same-day check-in and daily refresh.

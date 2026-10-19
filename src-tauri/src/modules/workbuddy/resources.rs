@@ -144,21 +144,114 @@ pub async fn checkin(account: &Account) -> Result<&'static str, String> {
         return Ok("unsupported");
     }
     let response = post(account, "/v2/billing/meter/daily-checkin", &json!({})).await?;
-    // Daily check-in's 10001 is an idempotent success, unlike other billing operations.
-    let value = client::raw_json_response(response).await?;
+    checkin_response(response).await
+}
+
+async fn checkin_response(response: reqwest::Response) -> Result<&'static str, String> {
+    let status = response.status();
+    // Tencent returns HTTP 400 for an already completed daily check-in.
+    // Inspect only this endpoint's bounded business response, not all HTTP errors.
+    let value = client::read_json_body(response).await.map_err(|error| {
+        if status.is_success() {
+            error
+        } else {
+            format!("WorkBuddy check-in returned HTTP {}", status.as_u16())
+        }
+    })?;
     let code = value["code"]
         .as_i64()
         .or_else(|| value["code"].as_str().and_then(|v| v.parse().ok()));
+    let message = value["msg"]
+        .as_str()
+        .or_else(|| value["message"].as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let already = matches!(code, Some(10001 | 14001))
+        && ["今天已签到", "今日已签到", "already checked in today"]
+            .iter()
+            .any(|marker| message.contains(marker));
+    if already && (status.is_success() || status == reqwest::StatusCode::BAD_REQUEST) {
+        return Ok("already");
+    }
+    if status.is_success() && code == Some(0) {
+        return Ok("success");
+    }
+    // Include safe diagnostic codes, never relay a body that could contain credentials.
     match code {
-        Some(0) => Ok("success"),
-        Some(10001) => Ok("already"),
-        Some(code) => Err(format!("WorkBuddy check-in rejected (code {code})")),
-        None => Err("WorkBuddy check-in response has no result code".into()),
+        Some(code) => Err(format!(
+            "WorkBuddy check-in rejected (HTTP {}, code {code})",
+            status.as_u16()
+        )),
+        None => Err(format!(
+            "WorkBuddy check-in returned HTTP {} without a result code",
+            status.as_u16()
+        )),
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn workbuddy_checkin_recognizes_already_without_hiding_real_errors() {
+        for (status, body, expected) in [
+            (200, json!({"code":0}), Some("success")),
+            (
+                400,
+                json!({"code":10001,"msg":"今天已签到，请明天再来"}),
+                Some("already"),
+            ),
+            (
+                200,
+                json!({"code":"10001","msg":"今日已签到"}),
+                Some("already"),
+            ),
+            (
+                400,
+                json!({"code":14001,"message":"Already checked in today"}),
+                Some("already"),
+            ),
+            (
+                400,
+                json!({"code":10001,"msg":"积分不足 secret_diagnostic"}),
+                None,
+            ),
+            (200, json!({"code":10001}), None),
+            (401, json!({"code":10001,"msg":"今日已签到"}), None),
+            (500, json!({"code":10001,"msg":"今日已签到"}), None),
+            (400, json!({"code":0}), None),
+            (400, json!({"message":"secret_diagnostic"}), None),
+        ] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap()
+                .into();
+            let result = checkin_response(response).await;
+            match expected {
+                Some(value) => assert_eq!(result.unwrap(), value),
+                None => {
+                    let error = result.unwrap_err();
+                    assert!(error.contains(&format!("HTTP {status}")));
+                    assert!(!error.contains("secret_diagnostic"));
+                }
+            }
+        }
+        for body in ["not JSON".to_owned(), "x".repeat(2 * 1024 * 1024 + 1)] {
+            let response = axum::http::Response::builder()
+                .status(400)
+                .body(body)
+                .unwrap()
+                .into();
+            assert!(checkin_response(response).await.is_err());
+        }
+        // Other endpoints must still reject the exact same HTTP 400 response.
+        let response = axum::http::Response::builder()
+            .status(400)
+            .body(json!({"code":10001,"msg":"今日已签到"}).to_string())
+            .unwrap()
+            .into();
+        assert!(client::raw_json_response(response).await.is_err());
+    }
     #[test]
     fn workbuddy_resource_balance_bounds_and_expiry() {
         let v = json!({"Response":{"Data":{"Accounts":[

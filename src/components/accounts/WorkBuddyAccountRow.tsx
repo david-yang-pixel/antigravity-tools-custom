@@ -12,7 +12,7 @@ export interface WorkBuddyAccount {
         credits: { available: number; updated_at: number; expiries: { at: number; amount: number }[] } | null;
         credits_error: string | null; last_sync_at: number; next_sync_at: number;
         last_keepalive_at: number; keepalive_attempt_at: number; keepalive_error: string | null;
-        checkin_date: string | null; checkin_at: number; checkin_status: string; checkin_error: string | null;
+        checkin_date: string | null; checkin_at: number; checkin_attempt_at?: number; checkin_status: string; checkin_error: string | null;
     };
 }
 export interface AccountChanges { enabled?: boolean; refresh?: boolean; managed?: boolean; auto_checkin?: boolean; keepalive?: boolean; checkin?: boolean }
@@ -38,6 +38,11 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
     const checked = m.checkin_date === today;
     const checkinStatus = account.realm === 'global' ? 'unsupported' : checked ? m.checkin_status : m.checkin_status === 'failed' ? 'failed' : 'pending';
+    const checkinTime = checkinStatus === 'failed'
+        ? m.checkin_attempt_at && m.checkin_attempt_at > 0
+            ? t('workbuddy.accounts.last_checkin_attempt', { time: date(m.checkin_attempt_at) })
+            : t('workbuddy.accounts.checkin_attempt_unknown')
+        : checked && m.checkin_at > 0 ? date(m.checkin_at) : undefined;
     const expiring = m.credits?.expiries.filter(e => e.at > now / 1000).sort((a, b) => a.at - b.at)[0];
     const errors = [account.last_error, m.credits_error, m.keepalive_error, m.checkin_error, seconds ? account.cooldown_reason : h.last_error].filter((e, i, all): e is string => !!e && all.indexOf(e) === i);
     const detailId = `workbuddy-details-${account.id}`;
@@ -62,7 +67,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                 <div className={muted}>{account.expires_at > 0 && t(lifetime ? 'workbuddy.accounts.hours_remaining' : 'workbuddy.accounts.status_expired', { hours: lifetime })}</div>
             </td>
             <td className={`${cell} whitespace-nowrap`}>
-                <div title={date(m.checkin_at)}>{t(`workbuddy.accounts.checkin_${checkinStatus}`)}</div>
+                <div title={checkinTime}>{t(`workbuddy.accounts.checkin_${checkinStatus}`)}</div>
                 <div className={muted} title={date(m.last_keepalive_at)}>{t('workbuddy.accounts.keepalive_short')} · {m.keepalive_error ? t('common.error') : m.last_keepalive_at > 0 ? shortTime(m.last_keepalive_at) : t('workbuddy.accounts.not_yet')}</div>
             </td>
             <td className={cell}>
@@ -89,7 +94,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.expires')}</dt><dd className="mt-1">{account.expires_at > 0 ? date(account.expires_at) : t('workbuddy.accounts.unknown_expiry')}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.last_keepalive')}</dt><dd className="mt-1">{date(m.last_keepalive_at)}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.next_sync')}</dt><dd className="mt-1">{m.managed && account.enabled ? m.next_sync_at > now / 1000 ? date(m.next_sync_at) : t('workbuddy.accounts.scheduled') : t('workbuddy.accounts.status_disabled')}</dd></div>
-                <div><dt className="text-gray-500">{t('workbuddy.accounts.checkin')}</dt><dd className="mt-1">{t(`workbuddy.accounts.checkin_${checkinStatus}`)} · {date(m.checkin_at)}</dd></div>
+                <div><dt className="text-gray-500">{t('workbuddy.accounts.checkin')}</dt><dd className="mt-1">{t(`workbuddy.accounts.checkin_${checkinStatus}`)}{checkinTime && <> · {checkinTime}</>}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.credits')}</dt><dd className="mt-1">{m.credits ? t('workbuddy.accounts.updated_at', { time: date(m.credits.updated_at) }) : t('workbuddy.accounts.not_queried')}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.credit_expiry')}</dt><dd className="mt-1">{expiring ? t('workbuddy.accounts.credit_expiry_value', { amount: expiring.amount, time: date(expiring.at) }) : '—'}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.health')}</dt><dd className="mt-1">{total ? t('workbuddy.accounts.success_rate', { rate: Math.round(h.successes / total * 100), success: h.successes, total }) : t('workbuddy.accounts.health_hint')}</dd><dd className="mt-1 text-gray-500">{t('workbuddy.accounts.capacity', { count: account.models.length, active: account.in_flight })}</dd></div>

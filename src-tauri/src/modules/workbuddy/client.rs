@@ -82,7 +82,6 @@ pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, Str
     Ok(h)
 }
 pub async fn raw_json_response(response: reqwest::Response) -> Result<Value, String> {
-    use futures::StreamExt;
     let status = response.status();
     if !status.is_success() {
         return Err(format!(
@@ -90,6 +89,13 @@ pub async fn raw_json_response(response: reqwest::Response) -> Result<Value, Str
             status.as_u16()
         ));
     }
+    read_json_body(response).await
+}
+
+/// Bounded parsing for endpoints that must inspect a non-2xx business result.
+/// Callers are responsible for interpreting the HTTP status before accepting it.
+pub(super) async fn read_json_body(response: reqwest::Response) -> Result<Value, String> {
+    use futures::StreamExt;
     let mut stream = response.bytes_stream();
     let mut data = Vec::new();
     while let Some(chunk) = stream.next().await {

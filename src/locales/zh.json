@@ -2276,6 +2276,8 @@
       "checkin_already": "今日已签到",
       "checkin_pending": "今日待签到",
       "checkin_failed": "签到失败",
+      "last_checkin_attempt": "最近尝试：{{time}}",
+      "checkin_attempt_unknown": "尝试时间未记录",
       "checkin_unsupported": "国际版不支持",
       "last_keepalive": "最近保活成功",
       "next_sync": "下次同步",
