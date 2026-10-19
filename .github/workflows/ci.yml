@@ -145,3 +145,21 @@ jobs:
           # CI 环境不需要签名
           TAURI_SIGNING_PRIVATE_KEY: ""
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      - name: Smoke test isolated headless server (Linux)
+        if: startsWith(matrix.platform, 'ubuntu')
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ABV_DATA_DIR="$(mktemp -d)"
+          export ABV_DIST_PATH="$PWD/dist"
+          export ABV_BIND_LOCAL_ONLY=true
+          export SMOKE_ADMIN="$(openssl rand -hex 24)"
+          echo "::add-mask::$SMOKE_ADMIN"
+          export ABV_WEB_PASSWORD="$SMOKE_ADMIN"
+          export ABV_API_KEY=ci-isolated-api-key
+          src-tauri/target/debug/antigravity-tools --headless > "$RUNNER_TEMP/stellar-smoke.log" 2>&1 &
+          smoke_pid=$!
+          trap 'kill "$smoke_pid" 2>/dev/null || true; wait "$smoke_pid" 2>/dev/null || true; rm -rf "$ABV_DATA_DIR"' EXIT
+          python3 deploy/stellar/smoke.py http://127.0.0.1:8045
