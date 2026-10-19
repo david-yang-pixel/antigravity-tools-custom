@@ -9,4 +9,5 @@ pub mod openai;
 pub mod thinking; // 思考块会话结束/查询
 pub mod warmup; // 预热处理器
 
+pub mod payment; // 余额充值：支付回调与补单
 pub mod token_portal;

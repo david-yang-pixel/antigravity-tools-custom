@@ -230,6 +230,7 @@ fn init_db_connection(conn: &mut Connection) -> Result<(), String> {
 
     crate::modules::portal_account::migrate(&conn)?;
     crate::modules::billing::migrate(&conn)?;
+    crate::modules::payment::migrate(&conn)?;
     conn.execute_batch(&format!(
         "DROP TRIGGER IF EXISTS user_tokens_owned_key_insert;
          DROP TRIGGER IF EXISTS user_tokens_owned_key_update;

@@ -1071,6 +1071,7 @@ impl AxumServer {
         let app = Router::new()
             .nest("/api", admin_routes)
             .merge(handlers::token_portal::routes())
+            .merge(handlers::payment::routes())
             .merge(proxy_routes)
             // 公开路由 (无需鉴权)
             .route("/auth/callback", get(handle_oauth_callback))
@@ -1123,6 +1124,10 @@ impl AxumServer {
             proxy_pool_manager,
             only_raw_quota_models: only_raw_quota_models_state,
         };
+
+        // Top-up orders whose payment notification never arrived are reconciled
+        // for as long as this server runs (GUI and headless alike).
+        handlers::payment::spawn_reconciler(cancel_token.clone());
 
         let server_cancel_token = cancel_token.clone();
         // 在新任务中启动服务器

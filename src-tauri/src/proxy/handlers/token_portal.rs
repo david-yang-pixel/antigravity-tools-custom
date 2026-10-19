@@ -2,9 +2,9 @@
 //! email account (session cookie). Ownership always derives from the credential;
 //! no caller-supplied token ID is ever used and no administrator DTO is returned.
 use crate::modules::portal_account::{self as accounts, CodeDelivery, CodePurpose, PortalError};
-use crate::modules::{billing, portal_mail, portal_settings, user_token_db as db};
+use crate::modules::{billing, epay, payment, portal_mail, portal_settings, user_token_db as db};
 use crate::proxy::server::AppState;
-use axum::extract::{FromRequestParts, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -39,6 +39,8 @@ struct UsageOverview {
     available_models: Vec<String>,
     /// Price of each available model that has one; the others are free.
     model_prices: Vec<PortalModelPrice>,
+    /// Most recent balance top-ups, newest first.
+    topup_orders: Vec<payment::PublicOrder>,
     logs: db::UsageLogPage,
     daily: Vec<db::UsagePeriod>,
     weekly: Vec<db::UsagePeriod>,
@@ -73,6 +75,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/token-portal/auth/logout", post(logout))
         .route("/api/token-portal/key", get(reveal_key))
         .route("/api/token-portal/key/regenerate", post(regenerate_key))
+        .route("/api/token-portal/topup", post(create_topup))
+        .route("/api/token-portal/topup/orders/:order", get(topup_order))
 }
 
 /// Who is looking at the portal.
@@ -366,6 +370,8 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
     // Disabled or deleted keys are revoked for key sign-in.
     let models =
         db::model_usage_for_token(&token.id).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let topup_orders =
+        payment::recent_orders(&token.id, 10).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let suffix: String = token
         .token
         .chars()
@@ -389,6 +395,7 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
         balance_micros: token.balance_micros,
         available_models: token.allowed_models.clone(),
         model_prices: Vec::new(),
+        topup_orders,
         username: token.username,
         allowed_models: token.allowed_models,
         logs,
@@ -405,8 +412,160 @@ async fn portal_config() -> Response {
         Ok(settings) => ok_json(serde_json::json!({
             "registration_enabled": settings.registration_open(),
             "password_reset_enabled": settings.smtp.is_ready(),
+            "topup": {
+                "enabled": settings.payment.is_ready(),
+                "pay_types": settings.payment.pay_types,
+                "min_amount_cents": settings.payment.min_amount_cents,
+                "max_amount_cents": settings.payment.max_amount_cents,
+            },
         })),
         Err(error) => portal_error(PortalError::Unavailable(error)),
+    }
+}
+
+// --- Balance top-ups ---
+
+#[derive(Deserialize)]
+struct TopupRequest {
+    /// Yuan with at most two decimals, e.g. "12.50".
+    amount: String,
+    pay_type: String,
+}
+
+/// Creates a pending order and returns the signed cashier form the browser
+/// submits to the gateway. Only balance-billed keys can be topped up.
+async fn create_topup(
+    headers: HeaderMap,
+    ClientIp(ip): ClientIp,
+    Json(body): Json<TopupRequest>,
+) -> Response {
+    if let Err(limited) = rate_limit("topup", &ip, 30, 3600) {
+        return limited;
+    }
+    let (token, user_id) = match authenticate(&headers) {
+        Ok(Viewer::Key(token)) => (token, None),
+        Ok(Viewer::Account(user, token)) => (token, Some(user.id)),
+        Err(status) => return error_response(status, "invalid_user_token", None),
+    };
+    if !token.is_billed() {
+        return error_response(StatusCode::BAD_REQUEST, "topup_unavailable", None);
+    }
+    // The balance of an expired key cannot be spent until an administrator renews it.
+    if token.expires_at.is_some_and(|ts| ts <= now()) {
+        return error_response(StatusCode::BAD_REQUEST, "topup_key_expired", None);
+    }
+    let payment_settings = match portal_settings::load() {
+        Ok(settings) => settings.payment,
+        Err(error) => return portal_error(PortalError::Unavailable(error)),
+    };
+    let Some(merchant) = payment_settings
+        .merchant()
+        .filter(|_| payment_settings.is_ready())
+    else {
+        return error_response(StatusCode::BAD_REQUEST, "topup_disabled", None);
+    };
+    if !payment_settings.pay_types.contains(&body.pay_type) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_pay_type", None);
+    }
+    let Some(cents) = epay::parse_money(&body.amount) else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_amount", None);
+    };
+    if cents < payment_settings.min_amount_cents || cents > payment_settings.max_amount_cents {
+        return error_response(StatusCode::BAD_REQUEST, "amount_out_of_range", None);
+    }
+    if let Err(limited) = rate_limit("topup-key", &token.id, 20, 3600) {
+        return limited;
+    }
+    let pending = {
+        let token_id = token.id.clone();
+        blocking(move || {
+            payment::pending_count(&token_id, now() - payment::ORDER_TTL_SECS)
+                .map_err(PortalError::Unavailable)
+        })
+        .await
+    };
+    match pending {
+        Ok(count) if count >= payment::MAX_PENDING_PER_KEY => {
+            return error_response(StatusCode::TOO_MANY_REQUESTS, "too_many_pending", None)
+        }
+        Ok(_) => {}
+        Err(error) => return portal_error(error),
+    }
+    let token_id = token.id.clone();
+    let pay_type = body.pay_type.clone();
+    let order = match blocking(move || {
+        payment::create_order(&token_id, user_id.as_deref(), cents, &pay_type, now())
+            .map_err(PortalError::Unavailable)
+    })
+    .await
+    {
+        Ok(order) => order,
+        Err(error) => return portal_error(error),
+    };
+    let name = format!(
+        "{} {} 元",
+        payment_settings.subject,
+        epay::format_money(cents)
+    );
+    let (action, fields) = epay::submit_form(
+        &merchant,
+        &body.pay_type,
+        &order.out_trade_no,
+        &payment_settings.notify_url(),
+        &payment_settings.return_url(),
+        &name,
+        cents,
+    );
+    ok_json(serde_json::json!({
+        "order": order,
+        "action": action,
+        "fields": fields,
+    }))
+}
+
+/// Status of one of the viewer's orders. An unpaid order is checked with the
+/// gateway directly, so the return page confirms even when the notification is
+/// slow or cannot reach this site.
+async fn topup_order(headers: HeaderMap, Path(order_no): Path<String>) -> Response {
+    let token = match authenticate(&headers) {
+        Ok(Viewer::Key(token) | Viewer::Account(_, token)) => token,
+        Err(status) => return error_response(status, "invalid_user_token", None),
+    };
+    if order_no.is_empty() || order_no.len() > 32 || !order_no.bytes().all(|b| b.is_ascii_digit()) {
+        return error_response(StatusCode::NOT_FOUND, "order_not_found", None);
+    }
+    let lookup = {
+        let (token_id, order_no) = (token.id.clone(), order_no.clone());
+        move || payment::order_for_token(&token_id, &order_no).map_err(PortalError::Unavailable)
+    };
+    let order = match blocking(lookup.clone()).await {
+        Ok(Some(order)) => order,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "order_not_found", None),
+        Err(error) => return portal_error(error),
+    };
+    // Closed orders are checked too, so a payment that arrived after closing can
+    // still be credited when its owner looks it up.
+    if order.status == "paid"
+        || now() - order.created_at < 5
+        || rate_limit("topup-check", &order_no, 30, 600).is_err()
+        || rate_limit("topup-check-key", &token.id, 60, 600).is_err()
+    {
+        return ok_json(serde_json::json!({ "order": order }));
+    }
+    let merchant = portal_settings::load()
+        .ok()
+        .and_then(|s| s.payment.merchant());
+    if let (Some(merchant), Ok(client)) = (merchant, epay::http_client()) {
+        if let Err(error) =
+            crate::proxy::handlers::payment::reconcile_order(&client, &merchant, &order_no).await
+        {
+            tracing::debug!("[Payment] on-demand check of {order_no}: {error}");
+        }
+    }
+    match blocking(lookup).await {
+        Ok(Some(order)) => ok_json(serde_json::json!({ "order": order })),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "order_not_found", None),
+        Err(error) => portal_error(error),
     }
 }
 

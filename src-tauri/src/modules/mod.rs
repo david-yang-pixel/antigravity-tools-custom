@@ -6,6 +6,7 @@ pub mod cloudflared;
 pub mod config;
 pub mod db;
 pub mod device;
+pub mod epay;
 #[allow(dead_code)]
 pub mod http_api;
 pub mod i18n;
@@ -16,6 +17,7 @@ pub mod logger;
 pub mod migration;
 pub mod oauth;
 pub mod oauth_server;
+pub mod payment;
 pub mod portal_account;
 pub mod portal_mail;
 pub mod portal_settings;

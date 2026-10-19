@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, AlertTriangle, LogOut, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toQuotaMillions } from '../components/user-token/tokenQuota';
@@ -9,6 +9,7 @@ import PortalApiKeyPanel from '../components/user-token/PortalApiKeyPanel';
 import { PortalConfig, portalCall } from '../components/user-token/portalApi';
 import { formatYuan, Price } from '../components/user-token/money';
 import ModelPriceCard from '../components/user-token/ModelPriceCard';
+import PortalTopup, { takeReturnedOrder, TopupOrder } from '../components/user-token/PortalTopup';
 
 interface ModelUsage {
     model: string;
@@ -38,6 +39,7 @@ interface Overview {
     allowed_models: string[];
     available_models: string[];
     model_prices: (Price & { model: string })[];
+    topup_orders: TopupOrder[];
     logs: UsageLogPage;
     daily: UsagePeriod[];
     weekly: UsagePeriod[];
@@ -64,10 +66,23 @@ export default function TokenPortal() {
     const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
     const auth = useRef<Auth | null>(null);
     const pending = useRef<AbortController | null>(null);
+    // Read once on arrival: the payment gateway returns users here with the order number.
+    const [returnedOrder, setReturnedOrder] = useState(takeReturnedOrder);
+    const portalRequest = useCallback((path: string, init?: RequestInit) => {
+        const current = auth.current;
+        return fetch(`/api/token-portal/${path}`, {
+            ...init,
+            headers: { ...init?.headers, ...(current?.kind === 'key' ? { Authorization: `Bearer ${current.token}` } : {}) },
+            cache: 'no-store', credentials: current?.kind === 'key' ? 'omit' : 'same-origin', referrerPolicy: 'no-referrer',
+        });
+    }, []);
     useEffect(() => () => pending.current?.abort(), []);
     // Restore an existing account session and learn which account features are on.
     useEffect(() => {
         void portalCall<PortalConfig>('config').then(result => { if (result.ok) setConfig(result.data); }).catch(() => undefined);
+        // Back from the payment page: key sign-in lived only in memory, so say why to sign in
+        // again. A restored account session clears this notice when it loads.
+        if (returnedOrder) setNotice(t('topup.return_login'));
         void load({ kind: 'account' }, 1, {}, true);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -190,7 +205,9 @@ export default function TokenPortal() {
                             {updatedAt && <p className="mt-2 text-xs text-slate-400">{t('token_portal.updated')}: {updatedAt.toLocaleTimeString(i18n.language)}</p>}</div>
                     </section>
                     {error && <p role="alert" className="text-sm text-red-600 rounded-lg bg-red-50 px-4 py-3">{error}</p>}
-                    {overview.pending_activation && <p className="flex gap-2 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800"><AlertTriangle size={16} className="shrink-0 mt-0.5" />{t(billed ? 'billing.pending_banner' : 'token_portal.pending_banner')}</p>}
+                    {overview.pending_activation && <p className="flex gap-2 rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800"><AlertTriangle size={16} className="shrink-0 mt-0.5" />{billed && config?.topup?.enabled
+                        ? t('topup.pending_banner', { min: formatYuan(config.topup.min_amount_cents * 10_000) })
+                        : t(billed ? 'billing.pending_banner' : 'token_portal.pending_banner')}</p>}
                     <div id="portal-panel-overview" hidden={menu !== 'overview'} className="space-y-8">
                     <section aria-label={t('token_portal.summary')} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                         {[
@@ -204,6 +221,9 @@ export default function TokenPortal() {
                     {billed && <section className="bg-white border border-slate-200 rounded-xl px-5 py-5 space-y-2">
                         <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{t('billing.balance')}</span><span className={`font-semibold ${exhausted ? 'text-amber-700' : ''}`}>{formatYuan(overview.balance_micros ?? 0)}</span></div>
                         <p className="text-xs text-slate-500">{t('billing.portal_balance_hint')}</p>
+                        {/* An expired key's balance cannot be spent, so it is not offered a top-up. */}
+                        <PortalTopup config={overview.expired ? undefined : config?.topup} orders={overview.topup_orders ?? []} request={portalRequest}
+                            returnedOrder={returnedOrder} onReturnHandled={() => setReturnedOrder(null)} onSettled={() => reload()} />
                     </section>}
                     {!(billed && quotaUnlimited) && <section className="bg-white border border-slate-200 rounded-xl px-5 py-5 space-y-3">
                         <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{t('token_portal.quota')}</span><span>{quotaUnlimited ? unlimited : million(overview.token_quota)}</span></div>

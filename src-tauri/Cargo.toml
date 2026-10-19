@@ -71,6 +71,7 @@ tauri-plugin-updater = "2"
 reqwest_0_13 = { package = "reqwest", version = "0.13", default-features = false, features = ["socks"] }
 tauri-plugin-process = "2"
 sha2 = "0.10"
+md-5 = "0.10"                       # 易支付 (EPay/ZPay) MD5 签名
 toml = "0.8"
 toml_edit = "0.22"
 tauri-plugin-window-state = "2"

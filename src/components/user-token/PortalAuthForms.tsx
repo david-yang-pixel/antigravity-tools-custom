@@ -122,6 +122,7 @@ export default function PortalAuthForms({ config, busy, keyError, accountError, 
                         <input id="portal-token" type="password" autoComplete="off" spellCheck={false} value={token} onChange={e => setToken(e.target.value)} maxLength={256}
                             placeholder="sk-…" disabled={busy} required className={input} />
                         {keyError && <p role="alert" className="text-sm text-red-600">{keyError}</p>}
+                        {notice && !keyError && <p role="status" className="text-sm text-emerald-700">{notice}</p>}
                         <button type="submit" disabled={busy || !token.trim()} className={primary}>
                             {busy ? <RefreshCw size={16} className="animate-spin" /> : <ArrowRight size={16} />}{t('token_portal.login')}
                         </button>

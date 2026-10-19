@@ -1,9 +1,11 @@
 // Usage-portal account API. Account sessions use an HttpOnly cookie scoped to
 // /api/token-portal; key sign-in keeps sending the key as a Bearer header.
+import type { TopupConfig } from './PortalTopup';
 
 export interface PortalConfig {
     registration_enabled: boolean;
     password_reset_enabled: boolean;
+    topup?: TopupConfig;
 }
 
 export interface PortalResult<T = Record<string, unknown>> {
