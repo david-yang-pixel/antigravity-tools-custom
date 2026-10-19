@@ -2,18 +2,25 @@
 
 The private repository's default and production branch is `main`. A push to
 `main`, or a manual run of **Stellar AI Build and Deploy** on `main`, runs three
-jobs in parallel: TypeScript, deployment-safety and workflow checks; native Rust
-Clippy and focused regression tests; and the amd64 Linux image build, which runs
-isolated API smoke checks before publishing a commit-tagged image to GHCR.
-Production deploys the immutable digest only after all three jobs pass, so a
-published image that failed a check is never deployed.
+tracks in parallel: TypeScript, deployment-safety and workflow checks; native Rust
+Clippy and focused regression tests; and the server build. The server build
+compiles the frontend and the release binary in a `rust:1-slim-bookworm`
+container, the same image `docker/Dockerfile` compiles in, so the binary matches
+the glibc and libraries of the `debian:bookworm-slim` runtime. It then packages
+them with `docker/Dockerfile --target prebuilt` and runs isolated API smoke checks
+before publishing a commit-tagged image to GHCR. Production deploys the immutable
+digest only after all three tracks pass, so a published image that failed a check
+is never deployed.
 
-The image build caches compiled Rust dependencies as a separate layer (cargo-chef)
-in the `buildcache` tag of the GHCR package, so a commit that leaves
-`Cargo.toml`/`Cargo.lock` unchanged only recompiles this crate. The first run after
-a dependency change rebuilds that layer and takes noticeably longer.
+The compile step caches every built dependency with `rust-cache`, so a
+`Cargo.lock` change recompiles only the crates that changed rather than all of
+them. The runtime package layer is cached in the `runtimecache` tag of the GHCR
+package. Building `docker/Dockerfile` without a target still compiles everything
+from source, as before, for local builds and releases.
+
 The upstream Pages workflow is manual-only; the custom workflow replaces the
-upstream push-to-main CI. Upstream PR checks remain available.
+upstream push-to-main CI. PR checks (`ci.yml`) run on Linux only; macOS and
+Windows builds are left to the release workflow.
 
 ## Deployment tags
 
