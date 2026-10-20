@@ -561,21 +561,6 @@ fn report_sse_json_parse(
     );
 }
 
-fn split_namespace_tool_name(qualified_name: &str) -> (String, Option<String>) {
-    let name = qualified_name.trim();
-    if name.starts_with("mcp__") {
-        return (name.to_string(), None);
-    }
-    if let Some(pos) = name.find("__") {
-        if pos > 0 {
-            let namespace = name[..pos].to_string();
-            let actual_name = name[pos + 2..].to_string();
-            return (actual_name, Some(namespace));
-        }
-    }
-    (name.to_string(), None)
-}
-
 fn openai_chat_error_frame(
     stream_id: &str,
     created_ts: i64,
@@ -638,6 +623,7 @@ pub fn create_codex_sse_stream<S, E>(
         tokio::sync::oneshot::Sender<(Vec<Value>, tokio::sync::oneshot::Sender<()>)>,
     >,
     cache_tool_calls: bool,
+    namespaces: super::namespace::NamespaceMap,
 ) -> Pin<Box<dyn Stream<Item = Result<Bytes, String>> + Send>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + ?Sized + 'static,
@@ -883,7 +869,7 @@ where
                                                                 }
                                                                 thinking_acc.record_tool_id(name, &call_id);
 
-                                                                let (actual_name, namespace) = split_namespace_tool_name(name);
+                                                                let (actual_name, namespace) = namespaces.resolve(name);
                                                                 let tool_item_id = format!("item-{}", &Uuid::new_v4().to_string()[..16]);
                                                                 let is_custom_tool = actual_name == "apply_patch" || actual_name == "apply_patch_v2" || actual_name == "shell";
 
@@ -1332,6 +1318,7 @@ mod tests {
             "resp-test-codex-session".to_string(),
             None,
             cache_tool_calls,
+            Default::default(),
         );
 
         let mut raw = String::new();
@@ -1366,6 +1353,7 @@ mod tests {
             "resp-test-codex-session".to_string(),
             None,
             true,
+            Default::default(),
         );
 
         let mut raw = String::new();
@@ -1465,6 +1453,7 @@ mod tests {
             response_id.clone(),
             Some(completion_tx),
             true,
+            Default::default(),
         );
 
         let mut raw = String::new();
@@ -1520,6 +1509,54 @@ mod tests {
             crate::proxy::SignatureCache::global().get_session_signature(&branch_b),
             Some(signature_b)
         );
+    }
+
+    #[tokio::test]
+    async fn codex_mcp_namespace_calls_return_with_client_namespace() {
+        // Codex registers MCP servers as namespaces of short-named tools.
+        let namespaces = super::super::namespace::NamespaceMap::from_tools(Some(&json!([
+            {"type":"namespace","name":"mcp__openconnector","tools":[{"type":"function","name":"list_connections"}]}
+        ])));
+        let chunks = [
+            json!({"response":{"candidates":[{"content":{"parts":[
+                {"functionCall":{"name":"mcp__openconnector__list_connections","args":{}}},
+                {"functionCall":{"name":"mcp__legacy__flat_tool","args":{}}}
+            ]}}]}}),
+            json!({"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":""}]}}]}}),
+        ];
+        let items: Vec<Result<Bytes, String>> = chunks
+            .into_iter()
+            .map(|chunk| Ok(Bytes::from(format!("data: {chunk}\n\n"))))
+            .collect();
+        let mut stream = create_codex_sse_stream(
+            Box::pin(stream::iter(items)),
+            "gemini-pro-agent".to_string(),
+            "test-codex-namespace".to_string(),
+            0,
+            0,
+            "resp-test-codex-namespace".to_string(),
+            None,
+            false,
+            namespaces,
+        );
+        let mut raw = String::new();
+        while let Some(item) = stream.next().await {
+            raw.push_str(&String::from_utf8_lossy(&item.expect("codex stream item")));
+        }
+        let calls: Vec<Value> = raw
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .filter(|event| event["type"] == "response.output_item.done")
+            .map(|event| event["item"].clone())
+            .filter(|item| item["type"] == "function_call")
+            .collect();
+        assert_eq!(calls.len(), 2, "{raw}");
+        assert_eq!(calls[0]["name"], "list_connections");
+        assert_eq!(calls[0]["namespace"], "mcp__openconnector");
+        // A flat MCP function the client did not register as a namespace is unchanged.
+        assert_eq!(calls[1]["name"], "mcp__legacy__flat_tool");
+        assert!(calls[1].get("namespace").is_none());
     }
 
     #[tokio::test]

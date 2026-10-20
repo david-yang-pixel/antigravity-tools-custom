@@ -3213,6 +3213,12 @@ pub async fn handle_completions(
     );
     let signature_read_key = previous_response_id.clone();
 
+    // Replayed namespaced calls (including restored history) use the flat names
+    // their tools travel as upstream; the map restores calls to the client's form.
+    crate::proxy::mappers::openai::namespace::qualify_input_calls(&mut body);
+    let namespaces =
+        crate::proxy::mappers::openai::namespace::NamespaceMap::from_tools(body.get("tools"));
+
     let mut bounded_session_input = None;
 
     // 1. Convert Payload to Messages (Shared Chat Format)
@@ -4222,6 +4228,7 @@ pub async fn handle_completions(
                             response_id_for_save.clone(),
                             completion_tx,
                             store_response,
+                            namespaces.clone(),
                         )
                     } else {
                         use crate::proxy::mappers::openai::streaming::create_legacy_sse_stream;
@@ -6279,6 +6286,9 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             let _ = socket.send(Message::Text(event.to_string())).await;
             continue;
         }
+        let namespaces = crate::proxy::mappers::openai::namespace::NamespaceMap::from_tools(
+            normalized.get("tools"),
+        );
         let openai_body = convert_codex_to_openai_request(normalized);
         let response_result = handle_chat_completions(
             State(state.clone()),
@@ -6331,6 +6341,7 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             accumulated_text: String::new(),
             tool_calls: std::collections::HashMap::new(),
             tool_calls_added: std::collections::HashSet::new(),
+            namespaces,
         };
 
         let created_ev = json!({
@@ -6779,6 +6790,7 @@ fn repair_tool_calls(
 }
 
 fn convert_codex_to_openai_request(mut body: Value) -> Value {
+    crate::proxy::mappers::openai::namespace::qualify_input_calls(&mut body);
     let instructions = body
         .get("instructions")
         .and_then(|v| v.as_str())
@@ -7034,6 +7046,8 @@ struct TranslationState {
     accumulated_text: String,
     tool_calls: std::collections::HashMap<u32, (String, String, String, String)>,
     tool_calls_added: std::collections::HashSet<u32>,
+    /// Restores flat upstream tool names to the client's namespace + name.
+    namespaces: crate::proxy::mappers::openai::namespace::NamespaceMap,
 }
 
 async fn send_ws_event(socket: &mut WebSocket, ws_events: &mut Vec<Value>, event: &Value) {
@@ -7219,7 +7233,7 @@ async fn translate_openai_chunk_to_ws(
                             };
 
                             if !state.tool_calls_added.contains(&tc_idx) {
-                                let (actual_name, namespace) = split_namespace_tool_name(name);
+                                let (actual_name, namespace) = state.namespaces.resolve(name);
                                 let mut item_obj = serde_json::json!({
                                     "id": tool_item_id,
                                     "type": "function_call",
@@ -7286,7 +7300,7 @@ async fn finalize_ws_events(
             });
             send_ws_event(socket, ws_events, &args_done).await;
 
-            let (actual_name, namespace) = split_namespace_tool_name(name);
+            let (actual_name, namespace) = state.namespaces.resolve(name);
             let mut item_obj = serde_json::json!({
                 "id": tool_item_id,
                 "type": "function_call",
@@ -7381,21 +7395,6 @@ async fn finalize_ws_events(
     send_ws_event(socket, ws_events, &completed_ev).await;
 
     json!(output_items)
-}
-
-fn split_namespace_tool_name(qualified_name: &str) -> (String, Option<String>) {
-    let name = qualified_name.trim();
-    if name.starts_with("mcp__") {
-        return (name.to_string(), None);
-    }
-    if let Some(pos) = name.find("__") {
-        if pos > 0 {
-            let namespace = name[..pos].to_string();
-            let actual_name = name[pos + 2..].to_string();
-            return (actual_name, Some(namespace));
-        }
-    }
-    (name.to_string(), None)
 }
 
 const INTERNAL_BACKGROUND_TASK: &str = "gemini-3.1-flash-lite";

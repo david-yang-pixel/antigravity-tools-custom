@@ -1,7 +1,8 @@
 //! Protocol conversion at the native provider boundary; billing remains in shared middleware.
+use crate::proxy::mappers::openai::namespace::qualify as namespaced_name;
 use crate::proxy::pipeline::usage::CanonicalUsage;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -313,11 +314,6 @@ fn responses_tool(tool: &Value) -> Result<Value, String> {
     Ok(json!({"type":"function","function":function}))
 }
 
-/// Gateway-wide flat name for a namespaced Responses tool (see the OpenAI mapper).
-fn namespaced_name(namespace: &str, name: &str) -> String {
-    crate::proxy::mappers::openai::request::qualify_namespace_tool_name(namespace, name)
-}
-
 /// Name a replayed call or forced choice used upstream: namespaced tools travel flat.
 fn call_name(item: &Value) -> Result<String, String> {
     let name = required(item, "name")?;
@@ -333,29 +329,11 @@ fn call_name(item: &Value) -> Result<String, String> {
     )
 }
 
-/// Flat upstream name -> (namespace, client name) for every namespaced Responses
-/// tool, so tool calls return in the form the client registered.
-pub type Namespaced = HashMap<String, (String, String)>;
+/// Flat upstream name -> (namespace, client name), shared with the OpenAI mapper.
+pub type Namespaced = crate::proxy::mappers::openai::namespace::NamespaceMap;
 
 pub fn namespaced_tools(body: &Value) -> Namespaced {
-    let mut map = Namespaced::new();
-    for tool in body["tools"].as_array().into_iter().flatten() {
-        let Some(namespace) = tool["name"]
-            .as_str()
-            .filter(|_| tool["type"] == "namespace")
-        else {
-            continue;
-        };
-        for child in tool["tools"].as_array().into_iter().flatten() {
-            if let Some(name) = child["name"].as_str() {
-                map.insert(
-                    namespaced_name(namespace, name),
-                    (namespace.into(), name.into()),
-                );
-            }
-        }
-    }
-    map
+    Namespaced::from_tools(body.get("tools"))
 }
 
 /// Maps a Responses `custom` (freeform) tool onto a function tool whose only
@@ -422,7 +400,7 @@ impl Output {
             slots: BTreeMap::new(),
             blocks: Vec::new(),
             active_block: None,
-            namespaced: Namespaced::new(),
+            namespaced: Namespaced::default(),
         }
     }
     /// Restore namespaced Responses tool calls from their flat upstream names.

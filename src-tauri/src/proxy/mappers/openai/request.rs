@@ -72,21 +72,6 @@ fn should_preserve_tool_output(tool_name: &str, output: &str) -> bool {
         || output.contains("Expected update hunk")
 }
 
-pub(crate) fn qualify_namespace_tool_name(namespace_name: &str, child_name: &str) -> String {
-    let child = child_name.trim();
-    let ns = namespace_name.trim();
-    if child.is_empty() || ns.is_empty() || child.starts_with("mcp__") {
-        return child.to_string();
-    }
-    if child.starts_with(ns) {
-        return child.to_string();
-    }
-    if ns.ends_with("__") {
-        return format!("{}{}", ns, child);
-    }
-    format!("{}__{}", ns, child)
-}
-
 fn flatten_tools(tools: &[Value]) -> Vec<Value> {
     let mut flat = Vec::new();
     for tool in tools {
@@ -106,7 +91,7 @@ fn flatten_tools(tools: &[Value]) -> Vec<Value> {
                             }
                         }
                         if !name.is_empty() {
-                            let qualified = qualify_namespace_tool_name(namespace_name, &name);
+                            let qualified = super::namespace::qualify(namespace_name, &name);
                             if obj.contains_key("name") {
                                 obj.insert("name".to_string(), json!(qualified));
                             }

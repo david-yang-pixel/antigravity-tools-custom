@@ -301,7 +301,7 @@ fn workbuddy_codec_round_trips_codex_namespace_tools() {
         "multi_agent_v1__spawn_agent"
     );
     for name in &names[1..] {
-        assert!(namespaced.contains_key(*name), "{name}");
+        assert!(namespaced.get(name).is_some(), "{name}");
     }
 
     // Upstream calls by flat name come back as the client's namespace + name.
@@ -981,7 +981,7 @@ async fn send(streaming: bool, policy: Policy) -> Response {
         "wb-sonnet",
         "claude-sonnet-4-6",
         codec::Protocol::Chat,
-        &codec::Namespaced::new(),
+        &codec::Namespaced::default(),
         "scope",
         policy,
     )
