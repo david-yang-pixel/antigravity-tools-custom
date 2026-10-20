@@ -1,4 +1,3 @@
-use crate::proxy::common::model_mapping::ModelRoutingMode;
 // Claude 请求转换 (Claude → Gemini v1internal)
 // 对应 transformClaudeRequestIn
 
@@ -399,28 +398,6 @@ pub fn transform_claude_request_in_timed(
     _upstream_session_id: &str,
     token: Option<&crate::proxy::token_manager::ProxyToken>, // [NEW] 支持动态规格
 ) -> Result<(Value, TransformTiming), String> {
-    transform_claude_request_with_routing(
-        claude_req,
-        project_id,
-        is_retry,
-        account_id,
-        thinking_session_id,
-        _upstream_session_id,
-        token,
-        ModelRoutingMode::Compatible,
-    )
-}
-
-pub fn transform_claude_request_with_routing(
-    claude_req: &ClaudeRequest,
-    project_id: &str,
-    is_retry: bool,
-    account_id: Option<&str>,
-    thinking_session_id: &str,
-    _upstream_session_id: &str,
-    token: Option<&crate::proxy::token_manager::ProxyToken>, // [NEW] 支持动态规格
-    routing: ModelRoutingMode,
-) -> Result<(Value, TransformTiming), String> {
     let mut timing = TransformTiming::default();
     let message_count = claude_req.messages.len();
 
@@ -555,11 +532,8 @@ pub fn transform_claude_request_with_routing(
     // [IMPROVED] 提取 web search 模型为常量，便于维护
     const WEB_SEARCH_FALLBACK_MODEL: &str = "gemini-2.5-flash";
 
-    let mapped_model = if routing.is_exact() {
-        claude_req.model.clone()
-    } else {
-        crate::proxy::common::model_mapping::map_claude_model_to_gemini(&claude_req.model)
-    };
+    let mapped_model =
+        crate::proxy::common::model_mapping::map_claude_model_to_gemini(&claude_req.model);
 
     // 1. System Instruction (透传系统提示词分块，若目标为 Gemini 则自动过滤无用计费元数据 #3452)
     let system_instruction =
@@ -573,7 +547,7 @@ pub fn transform_claude_request_with_routing(
     });
 
     // Resolve grounding config
-    let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
+    let config = crate::proxy::mappers::common_utils::resolve_request_config(
         &claude_req.model,
         &mapped_model,
         &tools_val,
@@ -581,7 +555,6 @@ pub fn transform_claude_request_with_routing(
         claude_req.quality.as_deref(), // [NEW] Pass quality parameter
         None,                          // [NEW] image_size
         None,                          // body
-        routing,
     );
 
     // [CRITICAL FIX] Disable dummy thought injection for Vertex AI

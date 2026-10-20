@@ -38,13 +38,6 @@ pub async fn route(
     request: Request,
     next: Next,
 ) -> Response {
-    if request
-        .extensions()
-        .get::<crate::modules::model_catalog::Provider>()
-        == Some(&crate::modules::model_catalog::Provider::Antigravity)
-    {
-        return next.run(request).await;
-    }
     if request.method() != Method::POST || !is_inference_path(request.uri().path()) {
         return next.run(request).await;
     }
@@ -54,10 +47,6 @@ pub async fn route(
         Err(_) => return configuration_error(request, next, &mapping).await,
     };
     let policy = Policy {
-        require_verified: request
-            .extensions()
-            .get::<crate::modules::model_catalog::Provider>()
-            .is_some(),
         sticky: state.token_manager.get_sticky_config().await,
         breaker: state.token_manager.get_circuit_breaker_config().await,
         preferred: settings.preferred_account_id.clone(),
@@ -83,12 +72,7 @@ async fn configuration_error(
             Ok(value) => value,
             Err(response) => return response,
         };
-    if request
-        .extensions()
-        .get::<crate::modules::model_catalog::Provider>()
-        == Some(&crate::modules::model_catalog::Provider::Workbuddy)
-        || model.is_some_and(|model| workbuddy::known_model_on_configuration_error(&model, mapping))
-    {
+    if model.is_some_and(|model| workbuddy::known_model_on_configuration_error(&model, mapping)) {
         error(
             StatusCode::SERVICE_UNAVAILABLE,
             "workbuddy_configuration_invalid",
@@ -123,7 +107,7 @@ async fn dispatch(
     request: Request,
     next: Next,
 ) -> Response {
-    if request.method() != Method::POST {
+    if settings.models.is_empty() || request.method() != Method::POST {
         return next.run(request).await;
     }
     let path = request.uri().path().to_owned();
@@ -140,17 +124,6 @@ async fn dispatch(
         return next.run(request).await;
     };
     let Some(target) = settings.target_model(&alias, &mapping) else {
-        if request
-            .extensions()
-            .get::<crate::modules::model_catalog::Provider>()
-            == Some(&crate::modules::model_catalog::Provider::Workbuddy)
-        {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "workbuddy_configuration_changed",
-                "The selected WorkBuddy model route changed. Refresh the available models.",
-            );
-        }
         return next.run(request).await;
     };
     if !settings.enabled {

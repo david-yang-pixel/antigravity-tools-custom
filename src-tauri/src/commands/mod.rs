@@ -1585,4 +1585,3 @@ mod agy_account_sync_tests {
         assert!(find_agy_account(vec![account("empty", "")], "").is_err());
     }
 }
-pub mod model_catalog;

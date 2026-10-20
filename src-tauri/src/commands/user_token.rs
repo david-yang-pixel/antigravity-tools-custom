@@ -365,9 +365,6 @@ pub async fn get_user_token_models(
     state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
 ) -> Result<Vec<String>, String> {
     let config = crate::modules::config::load_app_config()?;
-    if config.proxy.only_raw_quota_models {
-        return crate::modules::model_catalog::managed_models();
-    }
     let mapping = tokio::sync::RwLock::new(config.proxy.custom_mapping);
     let instance = state.instance.read().await;
     let manager = instance

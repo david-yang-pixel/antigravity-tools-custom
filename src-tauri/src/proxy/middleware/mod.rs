@@ -16,5 +16,4 @@ pub use service_status::service_status_middleware;
 
 pub mod user_token_limits;
 
-pub mod model_catalog;
 pub mod user_token_models;

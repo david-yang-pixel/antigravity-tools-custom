@@ -133,7 +133,7 @@ const CLOUD_CODE_LOAD_PROJECT_ENDPOINTS: [&str; 3] = [
 ];
 
 /// Fetch project ID and subscription tier
-pub(crate) async fn fetch_project_id(
+async fn fetch_project_id(
     access_token: &str,
     email: &str,
     account_id: Option<&str>,

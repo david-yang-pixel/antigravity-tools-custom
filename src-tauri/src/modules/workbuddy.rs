@@ -50,7 +50,7 @@ impl Settings {
         self.models
             .get(model)
             .or_else(|| {
-                crate::proxy::common::model_mapping::resolve_user_model_route(model, mapping)
+                crate::proxy::common::model_mapping::resolve_custom_model_route(model, mapping)
                     .and_then(|alias| self.models.get(&alias))
             })
             .map(String::as_str)
@@ -155,7 +155,7 @@ pub fn known_model_on_configuration_error(model: &str, mapping: &HashMap<String,
         );
     }
     names.contains(model)
-        || crate::proxy::common::model_mapping::resolve_user_model_route(model, mapping)
+        || crate::proxy::common::model_mapping::resolve_custom_model_route(model, mapping)
             .is_some_and(|alias| names.contains(&alias))
 }
 #[derive(Serialize)]
@@ -295,26 +295,12 @@ pub fn extend_catalog(models: &mut Vec<String>, mapping: &HashMap<String, String
                 .models
                 .get(id)
                 .or_else(|| {
-                    crate::proxy::common::model_mapping::resolve_user_model_route(id, mapping)
+                    crate::proxy::common::model_mapping::resolve_custom_model_route(id, mapping)
                         .and_then(|alias| settings.models.get(&alias))
                 })
                 .is_none_or(|target| settings.enabled && settings.available_models.contains(target))
         });
         if settings.enabled {
-            // Explicit client aliases remain discoverable in upstream-only mode.
-            models.extend(
-                mapping
-                    .keys()
-                    .filter(|alias| !alias.contains('*'))
-                    .filter_map(|alias| {
-                        crate::proxy::common::model_mapping::resolve_user_model_route(
-                            alias, mapping,
-                        )
-                        .and_then(|route| settings.models.get(&route))
-                        .filter(|target| settings.available_models.contains(target))
-                        .map(|_| alias.clone())
-                    }),
-            );
             models.extend(
                 settings
                     .models

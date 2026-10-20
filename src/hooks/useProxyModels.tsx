@@ -36,8 +36,8 @@ export const useProxyModels = () => {
         let cancelled = false;
         setLoading(true);
         setError(false);
-        // Admin choices include added models before pricing. Public APIs apply
-        // capability and price filters. MODEL_CONFIG only supplies presentation.
+        // The API and user portal use this same catalog. MODEL_CONFIG provides
+        // presentation metadata only; it must never add or rename model IDs.
         request<string[]>('get_user_token_models')
             .then(ids => { if (!cancelled) setModelIds(ids); })
             .catch(() => {

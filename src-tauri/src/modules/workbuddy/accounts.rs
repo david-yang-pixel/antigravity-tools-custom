@@ -199,7 +199,7 @@ fn write(accounts: &[Account]) -> Result<(), String> {
     crate::utils::fs::write_atomic(&path()?, &data)
         .map_err(|_| "Cannot save WorkBuddy accounts".into())
 }
-pub(crate) fn all() -> Result<Vec<Account>, String> {
+pub(super) fn all() -> Result<Vec<Account>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "WorkBuddy account store unavailable")?;
@@ -286,7 +286,6 @@ pub fn validate(account: &Account) -> Result<(), String> {
 /// Reauthorization replaces only the same realm + uid, preserving enablement and model catalog.
 pub fn upsert(mut account: Account) -> Result<AccountView, String> {
     validate(&account)?;
-    account.revision = uuid::Uuid::new_v4().to_string();
     {
         let _lock = STORE_LOCK
             .lock()
@@ -299,18 +298,9 @@ pub fn upsert(mut account: Account) -> Result<AccountView, String> {
             account.id = old.id.clone();
             account.enabled = old.enabled;
             account.models = old.models.clone();
-            let same_identity = account.enterprise_id == old.enterprise_id
-                && account.domain == old.domain
-                && (account.refresh_token.is_empty() || account.refresh_token == old.refresh_token);
-            if same_identity {
-                account.verified_models = old.verified_models.clone();
-                account.unavailable_models = old.unavailable_models.clone();
-                account.models_verified_at = old.models_verified_at;
-            } else {
-                account.verified_models.clear();
-                account.unavailable_models.clear();
-                account.models_verified_at = 0;
-            }
+            account.verified_models = old.verified_models.clone();
+            account.unavailable_models = old.unavailable_models.clone();
+            account.models_verified_at = old.models_verified_at;
             account.management = old.management.clone();
             account.management.next_sync_at = 0;
             if account.device_token.is_empty() {
@@ -566,7 +556,7 @@ pub(super) fn save_activity(
     current.management.activity = state;
     write(&accounts)
 }
-pub(crate) fn save_verified_models(
+pub(super) fn save_verified_models(
     account: &Account,
     models: &[Model],
     unavailable: &[String],
@@ -596,39 +586,6 @@ pub(crate) fn save_verified_models(
         })
         .map(|model| (model.id.clone(), current.models_verified_at))
         .collect();
-    write(&accounts)
-}
-pub(super) fn save_verified_models_partial(
-    account: &Account,
-    models: &[Model],
-    unavailable: &[String],
-    checked: &[String],
-) -> Result<(), String> {
-    let _lock = STORE_LOCK
-        .lock()
-        .map_err(|_| "WorkBuddy account store unavailable")?;
-    let mut accounts = read()?;
-    let current = accounts
-        .iter_mut()
-        .find(|a| a.id == account.id && a.revision == account.revision && a.enabled)
-        .ok_or("WorkBuddy account changed during verification")?;
-    current.models_verified_at = now();
-    for model in unavailable.iter().filter(|id| checked.contains(id)) {
-        current.verified_models.remove(model);
-        current.unavailable_models.insert(model.clone());
-    }
-    for model in models.iter().filter(|model| {
-        checked.contains(&model.id)
-            && current
-                .models
-                .iter()
-                .any(|candidate| candidate.id == model.id)
-    }) {
-        current.unavailable_models.remove(&model.id);
-        current
-            .verified_models
-            .insert(model.id.clone(), current.models_verified_at);
-    }
     write(&accounts)
 }
 pub fn parse_import(value: Value) -> Result<Account, String> {
@@ -769,48 +726,6 @@ pub fn acquire(model: &str) -> Result<Lease, String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    #[test]
-    fn workbuddy_partial_verification_preserves_unselected_models_and_identity_change_clears_proof()
-    {
-        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
-        let mut account = parse_import(json!({"uid":"partial","accessToken":"test","refreshToken":"test-refresh","expiresAt":now()+3600})).unwrap();
-        account.models = ["one", "two", "new"]
-            .into_iter()
-            .map(|id| Model {
-                id: id.into(),
-                name: id.into(),
-            })
-            .collect();
-        let view = upsert(account).unwrap();
-        let account = get(&view.id).unwrap();
-        save_verified_models(&account, &account.models[..2], &[]).unwrap();
-        save_verified_models_partial(&account, &[], &["one".into()], &["one".into()]).unwrap();
-        let current = get(&view.id).unwrap();
-        assert!(!current.verified_models.contains_key("one"));
-        assert!(current.verified_models.contains_key("two"));
-        assert!(!current.verified_models.contains_key("new"));
-        let rows = crate::modules::model_catalog::candidates(
-            crate::modules::model_catalog::Provider::Workbuddy,
-        )
-        .unwrap();
-        assert_eq!(
-            rows.iter().find(|row| row.id == "new").unwrap().status,
-            "untested",
-            "New upstream candidates remain discoverable after prior tests"
-        );
-        assert!(crate::modules::model_catalog::managed_models()
-            .unwrap()
-            .is_empty());
-        let mut changed = current.clone();
-        changed.enterprise_id = "different-enterprise".into();
-        upsert(changed).unwrap();
-        assert!(get(&view.id).unwrap().verified_models.is_empty());
-        assert!(
-            save_verified_models_partial(&account, &account.models[..1], &[], &["one".into()])
-                .is_err()
-        );
-    }
-
     #[test]
     fn workbuddy_credentials_encrypted_and_reauthorization_preserves_settings() {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
