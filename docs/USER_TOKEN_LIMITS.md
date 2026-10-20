@@ -107,3 +107,11 @@ parameter errors remain inconclusive and preserve earlier successes. Exact mode
 keeps upstream IDs without automatic version/model substitution. Unselected or
 unsupported IDs return HTTP 400 `model_not_supported` with a link-free instruction
 to check Available Models, before billing or inference.
+
+Antigravity penalty compatibility is shared by all incoming protocols: zero
+`presencePenalty` / `frequencyPenalty` values are omitted. If upstream returns
+HTTP 400 with `Penalty is not enabled for this model`, the gateway removes only
+these two parameters and retries once on the same endpoint, model and account.
+Nonzero penalty preferences are ignored only after this explicit rejection;
+other errors and unrelated generation settings are preserved. This does not
+claim to fix every HTTP 400 or make an unsupported model usable.

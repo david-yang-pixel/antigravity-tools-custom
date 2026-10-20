@@ -1701,6 +1701,7 @@ impl InboundThinkingPipeline {
     /// 4. 统一处理内部 request 拓扑对齐
     /// 5. 顶层键序严格对齐: project -> requestId -> request -> model -> userAgent -> requestType -> 其余
     pub fn align_official_envelope(body: &mut Value) {
+        super::generation::normalize_penalties(body);
         if !body.is_object() {
             return;
         }

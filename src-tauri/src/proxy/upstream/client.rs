@@ -27,6 +27,44 @@ pub struct UpstreamCallResult {
     pub fallback_attempts: Vec<FallbackAttemptLog>,
 }
 
+/// Retry one explicit parameter rejection on the same endpoint and credentials.
+async fn send_with_penalty_compat(
+    client: &Client,
+    url: &str,
+    headers: &header::HeaderMap,
+    body: &mut Value,
+    streaming: bool,
+    retried: &mut bool,
+) -> Result<Response, String> {
+    loop {
+        let bytes = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+        let request = client.post(url).headers(headers.clone());
+        let request = if streaming {
+            request.body(rquest::Body::wrap_stream(futures::stream::once(
+                async move { Ok::<_, std::io::Error>(bytes) },
+            )))
+        } else {
+            request.body(bytes)
+        };
+        let response = request.send().await.map_err(|e| e.to_string())?;
+        if response.status() != StatusCode::BAD_REQUEST
+            || *retried
+            || !crate::proxy::pipeline::generation::has_penalties(body)
+        {
+            return Ok(response);
+        }
+        let (response, diagnostic) =
+            crate::proxy::pipeline::generation::inspect_error(response).await;
+        if !diagnostic.as_ref().is_some_and(|error| {
+            crate::proxy::pipeline::generation::remove_rejected_penalties(body, error)
+        }) {
+            return Ok(response);
+        }
+        *retried = true;
+        tracing::warn!("Upstream rejected penalty parameters; retrying the same model and account once without penalties");
+    }
+}
+
 /// 邮箱脱敏：只显示前3位 + *** + @域名前2位 + ***
 /// 例: "userexample@gmail.com" → "use***@gm***"
 pub fn mask_email(email: &str) -> String {
@@ -451,6 +489,7 @@ impl UpstreamClient {
         });
 
         let mut has_triggered_downgrade = false;
+        let mut retried_penalty = false;
 
         // [TEMPORARY FIX #3074] 针对 403 SERVICE_DISABLED 的自动降级重试逻辑
         // 我们包装一层循环，以便在检测到特定错误时移除 Header 并重试
@@ -464,23 +503,15 @@ impl UpstreamClient {
                 let url = Self::build_url(base_url, method, query_string);
                 let has_next = idx + 1 < V1_INTERNAL_BASE_URL_FALLBACKS.len();
 
-                let body_bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-
-                let mut req_builder = client.post(&url).headers(headers.clone());
-
-                // [FIX] 仅对流式接口 (streamGenerateContent) 使用分块传输仿真
-                // 对其他接口 (如 generateContent, loadCodeAssist) 发送正常的固定长度 Body
-                // 否则图像生成会因为缺少 Content-Length 而被 Google 服务端拒绝或限流 (429)
-                if method == "streamGenerateContent" {
-                    let stream_bytes = body_bytes.clone();
-                    req_builder = req_builder.body(rquest::Body::wrap_stream(
-                        futures::stream::once(async move { Ok::<_, std::io::Error>(stream_bytes) }),
-                    ));
-                } else {
-                    req_builder = req_builder.body(body_bytes.clone());
-                }
-
-                let response = req_builder.send().await;
+                let response = send_with_penalty_compat(
+                    &client,
+                    &url,
+                    &headers,
+                    &mut body,
+                    method == "streamGenerateContent",
+                    &mut retried_penalty,
+                )
+                .await;
 
                 match response {
                     Ok(resp) => {
@@ -762,5 +793,95 @@ mod tests {
             url2,
             "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
         );
+    }
+}
+
+#[cfg(test)]
+mod penalty_compat_tests {
+    use super::*;
+    use axum::{extract::State, routing::post, Json, Router};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn penalty_compat_retries_once_with_same_model_account_and_unrelated_fields() {
+        for (unrelated, succeeds) in [(false, false), (true, false), (false, true)] {
+            let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/generate", listener.local_addr().unwrap());
+            let app = Router::new().route("/generate", post(move |State(seen): State<Arc<Mutex<Vec<Value>>>>, headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers["authorization"], "Bearer test-fixture");
+                use axum::response::IntoResponse;
+                let mut calls = seen.lock().unwrap();
+                calls.push(body);
+                if succeeds && calls.len() == 2 {
+                    return (axum::http::StatusCode::OK, [("content-type", "text/event-stream")], "data: {\"text\":\"OK\"}\n\n").into_response();
+                }
+                (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":if unrelated {"Invalid contents"} else {"Penalty is not enabled for this model"}}}))).into_response()
+            })).with_state(seen.clone());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let mut body = json!({"model":"gemini-3.8-flash-high","project":"same-project","request":{"contents":[{"text":"hello"}],"generationConfig":{"presencePenalty":0.5,"frequencyPenalty":0.7,"temperature":0.8}}});
+            let original = body.clone();
+            let mut headers = header::HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                header::HeaderValue::from_static("Bearer test-fixture"),
+            );
+            headers.insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            let mut retried = false;
+            let response = send_with_penalty_compat(
+                &Client::builder().no_proxy().build().unwrap(),
+                &url,
+                &headers,
+                &mut body,
+                true,
+                &mut retried,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.status(),
+                if succeeds { 200 } else { 400 },
+                "Second failures must be returned, never retried indefinitely"
+            );
+            if succeeds {
+                assert_eq!(response.headers()["content-type"], "text/event-stream");
+                assert_eq!(
+                    response.text().await.unwrap(),
+                    "data: {\"text\":\"OK\"}\n\n"
+                );
+            } else {
+                let diagnostic: Value = response.json().await.unwrap();
+                assert!(diagnostic["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if unrelated {
+                        "Invalid contents"
+                    } else {
+                        "Penalty"
+                    }));
+            }
+            let calls = seen.lock().unwrap();
+            assert_eq!(calls.len(), if unrelated { 1 } else { 2 });
+            assert_eq!(calls[0], original);
+            if !unrelated {
+                assert_eq!(calls[1]["model"], original["model"]);
+                assert_eq!(calls[1]["project"], original["project"]);
+                assert_eq!(
+                    calls[1]["request"]["contents"],
+                    original["request"]["contents"]
+                );
+                assert_eq!(
+                    calls[1]["request"]["generationConfig"],
+                    json!({"temperature":0.8})
+                );
+            }
+            task.abort();
+        }
     }
 }
