@@ -7,7 +7,8 @@ import TokenUsageDetails, { LogTimeRange, UsageLogPage, UsagePeriod } from '../c
 import PortalAuthForms from '../components/user-token/PortalAuthForms';
 import { PortalConfig, portalCall } from '../components/user-token/portalApi';
 import { formatYuan, Price } from '../components/user-token/money';
-import ModelPriceCard from '../components/user-token/ModelPriceCard';
+import PortalModelCatalog from '../components/user-token/PortalModelCatalog';
+import PortalConnectionGuide from '../components/user-token/PortalConnectionGuide';
 import PortalTopup, { takeReturnedOrder, TopupOrder } from '../components/user-token/PortalTopup';
 
 interface ModelUsage {
@@ -42,7 +43,7 @@ interface Overview {
     models: ModelUsage[];
 }
 
-const portalMenus = ['overview', 'balance', 'models', 'statistics', 'logs'] as const;
+const portalMenus = ['overview', 'balance', 'models', 'guide', 'statistics', 'logs'] as const;
 type PortalMenu = typeof portalMenus[number];
 /** Key sign-in sends the key as Bearer; account sign-in relies on the session cookie. */
 type Auth = { kind: 'key'; token: string } | { kind: 'account' };
@@ -61,6 +62,7 @@ export default function TokenPortal() {
     const [logRange, setLogRange] = useState<LogTimeRange>({});
     const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
     const auth = useRef<Auth | null>(null);
+    const overviewMenu = useRef<HTMLButtonElement>(null);
     const pending = useRef<AbortController | null>(null);
     // Read once on arrival: the payment gateway returns users here with the order number.
     const [returnedOrder, setReturnedOrder] = useState(takeReturnedOrder);
@@ -170,8 +172,6 @@ export default function TokenPortal() {
     const million = (n: number) => `${toQuotaMillions(n)} M tokens`;
     const exhausted = overview !== null && (overview.balance_micros ?? 0) <= 0;
     const status = overview?.expired ? t('token_portal.expired') : exhausted ? t('billing.insufficient') : t('token_portal.active');
-    const priceOf = (model: string) => overview?.model_prices.find(price => price.model === model);
-    const isFreeModel = (model: string) => (overview?.free_models ?? []).some(free => free.replace(/^models\//, '') === model.replace(/^models\//, ''));
     const rows = overview?.models.filter(m => m.model.toLowerCase().includes(search.toLowerCase())) ?? [];
     const date = (ts: number) => new Date(ts * 1000).toLocaleString(i18n.language, { timeZone: 'Asia/Shanghai' });
 
@@ -187,7 +187,7 @@ export default function TokenPortal() {
                     </div>
                 </div>
                 {overview && <nav aria-label={t('token_portal.navigation')} className="max-w-6xl mx-auto px-5 sm:px-8 flex gap-1 sm:gap-6 overflow-x-auto">
-                    {menus.map(item => <button key={item} type="button" aria-current={menu === item ? 'page' : undefined}
+                    {menus.map(item => <button key={item} type="button" ref={item === 'overview' ? overviewMenu : undefined} aria-current={menu === item ? 'page' : undefined}
                         aria-controls={`portal-panel-${item}`} onClick={() => setMenu(item)}
                         className={`shrink-0 border-b-2 px-3 sm:px-4 py-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${menu === item ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-900 hover:border-slate-300'}`}>
                         {t(`token_portal.menu_${item}`)}
@@ -232,10 +232,11 @@ export default function TokenPortal() {
                     <section id="portal-panel-models" hidden={menu !== 'models'} className="space-y-3">
                         <h2 className="text-lg font-semibold">{t('token_portal.menu_models')}</h2>
                         <p className="text-sm text-slate-500">{t('billing.portal_prices_hint')}</p>
-                        {overview.available_models.length ? <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 pt-1">
-                            {overview.available_models.map(model => <ModelPriceCard key={model} model={model} price={priceOf(model)} free={isFreeModel(model)} />)}
-                        </div> : <p className="text-sm text-slate-500">{t('token_portal.empty_catalog')}</p>}
+                        <PortalModelCatalog models={overview.available_models} prices={overview.model_prices} freeModels={overview.free_models} />
                     </section>
+                    <div id="portal-panel-guide" hidden={menu !== 'guide'}>
+                        <PortalConnectionGuide token={currentKey} models={overview.available_models} onOpenOverview={() => { setMenu('overview'); overviewMenu.current?.focus(); }} />
+                    </div>
                     <div id="portal-panel-statistics" hidden={menu !== 'statistics'} className="space-y-8">
                     <section className="space-y-4">
                         <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-lg font-semibold">{t('token_portal.by_model')}</h2><label className="sr-only" htmlFor="usage-model-filter">{t('token_portal.search')}</label><input id="usage-model-filter" type="search" value={search} onChange={e => setSearch(e.target.value)} placeholder={t('token_portal.search')} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm w-full sm:w-64" /></div>
