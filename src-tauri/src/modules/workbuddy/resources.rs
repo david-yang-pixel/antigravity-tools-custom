@@ -30,6 +30,17 @@ fn billing_base(realm: Realm) -> String {
     .into()
 }
 async fn post(account: &Account, path: &str, body: &Value) -> Result<reqwest::Response, String> {
+    let headers = headers(account)?;
+    client::http()?
+        .post(format!("{}{path}", billing_base(account.realm)))
+        .headers(headers)
+        .json(body)
+        .timeout(Duration::from_secs(25))
+        .send()
+        .await
+        .map_err(|_| "Cannot connect to WorkBuddy account resources".into())
+}
+pub(super) fn headers(account: &Account) -> Result<reqwest::header::HeaderMap, String> {
     let mut headers = client::headers(account.realm, Some(account))?;
     for (key, value) in [
         ("user-agent", "WorkBuddy/5.5.4"),
@@ -47,14 +58,7 @@ async fn post(account: &Account, path: &str, body: &Value) -> Result<reqwest::Re
             );
         }
     }
-    client::http()?
-        .post(format!("{}{path}", billing_base(account.realm)))
-        .headers(headers)
-        .json(body)
-        .timeout(Duration::from_secs(25))
-        .send()
-        .await
-        .map_err(|_| "Cannot connect to WorkBuddy account resources".into())
+    Ok(headers)
 }
 fn packages(mut value: &Value) -> Result<&Vec<Value>, String> {
     for _ in 0..5 {

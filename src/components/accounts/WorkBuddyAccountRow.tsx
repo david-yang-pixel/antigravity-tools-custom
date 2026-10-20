@@ -1,6 +1,7 @@
 import { Fragment, useState } from 'react';
 import { CalendarCheck, ChevronDown, HeartPulse, RefreshCw, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import WorkBuddyActivity, { type ActivityState } from './WorkBuddyActivity';
 
 export interface WorkBuddyAccount {
     id: string; uid: string; nickname: string; realm: 'cn' | 'global'; enabled: boolean;
@@ -10,13 +11,14 @@ export interface WorkBuddyAccount {
     health: { successes: number; failures: number; consecutive_failures: number; last_success_at: number; last_failure_at: number; last_error: string | null };
     management: {
         managed: boolean; auto_checkin: boolean; keepalive: boolean;
+        auto_rewards?: boolean; auto_lottery?: boolean; activity?: ActivityState;
         credits: { available: number; updated_at: number; expiries: { at: number; amount: number }[] } | null;
         credits_error: string | null; last_sync_at: number; next_sync_at: number;
         last_keepalive_at: number; keepalive_attempt_at: number; keepalive_error: string | null;
         checkin_date: string | null; checkin_at: number; checkin_attempt_at?: number; checkin_status: string; checkin_error: string | null;
     };
 }
-export interface AccountChanges { enabled?: boolean; refresh?: boolean; managed?: boolean; auto_checkin?: boolean; keepalive?: boolean; checkin?: boolean }
+export interface AccountChanges { enabled?: boolean; refresh?: boolean; managed?: boolean; auto_checkin?: boolean; keepalive?: boolean; checkin?: boolean; auto_rewards?: boolean; auto_lottery?: boolean; activity?: 'query' | 'claim' }
 const cell = 'px-4 py-4 align-middle';
 const muted = 'mt-1 text-xs font-normal text-gray-500 dark:text-gray-400';
 const actionButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white';
@@ -54,7 +56,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                     <span className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] ${account.status === 'ready' ? 'bg-green-50 text-green-700 dark:bg-green-900/30 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>{t(`workbuddy.accounts.status_${account.status}`)}</span></div>
                 <div className={muted}>{t(`workbuddy.accounts.${account.realm}`)} · {t('workbuddy.accounts.model_count', { count: account.models.length })}</div>
                 {!account.models_verified_at && !!account.candidate_model_count && <div className="mt-1 text-xs text-amber-600">{t('workbuddy.models_not_verified')}</div>}
-                {errors.length > 0 && <button className="mt-1 text-xs text-amber-700 underline dark:text-amber-400" onClick={() => setExpanded(true)} aria-controls={detailId}>{t('workbuddy.accounts.needs_attention')}</button>}
+                {(errors.length > 0 || m.activity?.error) && <button className="mt-1 text-xs text-amber-700 underline dark:text-amber-400" onClick={() => setExpanded(true)} aria-controls={detailId}>{t('workbuddy.accounts.needs_attention')}</button>}
             </th>
             <td className={`${cell} whitespace-nowrap tabular-nums`}>
                 <div className="font-semibold">{m.credits ? m.credits.available.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</div>
@@ -78,6 +80,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                     <label className="flex items-center gap-1.5" title={t('workbuddy.accounts.auto_checkin')}><input aria-label={t('workbuddy.accounts.auto_checkin')} type="checkbox" className="accent-blue-600" checked={m.auto_checkin && account.realm === 'cn'} disabled={busy || !m.managed || account.realm === 'global'} onChange={e => onChange({ auto_checkin: e.target.checked })} />{t('workbuddy.accounts.checkin_short')}</label>
                     <label className="flex items-center gap-1.5" title={t('workbuddy.accounts.keepalive')}><input aria-label={t('workbuddy.accounts.keepalive')} type="checkbox" className="accent-blue-600" checked={m.keepalive} disabled={busy || !m.managed} onChange={e => onChange({ keepalive: e.target.checked })} />{t('workbuddy.accounts.keepalive_short')}</label>
                 </div>
+                {account.realm === 'cn' && <button className="mt-2 text-left text-xs text-blue-600 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-400" onClick={() => setExpanded(true)} aria-controls={detailId}>{t('workbuddy.activity.title')} · {t(`workbuddy.activity.status_${m.activity?.status || 'idle'}`)}</button>}
             </td>
             <td className={`${cell} sticky right-0 bg-white shadow-[-12px_0_12px_-12px_rgba(0,0,0,0.12)] dark:bg-gray-900`}>
                 <div className="flex items-center justify-end gap-1">
@@ -102,6 +105,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.health')}</dt><dd className="mt-1">{total ? t('workbuddy.accounts.success_rate', { rate: Math.round(h.successes / total * 100), success: h.successes, total }) : t('workbuddy.accounts.health_hint')}</dd><dd className="mt-1 text-gray-500">{t('workbuddy.accounts.capacity', { count: account.models.length, active: account.in_flight })}</dd></div>
             </dl>
             {errors.length > 0 && <div role="status" className="mt-4 space-y-1 text-xs text-amber-700 dark:text-amber-400">{errors.map(error => <p key={error} className="break-words">{error}</p>)}</div>}
+            <WorkBuddyActivity account={account} now={now} busy={busy} onChange={onChange} />
             {account.models.length > 0 && <div className="mt-4 border-t border-gray-200 pt-3 dark:border-gray-700"><h3 className="text-xs font-medium">{account.models_verified_at ? <>{t('workbuddy.accounts.models')} · {date(account.models_verified_at)}</> : t('workbuddy.pending_verification')}</h3><div className="mt-2 flex max-h-40 flex-wrap gap-x-4 gap-y-2 overflow-auto font-mono text-xs text-gray-500">{account.models.map(model => <span key={model.id}>{model.id}</span>)}</div></div>}
         </td></tr>}
     </Fragment>;
