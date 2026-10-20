@@ -213,9 +213,13 @@ fn workbuddy_codec_preserves_tools_images_and_rejects_stateful_loss() {
         json!({"input":"hello","previous_response_id":"resp_other_user"})
     )
     .is_err());
+    let converted = convert(Protocol::Responses,json!({"input":[{"role":"user","content":"hi"},{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"q"}}],"tools":[{"type":"web_search","external_web_access":false},{"type":"web_search_preview"}],"tool_choice":{"type":"web_search"}})).unwrap();
+    assert!(converted.get("tools").is_none());
+    assert_eq!(converted["tool_choice"], "auto");
+    assert_eq!(converted["messages"].as_array().unwrap().len(), 1);
     assert!(convert(
         Protocol::Responses,
-        json!({"input":"hello","tools":[{"type":"web_search"}]})
+        json!({"input":"hello","tools":[{"type":"file_search"}]})
     )
     .is_err());
     let converted = convert(Protocol::Responses,json!({"input":[{"type":"custom_tool_call","call_id":"call_p","name":"apply_patch","input":"*** Begin Patch"},{"type":"custom_tool_call_output","call_id":"call_p","output":"ok"}],"tools":[{"type":"custom","name":"apply_patch","description":"Edit files","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}],"tool_choice":{"type":"custom","name":"apply_patch"}})).unwrap();

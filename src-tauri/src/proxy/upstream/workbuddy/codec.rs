@@ -149,6 +149,7 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
                     "custom_tool_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":required(item,"name")?,"arguments":json!({"input":text(item,"input")}).to_string()}}]})),
                     "function_call_output" | "custom_tool_call_output" => messages.push(json!({"role":"tool","tool_call_id":required(item,"call_id")?,"content": if item["output"].is_string() { item["output"].clone() } else { response_content(&item["output"])? }})),
                     "reasoning" => { /* Reasoning summaries are metadata, not user instructions. */ }
+                    _ if drop_hosted_web_search(item, "input item") => {}
                     _ => return Err("Unsupported WorkBuddy Responses input item; provide message or function call history".into()),
                 }
                 }
@@ -162,10 +163,11 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
             out["reasoning_effort"] = effort.clone();
         }
         if let Some(tools) = body.get("tools") {
-            out["tools"] = json!(tools
+            let tools = tools
                 .as_array()
                 .ok_or("tools must be an array")?
                 .iter()
+                .filter(|tool| !drop_hosted_web_search(tool, "tool"))
                 .map(|tool| {
                     if tool["type"] == "custom" {
                         return Ok(custom_tool_as_function(tool));
@@ -177,13 +179,18 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
                     function.as_object_mut().unwrap().remove("type");
                     Ok(json!({"type":"function","function":function}))
                 })
-                .collect::<Result<Vec<_>, String>>()?);
+                .collect::<Result<Vec<_>, String>>()?;
+            if !tools.is_empty() {
+                out["tools"] = json!(tools);
+            }
         }
         if let Some(choice) = body.get("tool_choice") {
             out["tool_choice"] = if choice.is_string() {
                 choice.clone()
             } else if choice["type"] == "function" || choice["type"] == "custom" {
                 json!({"type":"function","function":{"name":required(choice,"name")?}})
+            } else if drop_hosted_web_search(choice, "tool_choice") {
+                json!("auto")
             } else {
                 return Err("Unsupported WorkBuddy tool choice".into());
             };
@@ -272,6 +279,17 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
     }
     out["messages"] = json!(messages);
     Ok(out)
+}
+
+/// WorkBuddy upstreams have no hosted web search, so Responses `web_search*`
+/// tools (and their replayed calls) are dropped instead of failing the request.
+fn drop_hosted_web_search(value: &Value, kind: &str) -> bool {
+    let kind_name = value["type"].as_str().unwrap_or("");
+    let dropped = kind_name.starts_with("web_search");
+    if dropped {
+        tracing::warn!("[WorkBuddy] Dropping unsupported hosted {kind} `{kind_name}`");
+    }
+    dropped
 }
 
 /// Maps a Responses `custom` (freeform) tool onto a function tool whose only
