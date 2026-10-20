@@ -1,5 +1,6 @@
 //! Built-in WorkBuddy accounts and model routes. No external Manager is required.
 pub mod accounts;
+pub mod activity;
 pub mod client;
 pub mod login;
 pub mod maintenance;

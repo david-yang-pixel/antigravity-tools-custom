@@ -12,6 +12,9 @@ pub struct Management {
     pub managed: bool,
     pub auto_checkin: bool,
     pub keepalive: bool,
+    pub auto_rewards: bool,
+    pub auto_lottery: bool,
+    pub activity: super::activity::State,
     pub credits: Option<Credits>,
     pub credits_error: Option<String>,
     pub last_sync_at: i64,
@@ -31,6 +34,9 @@ impl Default for Management {
             managed: true,
             auto_checkin: true,
             keepalive: true,
+            auto_rewards: false,
+            auto_lottery: false,
+            activity: super::activity::State::default(),
             credits: None,
             credits_error: None,
             last_sync_at: 0,
@@ -160,6 +166,14 @@ pub fn start() {
                             if let Err(error) = run(&account.id, false, false, true).await {
                                 tracing::warn!("WorkBuddy maintenance: {error}");
                             }
+                        }
+                        if super::activity::due(&account, accounts::now()) {
+                            // Activity jobs have their own bounded worker slots and share
+                            // the maintenance lock; a slow campaign cannot stall keepalive.
+                            let _ = super::activity::start(
+                                &account.id,
+                                super::activity::Action::Automatic,
+                            );
                         }
                     }
                 }

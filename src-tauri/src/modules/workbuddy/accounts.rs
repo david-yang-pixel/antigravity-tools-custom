@@ -174,7 +174,12 @@ fn read() -> Result<Vec<Account>, String> {
         .map_err(|_| {
             "Cannot decrypt WorkBuddy accounts; restore the matching key and account backup"
         })?;
-    serde_json::from_slice(&plain).map_err(|_| "Invalid WorkBuddy accounts".into())
+    let mut accounts: Vec<Account> =
+        serde_json::from_slice(&plain).map_err(|_| "Invalid WorkBuddy accounts")?;
+    for account in &mut accounts {
+        super::activity::recover_interrupted(&mut account.management.activity);
+    }
+    Ok(accounts)
 }
 fn write(accounts: &[Account]) -> Result<(), String> {
     let cipher = Aes256Gcm::new(&key(true)?.into());
@@ -203,7 +208,9 @@ pub(super) fn all() -> Result<Vec<Account>, String> {
 fn runtime_key(id: &str) -> Result<String, String> {
     Ok(format!("{}:{id}", path()?.display()))
 }
-pub(super) fn view(account: Account) -> Result<AccountView, String> {
+pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
+    // The draw journal is persisted for retry safety, not exposed in the admin UI.
+    account.management.activity.pending_draw = None;
     let runtime = RUNTIME.lock().map_err(|_| "WorkBuddy pool unavailable")?;
     let entry = runtime.get(&runtime_key(&account.id)?);
     let status = if !account.enabled {
@@ -456,7 +463,12 @@ pub fn configure(
     managed: Option<bool>,
     auto_checkin: Option<bool>,
     keepalive: Option<bool>,
+    auto_rewards: Option<bool>,
+    auto_lottery: Option<bool>,
 ) -> Result<AccountView, String> {
+    if (auto_rewards == Some(true) || auto_lottery == Some(true)) && get(id)?.realm != Realm::Cn {
+        return Err("WorkBuddy activity rewards are only supported for domestic accounts".into());
+    }
     edit_management(id, |m| {
         if let Some(value) = managed {
             m.managed = value;
@@ -466,6 +478,12 @@ pub fn configure(
         }
         if let Some(value) = keepalive {
             m.keepalive = value;
+        }
+        if let Some(value) = auto_rewards {
+            m.auto_rewards = value;
+        }
+        if let Some(value) = auto_lottery {
+            m.auto_lottery = value;
         }
         m.next_sync_at = 0;
     })
@@ -484,6 +502,9 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.management.managed = old.management.managed;
     account.management.auto_checkin = old.management.auto_checkin;
     account.management.keepalive = old.management.keepalive;
+    account.management.auto_rewards = old.management.auto_rewards;
+    account.management.auto_lottery = old.management.auto_lottery;
+    account.management.activity = old.management.activity.clone();
     old.models = account.models.clone();
     // Maintenance does not turn catalog entries into successful verification results.
     old.verified_models
@@ -495,6 +516,44 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.models_verified_at = old.models_verified_at;
     old.last_error = account.last_error.clone();
     old.management = account.management.clone();
+    write(&accounts)
+}
+/// Activity writes only its own observation and never stale credentials/preferences.
+pub(super) fn edit_activity(
+    account: &Account,
+    edit: impl FnOnce(&mut super::maintenance::Management),
+) -> Result<(), String> {
+    let _lock = STORE_LOCK
+        .lock()
+        .map_err(|_| "WorkBuddy account store unavailable")?;
+    let mut accounts = read()?;
+    let current = accounts
+        .iter_mut()
+        .find(|a| a.id == account.id && a.revision == account.revision)
+        .ok_or("WorkBuddy credentials changed during activity; query again")?;
+    edit(&mut current.management);
+    write(&accounts)
+}
+/// Finish this job's journal even if a concurrent credential refresh changed the
+/// revision. The run ID prevents an old job from replacing a later job's result.
+pub(super) fn save_activity(
+    account: &Account,
+    state: super::activity::State,
+) -> Result<(), String> {
+    let _lock = STORE_LOCK
+        .lock()
+        .map_err(|_| "WorkBuddy account store unavailable")?;
+    let mut accounts = read()?;
+    let current = accounts
+        .iter_mut()
+        .find(|a| {
+            a.id == account.id
+                && a.uid == account.uid
+                && a.realm == account.realm
+                && a.management.activity.run_id == state.run_id
+        })
+        .ok_or("WorkBuddy activity run was superseded or removed")?;
+    current.management.activity = state;
     write(&accounts)
 }
 pub(super) fn save_verified_models(
