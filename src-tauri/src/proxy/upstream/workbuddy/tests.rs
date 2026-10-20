@@ -28,18 +28,16 @@ fn seed() -> String {
     workbuddy::accounts::upsert(account).unwrap().id
 }
 async fn mock() -> NativeMock {
+    serve(Router::new().route("/v2/chat/completions", post(upstream))).await
+}
+async fn serve(router: Router) -> NativeMock {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     std::env::set_var(
         "STELLAR_TEST_WORKBUDDY_BASE",
         format!("http://{}", listener.local_addr().unwrap()),
     );
     let task = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route("/v2/chat/completions", post(upstream)),
-        )
-        .await
-        .unwrap();
+        axum::serve(listener, router).await.unwrap();
     });
     NativeMock { task }
 }
@@ -211,6 +209,12 @@ fn workbuddy_codec_preserves_tools_images_and_rejects_stateful_loss() {
     assert!(convert(
         Protocol::Responses,
         json!({"input":"hello","previous_response_id":"resp_other_user"})
+    )
+    .is_err());
+    // A forced Chat tool without a name is a request error, not an account failure.
+    assert!(convert(
+        Protocol::Chat,
+        json!({"messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"function"}})
     )
     .is_err());
     let converted = convert(Protocol::Responses,json!({"input":[{"role":"user","content":"hi"},{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"q"}}],"tools":[{"type":"web_search","external_web_access":false},{"type":"web_search_preview"}],"tool_choice":{"type":"web_search"}})).unwrap();
@@ -816,4 +820,155 @@ async fn assert_zero_balance_admin_policy(client: &reqwest::Client, base: &str) 
     let body: Value = denied.json().await.unwrap();
     assert_eq!(body["error"]["code"], "insufficient_balance");
     assert_eq!(db::usage_logs_for_token(&key.id, 1).unwrap().total, 6);
+}
+
+/// Upstream that answers each hit with the next scripted outcome and records which
+/// account (x-user-id) served it.
+#[derive(Default)]
+struct Script {
+    outcomes: std::sync::Mutex<std::collections::VecDeque<&'static str>>,
+    hits: std::sync::Mutex<Vec<String>>,
+}
+async fn scripted(
+    State(script): State<std::sync::Arc<Script>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let uid = headers["x-user-id"].to_str().unwrap().to_owned();
+    script.hits.lock().unwrap().push(uid);
+    let outcome = script.outcomes.lock().unwrap().pop_front().unwrap_or("ok");
+    let sse = |body: Body| {
+        Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(body)
+            .unwrap()
+    };
+    match outcome {
+        "ok" => sse(Body::from(format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":0,"delta":{"content":"served"},"finish_reason":"stop"}]}),
+            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}})
+        ))),
+        "empty" => sse(Body::from("data: [DONE]\n\n")),
+        "partial-error" => sse(Body::from_stream(async_stream::stream! {
+            yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("data: {}\n\n",
+                json!({"choices":[{"delta":{"content":"partial"}}]}))));
+            // Let the gateway commit the response before the upstream fails.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            yield Ok(bytes::Bytes::from_static(b"data: {\"error\":{\"message\":\"failed\"}}\n\n"));
+        })),
+        status => StatusCode::from_u16(status.parse().unwrap())
+            .unwrap()
+            .into_response(),
+    }
+}
+async fn scripted_pool(
+    accounts: usize,
+    outcomes: &[&'static str],
+) -> (NativeMock, std::sync::Arc<Script>) {
+    for n in 0..accounts {
+        let mut account = workbuddy::accounts::parse_import(json!({"uid":format!("uid-{n}"),"accessToken":format!("token-{n}"),"expiresAt":workbuddy::accounts::now()+3600})).unwrap();
+        account.models.push(workbuddy::accounts::Model {
+            id: "claude-sonnet-4-6".into(),
+            name: "Sonnet".into(),
+        });
+        workbuddy::accounts::upsert(account).unwrap();
+    }
+    let script = std::sync::Arc::new(Script::default());
+    script.outcomes.lock().unwrap().extend(outcomes);
+    let mock = serve(
+        Router::new()
+            .route("/v2/chat/completions", post(scripted))
+            .with_state(script.clone()),
+    )
+    .await;
+    (mock, script)
+}
+async fn send(streaming: bool, policy: Policy) -> Response {
+    let payload = json!({"messages":[{"role":"user","content":"hello"}],"stream":streaming});
+    forward(
+        5,
+        payload,
+        streaming,
+        "wb-sonnet",
+        "claude-sonnet-4-6",
+        codec::Protocol::Chat,
+        "scope",
+        policy,
+    )
+    .await
+}
+fn hits(script: &Script) -> Vec<String> {
+    std::mem::take(&mut *script.hits.lock().unwrap())
+}
+
+#[tokio::test]
+async fn workbuddy_pre_generation_failure_fails_over_and_rebinds_session() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(2, &["429"]).await;
+    // Without the breaker a failed account stays schedulable, so only exclusion
+    // and the session rebind keep the retry and the next request off it.
+    let mut policy = Policy::default();
+    policy.breaker.enabled = false;
+    for streaming in [true, false] {
+        let response = send(streaming, policy.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let data = to_bytes(response.into_body(), 100_000).await.unwrap();
+        assert!(String::from_utf8_lossy(&data).contains("served"));
+        let served = hits(&script);
+        assert_eq!(served.len(), 2);
+        assert_ne!(served[0], served[1]);
+        // The session follows the account that served it.
+        let response = send(streaming, policy.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), 100_000).await.unwrap();
+        assert_eq!(hits(&script), vec![served[1].clone()]);
+        // Next round: the newly bound account fails first and the request moves back.
+        script.outcomes.lock().unwrap().extend(["empty"]);
+    }
+    let observed = workbuddy::accounts::list().unwrap();
+    assert!(observed.iter().all(|a| a.in_flight == 0));
+    assert_eq!(observed.iter().map(|a| a.health.failures).sum::<u64>(), 2);
+}
+
+#[tokio::test]
+async fn workbuddy_failure_after_output_or_bad_request_is_not_retried() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(2, &["partial-error", "partial-error", "400"]).await;
+    let response = send(true, Policy::default()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(to_bytes(response.into_body(), 100_000).await.is_err());
+    assert_eq!(hits(&script).len(), 1);
+    let response = send(false, Policy::default()).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(hits(&script).len(), 1);
+    workbuddy::accounts::scheduling::clear_cooldowns(None);
+    let response = send(false, Policy::default()).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(hits(&script).len(), 1);
+}
+
+#[tokio::test]
+async fn workbuddy_all_accounts_failing_returns_last_status_within_attempt_cap() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(4, &["503", "empty", "429"]).await;
+    let response = send(true, Policy::default()).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "workbuddy_upstream_rejected");
+    let tried = hits(&script);
+    assert_eq!(tried.len(), 3);
+    assert_eq!(
+        tried.iter().collect::<std::collections::HashSet<_>>().len(),
+        3
+    );
+    // A fixed account has no alternative, so its failure is returned as is.
+    workbuddy::accounts::scheduling::clear_cooldowns(None);
+    script.outcomes.lock().unwrap().extend(["503"]);
+    let policy = Policy {
+        preferred: Some(workbuddy::accounts::list().unwrap()[0].id.clone()),
+        ..Default::default()
+    };
+    assert_eq!(send(false, policy).await.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(hits(&script).len(), 1);
 }

@@ -193,6 +193,35 @@ async fn dispatch(
     .await
 }
 
+/// Upper bound on accounts tried for one request, including the first.
+const MAX_ATTEMPTS: usize = 3;
+
+/// An attempt that failed before any byte reached the client. `retry` marks
+/// failures another account may resolve; request-shape and deadline failures are final.
+struct Failure {
+    response: Response,
+    retry: bool,
+}
+
+fn retry(status: StatusCode, code: &str, message: &str) -> Failure {
+    Failure {
+        response: error(status, code, message),
+        retry: true,
+    }
+}
+
+fn fatal(status: StatusCode, code: &str, message: &str) -> Failure {
+    Failure {
+        response: error(status, code, message),
+        retry: false,
+    }
+}
+
+/// Another account cannot fix a request the upstream rejected for its shape or size.
+fn retryable_status(status: StatusCode) -> bool {
+    !matches!(status.as_u16(), 400 | 413 | 422)
+}
+
 async fn forward(
     timeout: u64,
     payload: Value,
@@ -206,7 +235,7 @@ async fn forward(
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.clamp(1, 3600));
     let session = workbuddy::client::session_key(scope, &payload);
-    let lease =
+    let mut lease =
         match workbuddy::accounts::scheduling::acquire(target, &session, &policy, timeout).await {
             Ok(lease) => lease,
             Err(message) => {
@@ -217,46 +246,94 @@ async fn forward(
                 )
             }
         };
+    let mut tried = Vec::new();
+    loop {
+        tried.push(lease.account.id.clone());
+        let failure = match attempt(
+            lease, &payload, streaming, alias, target, protocol, scope, deadline,
+        )
+        .await
+        {
+            Ok(response) => return response,
+            Err(failure) => failure,
+        };
+        // Only the response of the attempt that ends the loop reaches monitor and
+        // settlement, so a failed-then-served request bills once.
+        if !failure.retry || tried.len() >= MAX_ATTEMPTS || tokio::time::Instant::now() >= deadline
+        {
+            return failure.response;
+        }
+        lease = match workbuddy::accounts::scheduling::try_acquire_excluding(
+            target, &session, &policy, &tried,
+        ) {
+            Ok(Some(next)) => next,
+            _ => return failure.response,
+        };
+        tracing::warn!(
+            "WorkBuddy account failed before generation (HTTP {}); retrying on another account",
+            failure.response.status().as_u16()
+        );
+    }
+}
+
+/// One account's attempt. Every `Err` is returned before a byte reaches the client;
+/// once output exists the attempt commits, so a retry can never duplicate output.
+#[allow(clippy::too_many_arguments)]
+async fn attempt(
+    lease: workbuddy::accounts::Lease,
+    payload: &Value,
+    streaming: bool,
+    alias: &str,
+    target: &str,
+    protocol: codec::Protocol,
+    scope: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Response, Failure> {
     let account = match workbuddy::accounts::fresh_before(&lease.account.id, deadline).await {
         Ok(Ok(account)) if account.enabled => account,
         Ok(Ok(_)) => {
-            return error(
+            return Err(retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "workbuddy_account_disabled",
                 "WorkBuddy account was disabled",
-            )
+            ))
         }
         Ok(Err(message)) => {
             lease.failure("Account authorization failed", 30);
-            return error(
+            return Err(retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "workbuddy_authorization_failed",
                 &message,
-            );
+            ));
         }
         Err(_) => {
-            return error(
+            return Err(fatal(
                 StatusCode::GATEWAY_TIMEOUT,
                 "workbuddy_timeout",
                 "WorkBuddy request timed out while preparing account authorization",
-            );
+            ));
         }
     };
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
-        return error(
+        return Err(fatal(
             StatusCode::GATEWAY_TIMEOUT,
             "workbuddy_timeout",
             "WorkBuddy request timed out before generation",
-        );
+        ));
     }
-    let upstream = match workbuddy::client::chat(&account, target, payload, scope, deadline).await {
-        Ok(response) => response,
-        Err(message) => {
-            lease.failure("Upstream connection failed", 10);
-            return error(StatusCode::BAD_GATEWAY, "workbuddy_unavailable", &message);
-        }
-    };
+    let upstream =
+        match workbuddy::client::chat(&account, target, payload.clone(), scope, deadline).await {
+            Ok(response) => response,
+            Err(message) => {
+                lease.failure("Upstream connection failed", 10);
+                return Err(retry(
+                    StatusCode::BAD_GATEWAY,
+                    "workbuddy_unavailable",
+                    &message,
+                ));
+            }
+        };
     if !upstream.status().is_success() {
         let status = upstream.status();
         let retry_after = upstream
@@ -268,8 +345,11 @@ async fn forward(
             &format!("Upstream HTTP {}", status.as_u16()),
             retry_after.unwrap_or(if status.as_u16() == 429 { 60 } else { 15 }),
         );
-        return error(if status.as_u16() == 429 { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::BAD_GATEWAY },
-            "workbuddy_upstream_rejected", &format!("WorkBuddy returned HTTP {}; refresh account authorization or check model availability",status.as_u16()));
+        return Err(Failure {
+            response: error(if status.as_u16() == 429 { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::BAD_GATEWAY },
+                "workbuddy_upstream_rejected", &format!("WorkBuddy returned HTTP {}; refresh account authorization or check model availability",status.as_u16())),
+            retry: retryable_status(status),
+        });
     }
     if !upstream
         .headers()
@@ -278,11 +358,11 @@ async fn forward(
         .is_some_and(|v| v.starts_with("text/event-stream"))
     {
         lease.failure("Invalid upstream response type", 15);
-        return error(
+        return Err(retry(
             StatusCode::BAD_GATEWAY,
             "workbuddy_invalid_response",
             "WorkBuddy did not return a model event stream; check account authorization",
-        );
+        ));
     }
     // Bound bytes before the SSE parser, including a peer that never terminates an event.
     let mut received = 0usize;
@@ -304,24 +384,16 @@ async fn forward(
         let mut initial = output.start();
         while !output.has_output() {
             let event = match events.next().await {
-                Some(Ok(event)) => event,
+                Some(Ok(event)) if event.data != "[DONE]" => event,
                 _ => {
                     lease.failure("Upstream ended before generation", 15);
-                    return error(
+                    return Err(retry(
                         StatusCode::BAD_GATEWAY,
                         "workbuddy_empty_response",
                         "WorkBuddy ended before producing a completion",
-                    );
+                    ));
                 }
             };
-            if event.data == "[DONE]" {
-                lease.failure("Upstream ended before generation", 15);
-                return error(
-                    StatusCode::BAD_GATEWAY,
-                    "workbuddy_empty_response",
-                    "WorkBuddy ended before producing a completion",
-                );
-            }
             if event.data.trim().is_empty() {
                 continue;
             }
@@ -329,22 +401,22 @@ async fn forward(
                 Ok(value) => value,
                 Err(_) => {
                     lease.failure("Invalid upstream event", 15);
-                    return error(
+                    return Err(retry(
                         StatusCode::BAD_GATEWAY,
                         "workbuddy_invalid_response",
                         "Invalid WorkBuddy event",
-                    );
+                    ));
                 }
             };
             match output.push(value) {
                 Ok(frames) => initial.extend(frames),
                 Err(message) => {
                     lease.failure("Upstream rejected the completion", 15);
-                    return error(
+                    return Err(retry(
                         StatusCode::BAD_GATEWAY,
                         "workbuddy_upstream_rejected",
                         &message,
-                    );
+                    ));
                 }
             }
         }
@@ -362,7 +434,7 @@ async fn forward(
             _lease.success();
             for frame in frames { yield bytes::Bytes::from(frame); }
         };
-        return decorate(
+        return Ok(decorate(
             Response::builder()
                 .header(header::CONTENT_TYPE, "text/event-stream")
                 .header(header::CACHE_CONTROL, "no-cache")
@@ -372,18 +444,24 @@ async fn forward(
                 ))
                 .unwrap(),
             target,
-        );
+        ));
     }
+    // Non-streaming follows the same rule: retry only before the first parsed output,
+    // because the upstream has already generated (and charged for) anything after it.
+    let failed = |output: &codec::Output, code: &str, message: &str| Failure {
+        response: error(StatusCode::BAD_GATEWAY, code, message),
+        retry: !output.has_output(),
+    };
     while let Some(event) = events.next().await {
         let event = match event {
             Ok(event) => event,
             Err(_) => {
                 lease.failure("Upstream stream interrupted", 15);
-                return error(
-                    StatusCode::BAD_GATEWAY,
+                return Err(failed(
+                    &output,
                     "workbuddy_stream_interrupted",
                     "WorkBuddy stream interrupted",
-                );
+                ));
             }
         };
         if event.data == "[DONE]" {
@@ -396,37 +474,30 @@ async fn forward(
             Ok(value) => value,
             Err(_) => {
                 lease.failure("Invalid upstream event", 15);
-                return error(
-                    StatusCode::BAD_GATEWAY,
+                return Err(failed(
+                    &output,
                     "workbuddy_invalid_response",
                     "Invalid WorkBuddy event",
-                );
+                ));
             }
         };
         if let Err(message) = output.push(value) {
             lease.failure("Upstream rejected generation", 15);
-            return error(
-                StatusCode::BAD_GATEWAY,
-                "workbuddy_invalid_response",
-                &message,
-            );
+            return Err(failed(&output, "workbuddy_invalid_response", &message));
         }
     }
     match output.end() {
         Ok((value, _)) => {
             lease.success();
-            decorate(Json(value).into_response(), target)
+            Ok(decorate(Json(value).into_response(), target))
         }
         Err(message) => {
             lease.failure("Incomplete upstream generation", 15);
-            error(
-                StatusCode::BAD_GATEWAY,
-                "workbuddy_incomplete_response",
-                &message,
-            )
+            Err(failed(&output, "workbuddy_incomplete_response", &message))
         }
     }
 }
+
 fn decorate(mut response: Response, target: &str) -> Response {
     response.headers_mut().insert(
         "x-mapped-model",
