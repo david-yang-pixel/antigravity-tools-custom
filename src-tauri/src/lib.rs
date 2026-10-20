@@ -9,7 +9,6 @@ mod proxy; // Proxy service module
 mod utils;
 
 use modules::logger;
-use std::sync::Arc;
 use tauri::Manager;
 use tracing::{error, info, warn};
 
