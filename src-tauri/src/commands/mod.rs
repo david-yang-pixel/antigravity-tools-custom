@@ -8,8 +8,6 @@ use tauri_plugin_opener::OpenerExt;
 pub mod proxy;
 // 导出 autostart 命令
 pub mod autostart;
-// 导出 cloudflared 命令
-pub mod cloudflared;
 // 导出 security 命令 (IP 监控)
 pub mod security;
 // 导出 proxy_pool 命令
@@ -917,21 +915,11 @@ pub async fn get_internal_error_log_disk_size() -> Result<u64, String> {
 pub async fn set_data_dir(
     path: String,
     proxy_state: tauri::State<'_, crate::commands::proxy::ProxyServiceState>,
-    cf_state: tauri::State<'_, crate::commands::cloudflared::CloudflaredState>,
 ) -> Result<String, String> {
     {
         let instance = proxy_state.instance.read().await;
         if instance.is_some() {
             return Err("请先停止 API 反代服务，再迁移数据目录".to_string());
-        }
-    }
-    {
-        let lock = cf_state.manager.read().await;
-        if let Some(manager) = lock.as_ref() {
-            let status = manager.get_status().await;
-            if status.running {
-                return Err("请先停止 Cloudflared 隧道，再迁移数据目录".to_string());
-            }
         }
     }
 
@@ -940,11 +928,6 @@ pub async fn set_data_dir(
     })
     .await
     .map_err(|e| format!("迁移任务失败: {}", e))??;
-
-    {
-        let mut lock = cf_state.manager.write().await;
-        *lock = None;
-    }
 
     Ok(modules::account::format_data_dir_path(&new_path))
 }

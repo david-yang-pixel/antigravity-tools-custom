@@ -18,21 +18,13 @@ import {
     Cpu,
     Flame,
     Hash,
-    TrendingUp,
-    Zap,
-    Code,
-    CodeXml,
-    Wand2,
-    CheckSquare,
-    MinusSquare,
-    Square
+    TrendingUp
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { showToast } from '../components/common/ToastContainer';
 import { copyToClipboard } from '../utils/clipboard';
 import { request } from '../utils/request';
 import { generateUUID } from '../utils/uuid';
-import { getProfileInfo, type OpencodeProviderSummary } from '../utils/opencodeProfiles';
 
 interface ManagedApiKey {
     id: string;
@@ -84,27 +76,10 @@ export const ApiKeyFun: React.FC = () => {
     const [querying, setQuerying] = useState(false);
     const [usage, setUsage] = useState<UsageSummary | null>(null);
     const [models, setModels] = useState<string[]>([]);
-    const [modelsSource, setModelsSource] = useState<{ key: string; endpoint: string } | null>(null);
     const [queryError, setQueryError] = useState<string | null>(null);
     const [modelsError, setModelsError] = useState<string | null>(null);
-    const [opencodeProviders, setOpencodeProviders] = useState<OpencodeProviderSummary[]>([]);
-    const [syncingKey, setSyncingKey] = useState<string | null>(null);
-    const isTogglingRef = useRef(false);
     const querySeqRef = useRef(0);
 
-    const providersSeqRef = useRef(0);
-    const fetchOpencodeProviders = useCallback(async () => {
-        const seq = ++providersSeqRef.current;
-        const providers = await request<OpencodeProviderSummary[]>('get_opencode_providers');
-        if (!Array.isArray(providers)) throw new Error('Invalid OpenCode providers response');
-        if (seq === providersSeqRef.current) setOpencodeProviders(providers);
-        return providers;
-    }, []);
-
-    useEffect(() => {
-        fetchOpencodeProviders().catch(err => console.warn('Failed to fetch opencode providers', err));
-    }, [fetchOpencodeProviders]);
-    
     // Key Management
     const [managedKeys, setManagedKeys] = useState<ManagedApiKey[]>(() => {
         try {
@@ -146,7 +121,6 @@ export const ApiKeyFun: React.FC = () => {
         setQueryError(null);
         setUsage(null);
         setModels([]);
-        setModelsSource(null);
 
         let fetchedModels: string[] = [];
         try {
@@ -174,7 +148,6 @@ export const ApiKeyFun: React.FC = () => {
             }
             if (seq !== querySeqRef.current) return;
             setModels(fetchedModels);
-            setModelsSource({ key, endpoint });
 
             // 2. Fetch balance (Try sub2api /usage first, then New API billing)
             let usageSummary: UsageSummary | null = null;
@@ -330,101 +303,11 @@ export const ApiKeyFun: React.FC = () => {
                 setBaseUrl(initialUrl);
                 if (managedKeys[0].models && managedKeys[0].models.length > 0) {
                     setModels(managedKeys[0].models);
-                    setModelsSource({ key: initialKey.trim(), endpoint: initialUrl.trim().replace(/\/+$/, '') });
                 }
                 runQuery(initialKey, initialUrl);
             }
         }
     }, [managedKeys, runQuery]);
-
-    const handleSyncCli = async (app: 'Codex' | 'Claude' | 'Gemini') => {
-        if (!apiKey.trim()) return;
-        const rawKey = apiKey.trim();
-        const cleanUrl = baseUrl.trim().replace(/\/+$/, '');
-        const baseWithoutV1 = cleanUrl.replace(/\/v1$/i, '');
-        const proxyUrl = app === 'Codex' ? `${baseWithoutV1}/v1` : baseWithoutV1;
-        const syncKey = rawKey;
-
-        try {
-            await request('execute_cli_sync', { 
-                appType: app, 
-                proxyUrl: proxyUrl, 
-                apiKey: syncKey
-            });
-            showToast(t('apiKeyFun.syncSuccess', { defaultValue: 'Successfully synced to {{app}}', app }), 'success');
-        } catch (error: any) {
-            showToast(t('apiKeyFun.syncError', { defaultValue: 'Failed to sync: {{error}}', error: error.toString() }), 'error');
-        }
-    };
-
-    const getModelsForKey = useCallback((targetKey: string, targetUrl?: string): string[] | undefined => {
-        const trimmed = targetKey.trim();
-        if (!trimmed) return undefined;
-        const normTarget = targetUrl ? targetUrl.trim().replace(/\/+$/, '') : null;
-        if (modelsSource?.key === trimmed && (!normTarget || modelsSource.endpoint === normTarget) && models.length > 0) {
-            return models.map(m => m.trim()).filter(Boolean);
-        }
-        const found = managedKeys.find(m => m.key.trim() === trimmed);
-        if (found?.models && found.models.length > 0) {
-            if (!normTarget || !found.baseUrl || found.baseUrl.trim().replace(/\/+$/, '') === normTarget) {
-                return found.models.map(m => m.trim()).filter(Boolean);
-            }
-        }
-        return undefined;
-    }, [modelsSource, models, managedKeys]);
-
-    const profileInfo = useCallback((key: string, url: string, modelIds?: string[]) =>
-        getProfileInfo(opencodeProviders, key, url, modelIds), [opencodeProviders]);
-
-    const handleToggleOpenCodeProfile = async (targetKey: string, targetUrl: string, explicitModels?: string[]) => {
-        const trimmedKey = targetKey.trim();
-        if (!trimmedKey || !targetUrl.trim() || isTogglingRef.current || (querying && trimmedKey === apiKey.trim())) return;
-        isTogglingRef.current = true;
-        setSyncingKey(trimmedKey);
-
-        try {
-            const keyModels = explicitModels ?? getModelsForKey(trimmedKey, targetUrl);
-            const providers = await fetchOpencodeProviders();
-            const info = getProfileInfo(providers, trimmedKey, targetUrl, keyModels);
-            if (info.status === 'synced') {
-                // Deactivate / remove profile
-                await request('execute_opencode_remove_provider', {
-                    providerId: info.providerId
-                });
-                showToast(t('apiKeyFun.opencode.removedToast', { defaultValue: 'Removed from OpenCode: {{name}}', name: info.providerName }), 'success');
-            } else {
-                // 'not_present' or 'partial' -> Sync / update profile
-                const proxyUrl = targetUrl.trim().replace(/\/+$/, '');
-                const cleaned = (keyModels ?? []).map(id => id.trim()).filter(Boolean);
-                if (cleaned.length === 0 && !info.existing?.models.length) {
-                    throw new Error(t('apiKeyFun.opencode.modelsRequired'));
-                }
-                const modelInputs = cleaned.length > 0
-                    ? cleaned.map(id => ({ id }))
-                    : undefined;
-
-                await request('execute_opencode_openai_sync', {
-                    proxyUrl,
-                    apiKey: trimmedKey,
-                    providerId: info.providerId,
-                    providerName: info.providerName,
-                    models: modelInputs
-                });
-                showToast(t('apiKeyFun.opencode.syncedToast', { defaultValue: 'Synced to OpenCode: {{name}}', name: info.providerName }), 'success');
-            }
-            await fetchOpencodeProviders();
-        } catch (error: any) {
-            showToast(t('apiKeyFun.syncError', { defaultValue: 'Failed to sync: {{error}}', error: error.toString() }), 'error');
-        } finally {
-            isTogglingRef.current = false;
-            setSyncingKey(null);
-        }
-    };
-
-    const handleSyncOpenCode = async () => {
-        if (!apiKey.trim() || !baseUrl.trim() || querying || Boolean(syncingKey)) return;
-        await handleToggleOpenCodeProfile(apiKey, baseUrl);
-    };
 
     const handleDeleteKey = (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
@@ -451,7 +334,6 @@ export const ApiKeyFun: React.FC = () => {
         setQuerying(false);
         setUsage(null);
         setModels([]);
-        setModelsSource(null);
         setQueryError(null);
         setModelsError(null);
         setApiKey(value);
@@ -462,7 +344,6 @@ export const ApiKeyFun: React.FC = () => {
         setBaseUrl(item.baseUrl || DEFAULT_ENDPOINT);
         if (item.models && item.models.length > 0) {
             setModels(item.models);
-            setModelsSource({ key: item.key.trim(), endpoint: (item.baseUrl || DEFAULT_ENDPOINT).trim().replace(/\/+$/, '') });
         }
         runQuery(item.key, item.baseUrl || DEFAULT_ENDPOINT);
     };
@@ -723,76 +604,6 @@ export const ApiKeyFun: React.FC = () => {
                                         </div>
                                     </div>
 
-                                    {/* OpenCode Profile Status & Activation */}
-                                    {(() => {
-                                        const isActiveKey = item.key.trim() === apiKey.trim();
-                                        const effectiveUrl = (isActiveKey && baseUrl.trim()) ? baseUrl.trim() : (item.baseUrl || DEFAULT_ENDPOINT);
-                                        const currentModels = getModelsForKey(item.key, effectiveUrl);
-                                        const keyInfo = profileInfo(item.key, effectiveUrl, currentModels);
-                                        const isThisKeySyncing = syncingKey === item.key.trim();
-
-                                        return (
-                                            <div
-                                                onClick={e => e.stopPropagation()}
-                                                className="flex items-center justify-between pt-2 mt-2 border-t border-slate-100 dark:border-white/5 text-[11px]"
-                                            >
-                                                <div
-                                                    role="checkbox"
-                                                    aria-checked={keyInfo.status === 'synced' ? true : keyInfo.status === 'partial' ? 'mixed' : false}
-                                                    aria-label={`OpenCode ${keyInfo.suffix}`}
-                                                    aria-busy={isThisKeySyncing}
-                                                    aria-disabled={Boolean(syncingKey) || (isActiveKey && querying)}
-                                                    tabIndex={0}
-                                                    className="flex items-center gap-1.5 min-w-0 cursor-pointer select-none rounded focus:outline-none focus:ring-1 focus:ring-teal-500"
-                                                    onClick={() => handleToggleOpenCodeProfile(item.key, effectiveUrl, currentModels)}
-                                                    onKeyDown={(e) => {
-                                                        if (e.key === 'Enter' || e.key === ' ') {
-                                                            e.preventDefault();
-                                                            handleToggleOpenCodeProfile(item.key, effectiveUrl, currentModels);
-                                                        }
-                                                    }}
-                                                    title={
-                                                        keyInfo.status === 'synced'
-                                                            ? t('apiKeyFun.opencode.clickToRemove', { defaultValue: 'OpenCode profile is active and synced. Click to deactivate/remove' })
-                                                            : keyInfo.status === 'partial'
-                                                                ? t('apiKeyFun.opencode.clickToUpdate', { defaultValue: 'Settings or models differ. Click to update' })
-                                                                : t('apiKeyFun.opencode.clickToActivate', { defaultValue: 'Click to activate separate profile in OpenCode' })
-                                                    }
-                                                >
-                                                    {isThisKeySyncing ? (
-                                                        <RefreshCw size={13} className="animate-spin text-teal-500 shrink-0" />
-                                                    ) : keyInfo.status === 'synced' ? (
-                                                        <CheckSquare size={14} className="text-emerald-500 shrink-0" />
-                                                    ) : keyInfo.status === 'partial' ? (
-                                                        <MinusSquare size={14} className="text-amber-500 shrink-0" />
-                                                    ) : (
-                                                        <Square size={14} className="text-slate-400 dark:text-gray-600 shrink-0" />
-                                                    )}
-                                                    <span className="font-mono text-slate-600 dark:text-gray-300 truncate">
-                                                        OpenCode: <span className="font-semibold text-slate-800 dark:text-gray-100">{keyInfo.suffix}</span>
-                                                    </span>
-                                                </div>
-
-                                                <div className="flex items-center gap-1 shrink-0">
-                                                    {keyInfo.status === 'synced' && (
-                                                        <span className="badge badge-xs badge-success text-[9px] font-medium gap-1 py-1 px-1.5">
-                                                            {t('apiKeyFun.opencode.active', { defaultValue: 'Active' })}
-                                                        </span>
-                                                    )}
-                                                    {keyInfo.status === 'partial' && (
-                                                        <span className="badge badge-xs badge-warning text-[9px] font-medium gap-1 py-1 px-1.5">
-                                                            {t('apiKeyFun.opencode.modified', { defaultValue: 'Modified' })}
-                                                        </span>
-                                                    )}
-                                                    {keyInfo.status === 'not_present' && (
-                                                        <span className="text-[10px] text-slate-400 dark:text-gray-500">
-                                                            {t('apiKeyFun.opencode.inactive', { defaultValue: 'Inactive' })}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        );
-                                    })()}
                                 </div>
                             );
                         })}
@@ -875,115 +686,6 @@ export const ApiKeyFun: React.FC = () => {
                                 </div>
                             </div>
                             
-                            {/* Premium CLI Actions Banner */}
-                            <div className="mt-4 flex flex-col sm:flex-row items-start sm:items-center justify-between p-3.5 rounded-xl bg-gradient-to-r from-blue-50/80 to-purple-50/80 dark:from-blue-900/20 dark:to-purple-900/20 border border-blue-500/20 shadow-sm relative overflow-hidden group/banner transition-all hover:shadow-md">
-                                {/* Subtle Background Effect */}
-                                <div className="absolute -right-6 -top-6 text-purple-500/10 dark:text-purple-400/5 rotate-12 transition-transform group-hover/banner:rotate-45 duration-700">
-                                    <Wand2 size={80} />
-                                </div>
-                                
-                                <div className="flex items-center gap-3 z-10 mb-3 sm:mb-0">
-                                    <div className="p-2 rounded-lg bg-base-100/80 shadow-sm border border-base-300 backdrop-blur-sm">
-                                        <Zap size={16} className="text-amber-500" />
-                                    </div>
-                                    <div className="flex flex-col">
-                                        <span className="text-sm font-bold text-base-content">
-                                            {t('apiKeyFun.cli.quickConfig', { defaultValue: '一键配置本地开发环境' })}
-                                        </span>
-                                        <span className="text-[10px] text-base-content/60 font-medium">
-                                            {t('apiKeyFun.cli.syncDesc', { defaultValue: '同步至官方标准配置' })}
-                                        </span>
-                                    </div>
-                                </div>
-
-                                {(() => {
-                                    const hasModels = models.length > 0;
-                                    const hasGpt = models.some(m => {
-                                        const lower = m.toLowerCase();
-                                        return lower.includes('gpt') || lower.includes('o1') || lower.includes('o3') || lower.includes('deepseek') || lower.includes('qwen');
-                                    });
-                                    const hasClaude = models.some(m => m.toLowerCase().includes('claude'));
-                                    
-                                    // 默认都显示，除非明确检测到只支持其中一种
-                                    const showCodex = !hasModels || hasGpt || (!hasGpt && !hasClaude);
-                                    const showClaude = !hasModels || hasClaude || (!hasGpt && !hasClaude);
-
-                                    return (
-                                        <div className="flex items-center gap-2 w-full sm:w-auto z-10 pl-11 sm:pl-0">
-                                            {showCodex && (
-                                                <button 
-                                                    onClick={() => handleSyncCli('Codex')}
-                                                    className="flex-1 sm:flex-none btn btn-sm px-5 font-medium rounded-full bg-blue-500 hover:bg-blue-600 text-white border-none shadow-md shadow-blue-500/20 transition-all group"
-                                                    disabled={!apiKey.trim()}
-                                                    title={t('apiKeyFun.cli.codexTooltip', { defaultValue: 'Sync API Key & BaseURL to Codex / ChatGPT CLI' })}
-                                                >
-                                                    <Code size={14} className="mr-1.5 opacity-90 group-hover:scale-110 group-hover:opacity-100 transition-all" />
-                                                    Codex
-                                                </button>
-                                            )}
-                                            {showClaude && (
-                                                <button 
-                                                    onClick={() => handleSyncCli('Claude')}
-                                                    className="flex-1 sm:flex-none btn btn-sm px-5 font-medium rounded-full bg-purple-500 hover:bg-purple-600 text-white border-none shadow-md shadow-purple-500/20 transition-all group"
-                                                    disabled={!apiKey.trim()}
-                                                    title={t('apiKeyFun.cli.claudeTooltip', { defaultValue: 'Sync API Key & BaseURL to Claude Code' })}
-                                                >
-                                                    <Cpu size={14} className="mr-1.5 opacity-90 group-hover:scale-110 group-hover:opacity-100 transition-all" />
-                                                    Claude
-                                                </button>
-                                            )}
-                                            {(() => {
-                                                const activeModels = getModelsForKey(apiKey, baseUrl);
-                                                const activeInfo = profileInfo(apiKey, baseUrl, activeModels);
-                                                const isCurrentKeySyncing = syncingKey === apiKey.trim();
-
-                                                return (
-                                                    <div className="flex items-center gap-1.5 flex-1 sm:flex-none">
-                                                        <button
-                                                            onClick={handleSyncOpenCode}
-                                                            role="checkbox"
-                                                            aria-checked={activeInfo.status === 'synced' ? true : activeInfo.status === 'partial' ? 'mixed' : false}
-                                                            aria-label={`OpenCode ${activeInfo.suffix}`}
-                                                            className={`btn btn-sm px-4 font-medium rounded-full border-none shadow-md transition-all group flex items-center gap-2 ${
-                                                                activeInfo.status === 'synced'
-                                                                    ? 'bg-teal-600 hover:bg-teal-700 text-white shadow-teal-600/20'
-                                                                    : activeInfo.status === 'partial'
-                                                                        ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20'
-                                                                        : 'bg-teal-500 hover:bg-teal-600 text-white shadow-teal-500/20'
-                                                            }`}
-                                                            disabled={!apiKey.trim() || !baseUrl.trim() || querying || Boolean(syncingKey)}
-                                                            title={
-                                                                activeInfo.status === 'synced'
-                                                                    ? t('apiKeyFun.opencode.syncedActiveTooltip', { defaultValue: 'OpenCode: profile is active and fully synced. Click to deactivate' })
-                                                                    : activeInfo.status === 'partial'
-                                                                        ? t('apiKeyFun.opencode.partialTooltip', { defaultValue: 'OpenCode: settings or models differ. Click to sync' })
-                                                                        : t('apiKeyFun.cli.opencodeTooltip', { defaultValue: 'Activate as separate profile in OpenCode' })
-                                                            }
-                                                        >
-                                                            {isCurrentKeySyncing ? (
-                                                                <RefreshCw size={13} className="animate-spin mr-0.5" />
-                                                            ) : activeInfo.status === 'synced' ? (
-                                                                <CheckSquare size={14} className="text-white shrink-0" />
-                                                            ) : activeInfo.status === 'partial' ? (
-                                                                <MinusSquare size={14} className="text-white shrink-0" />
-                                                            ) : (
-                                                                <Square size={14} className="text-white/70 shrink-0" />
-                                                            )}
-                                                            <CodeXml size={14} className="opacity-90 group-hover:scale-110 group-hover:opacity-100 transition-all" />
-                                                            <span>OpenCode</span>
-                                                            {activeInfo.suffix && (
-                                                                <span className="text-[10px] opacity-85 font-mono">
-                                                                    ({activeInfo.suffix})
-                                                                </span>
-                                                            )}
-                                                        </button>
-                                                    </div>
-                                                );
-                                            })()}
-                                        </div>
-                                    );
-                                })()}
-                            </div>
                         </div>
 
                         {queryError && (

@@ -950,58 +950,6 @@
         "thinking_retention_days_label": "思考ブロック保持日数（スライドウィンドウ）",
         "thinking_retention_days_desc": "デフォルト15日間のスライディングウィンドウ。"
       },
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "検出中...",
-          "installed": "インストール済み ({{version}})",
-          "not_installed": "未インストール",
-          "synced": "同期済み",
-          "not_synced": "未同期",
-          "current_base_url": "現在のベースURL"
-        },
-        "sync_accounts": "アカウント情報を antigravity-accounts.json に同期",
-        "btn_sync": "設定を同期",
-        "btn_view": "設定を表示",
-        "btn_restore": "復元",
-        "btn_restore_backup": "バックアップから復元",
-        "btn_clear": "設定をクリア",
-        "clear_confirm_title": "設定のクリアを確認",
-        "clear_confirm_message": "OpenCode の設定をクリアしてもよろしいですか？設定ファイルが削除されます。",
-        "toast": {
-          "config_missing": "APIキーを生成し、サービスを先に起動してください",
-          "sync_success": "OpenCode の設定を同期しました",
-          "sync_error": "OpenCode の同期に失敗しました: {{error}}",
-          "clear_success": "OpenCode の設定をクリアしました",
-          "clear_error": "OpenCode の設定クリアに失敗しました: {{error}}"
-        },
-        "modal": {
-          "view_title": "OpenCode 設定ビューアー",
-          "copy_success": "設定をコピーしました"
-        },
-        "sync_confirm_title": "同期の確認",
-        "sync_confirm_message": "現在のプロキシ設定に基づき、OpenCode の設定が上書きされます。続行しますか？",
-        "restore_confirm": "OpenCode をデフォルト設定に復元しますか？",
-        "restore_backup_confirm": "バックアップから OpenCode の設定を復元しますか？",
-        "modal_title": "Select OpenCode Models",
-        "select_models": "Select models to sync",
-        "auth_plugin_warning": "opencode-antigravity-auth プラグインを検出しました。同期では antigravity-manager provider のみ作成し、google provider/plugin は上書きしません。",
-        "btn_confirm_sync": "Confirm Sync",
-        "custom_base_url_label": "Custom Manager BaseURL",
-        "custom_base_url_desc": "For Docker Compose networking",
-        "custom_base_url_reset": "Reset"
-      },
-      "droid_sync": {
-        "modal_title": "Droid にモデルを追加",
-        "modal_desc": "選択したモデルは customModels として settings.json に書き込まれます",
-        "selected": "選択済み",
-        "btn_confirm_sync": "選択したモデルを追加",
-        "toast": {
-          "no_models_selected": "少なくとも1つのモデルを選択してください",
-          "sync_success_count": "{{count}} 個のモデルを Droid に追加しました",
-          "sync_error": "同期に失敗しました: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "思考予算制御 (Thinking Budget)",
         "description": "プロトコル間の推論パラメータを正規化し、GeminiおよびClaudeモデルの思考トークン予算と適応的動作を一元管理します。",
@@ -1107,50 +1055,6 @@
       "log_retention_storage_gb_desc": "上限に達すると自動的にスライディングウィンドウが作動し古いログを削除します。",
       "log_retention_current_usage": "現在のDB使用量",
       "log_retention_rows": "最大ログ行数"
-    },
-    "cloudflared": {
-      "title": "外部公開 (Cloudflared)",
-      "subtitle": "Cloudflare Tunnel を介してローカルサービスをインターネットに公開します",
-      "not_installed": "Cloudflared がインストールされていません",
-      "install_hint": "Cloudflared は Cloudflare の無料トンネルツールです。パブリック IP やポート開放なしで、ローカルプロキシをインターネットに公開できます。下のボタンをクリックしてインストールしてください。",
-      "install": "今すぐインストール",
-      "installing": "インストール中...",
-      "install_success": "Cloudflared のインストールに成功しました",
-      "install_failed": "インストールに失敗しました: {{error}}",
-      "installed": "インストール済み",
-      "version": "バージョン",
-      "mode_label": "トンネルモード",
-      "mode_quick": "クイックトンネル",
-      "mode_quick_desc": "自動生成された一時的な URL (*.trycloudflare.com) を使用します。アカウント不要ですが、再起動ごとに URL が変わります。",
-      "mode_auth": "名前付きトンネル",
-      "mode_auth_desc": "Cloudflare アカウントのトークンを使用します。カスタムドメインや固定 URL が利用可能です。",
-      "token": "トンネルトークン",
-      "token_placeholder": "Cloudflare トンネルトークンをここに貼り付けてください",
-      "token_hint": "Cloudflare Zero Trust ダッシュボードから取得してください",
-      "token_required": "名前付きトンネルモードではトークンが必須です",
-      "use_http2": "HTTP/2 を使用",
-      "use_http2_desc": "互換性が高く、中国本土などで推奨されます",
-      "status_label": "トンネルステータス",
-      "status_stopped": "停止中",
-      "status_starting": "開始中...",
-      "status_running": "実行中",
-      "status_stopping": "停止中...",
-      "status_error": "エラー",
-      "public_url": "公開 URL",
-      "public_url_placeholder": "トンネル開始後に公開 URL が表示されます",
-      "copy_url": "URL をコピー",
-      "url_copied": "URL をコピーしました",
-      "start_tunnel": "トンネルを開始",
-      "stop_tunnel": "トンネルを停止",
-      "running": "トンネル実行中",
-      "started": "トンネルを開始しました",
-      "stopped": "トンネルを停止しました",
-      "start_failed": "開始に失敗しました: {{error}}",
-      "stop_failed": "停止に失敗しました: {{error}}",
-      "require_proxy_running": "先にローカルプロキシサービスを起動してください",
-      "connection_info": "接続情報",
-      "local_port": "ローカルポート",
-      "tunnel_protocol": "トンネルプロトコル"
     },
     "example": {
       "title": "使用例",
@@ -1326,36 +1230,6 @@
       "model_id": "モデルID",
       "description": "説明",
       "action": "操作"
-    },
-    "cli_sync": {
-      "title": "Agentツール一括設定",
-      "subtitle": "現在の API エンドポイントとキーをローカルの AI Agent ツールに素早く同期します。",
-      "card_title": "{{name}} 設定",
-      "status": {
-        "not_installed": "未インストール",
-        "installed": "v{{version}}",
-        "synced": "同期済み",
-        "not_synced": "未同期",
-        "detecting": "検出中...",
-        "current_base_url": "現在のベースURL"
-      },
-      "model_select": "Select Model",
-      "btn_sync": "今すぐ同期",
-      "btn_view": "設定を表示",
-      "btn_restore": "デフォルトに戻す",
-      "btn_restore_backup": "バックアップを復元",
-      "restore_confirm": "{{name}} の設定を公式のデフォルトURLに復元してもよろしいですか？",
-      "restore_backup_confirm": "バックアップ設定が見つかりました。復元してもよろしいですか？",
-      "modal": {
-        "view_title": "{{name}} 設定ファイルの内容",
-        "copy_success": "設定内容をコピーしました"
-      },
-      "toast": {
-        "sync_success": "同期に成功しました！{{name}} の準備が整いました。",
-        "sync_error": "同期に失敗しました：{{error}}"
-      },
-      "sync_confirm_title": "同期の確認",
-      "sync_confirm_message": "{{name}} の設定を同期する準備ができました。⚠️ 注意：これにより、既存のローカル設定ファイル（ログイントークン、APIキーなど）が上書きされます。続行してもよろしいですか？"
     }
   },
   "monitor": {
@@ -1716,13 +1590,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "APIキーを貼り付け...",
     "queryButton": "更新",
-    "cli": {
-      "quickConfig": "ワンクリック開発環境設定",
-      "syncDesc": "公式標準設定に同期",
-      "codexTooltip": "Codexに同期",
-      "claudeTooltip": "Claude Codeに同期",
-      "opencodeTooltip": "API Key、BaseURL、モデルを OpenCode に同期"
-    },
     "models": {
       "title": "利用可能なモデル",
       "empty": "モデルリストがありません"

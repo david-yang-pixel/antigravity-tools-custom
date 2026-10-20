@@ -950,58 +950,6 @@
         "thinking_retention_days_label": "Thinking-store retention (sliding window, days)",
         "thinking_retention_days_desc": "Default is a 15-day sliding window. While the client session ID stays active, each request refreshes expiry; records are cleaned only after the window lapses with no requests."
       },
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "Detectando...",
-          "installed": "Instalado ({{version}})",
-          "not_installed": "No instalado",
-          "synced": "Sincronizado",
-          "not_synced": "No sincronizado",
-          "current_base_url": "Base URL actual"
-        },
-        "sync_accounts": "Sincronizar cuentas con antigravity-accounts.json",
-        "btn_sync": "Sincronizar configuración",
-        "btn_view": "Ver configuración",
-        "btn_restore": "Restaurar",
-        "btn_restore_backup": "Restaurar copia de seguridad",
-        "btn_clear": "Limpiar configuración",
-        "clear_confirm_title": "Confirmar limpieza de configuración",
-        "clear_confirm_message": "¿Está seguro de que desea limpiar la configuración de OpenCode? Esto eliminará el archivo de configuración.",
-        "toast": {
-          "config_missing": "Primero genere una API Key e inicie el servicio",
-          "sync_success": "Configuración de OpenCode sincronizada con éxito",
-          "sync_error": "Error al sincronizar OpenCode: {{error}}",
-          "clear_success": "Configuración de OpenCode limpiada con éxito",
-          "clear_error": "Error al limpiar la configuración de OpenCode: {{error}}"
-        },
-        "modal": {
-          "view_title": "Visor de configuración de OpenCode",
-          "copy_success": "Configuración copiada"
-        },
-        "sync_confirm_title": "Confirmar sincronización",
-        "sync_confirm_message": "La configuración de OpenCode se sobrescribirá según los ajustes de proxy actuales. ¿Continuar?",
-        "restore_confirm": "¿Está seguro de que desea restaurar OpenCode a la configuración predeterminada?",
-        "restore_backup_confirm": "¿Está seguro de que desea restaurar la configuración de OpenCode desde la copia de seguridad?",
-        "modal_title": "Seleccionar modelos de OpenCode",
-        "select_models": "Seleccionar modelos a sincronizar",
-        "auth_plugin_warning": "Se detectó el complemento opencode-antigravity-auth. La sincronización solo crea el proveedor antigravity-manager y no sobrescribirá el proveedor/complemento de Google.",
-        "btn_confirm_sync": "Confirmar sincronización",
-        "custom_base_url_label": "BaseURL personalizada de Manager",
-        "custom_base_url_desc": "Para redes Docker Compose",
-        "custom_base_url_reset": "Restablecer"
-      },
-      "droid_sync": {
-        "modal_title": "Agregar modelos a Droid",
-        "modal_desc": "Los modelos seleccionados se agregarán como customModels a settings.json",
-        "selected": "seleccionado(s)",
-        "btn_confirm_sync": "Agregar modelos seleccionados",
-        "toast": {
-          "no_models_selected": "Seleccione al menos un modelo",
-          "sync_success_count": "Se agregaron {{count}} modelo(s) a Droid",
-          "sync_error": "Error de sincronización: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "Thinking Budget Control",
         "description": "Normalize cross-protocol reasoning parameters and centrally manage thinking token budgets and adaptive behaviors for Gemini and Claude models.",
@@ -1107,50 +1055,6 @@
       "log_retention_storage_gb_desc": "When reaching limit, sliding window evicts oldest 30% logs to accommodate new entries",
       "log_retention_current_usage": "Current database disk usage",
       "log_retention_rows": "Maximum log rows"
-    },
-    "cloudflared": {
-      "title": "Acceso Público (Cloudflared)",
-      "subtitle": "Exponga su servicio local a internet a través de Cloudflare Tunnel",
-      "not_installed": "Cloudflared no instalado",
-      "install_hint": "Cloudflared es una herramienta de túnel gratuita de Cloudflare. Expone su proxy local a internet sin una IP pública o reenvío de puertos. Haga clic en el botón de abajo para instalar.",
-      "install": "Instalar Ahora",
-      "installing": "Instalando...",
-      "install_success": "Cloudflared instalado exitosamente",
-      "install_failed": "Instalación fallida: {{error}}",
-      "installed": "Instalado",
-      "version": "Versión",
-      "mode_label": "Modo de Túnel",
-      "mode_quick": "Túnel Rápido",
-      "mode_quick_desc": "URL temporal auto-generada (*.trycloudflare.com), no requiere cuenta, la URL cambia al reiniciar",
-      "mode_auth": "Túnel con Nombre",
-      "mode_auth_desc": "Usar token de cuenta Cloudflare, soporta dominio personalizado, URL persistente",
-      "token": "Token del Túnel",
-      "token_placeholder": "Pegue su Token de Túnel de Cloudflare aquí",
-      "token_hint": "Obtener del panel de Cloudflare Zero Trust",
-      "token_required": "Se requiere Token para el modo Túnel con Nombre",
-      "use_http2": "Usar HTTP/2",
-      "use_http2_desc": "Más compatible, recomendado para China continental",
-      "status_label": "Estado del Túnel",
-      "status_stopped": "Detenido",
-      "status_starting": "Iniciando...",
-      "status_running": "Activo",
-      "status_stopping": "Deteniendo...",
-      "status_error": "Error",
-      "public_url": "URL Pública",
-      "public_url_placeholder": "La URL pública aparecerá aquí después de iniciar el túnel",
-      "copy_url": "Copiar URL",
-      "url_copied": "URL copiada",
-      "start_tunnel": "Iniciar Túnel",
-      "stop_tunnel": "Detener Túnel",
-      "running": "Túnel Activo",
-      "started": "Túnel iniciado",
-      "stopped": "Túnel detenido",
-      "start_failed": "Error al iniciar: {{error}}",
-      "stop_failed": "Error al detener: {{error}}",
-      "require_proxy_running": "Por favor inicie el servicio de proxy local primero",
-      "connection_info": "Información de Conexión",
-      "local_port": "Puerto Local",
-      "tunnel_protocol": "Protocolo del Túnel"
     },
     "example": {
       "title": "Ejemplos de Uso",
@@ -1326,36 +1230,6 @@
       "model_id": "ID del Modelo",
       "description": "Descripción",
       "action": "Acción"
-    },
-    "cli_sync": {
-      "title": "Configuración Rápida de Herramientas de Agent",
-      "subtitle": "Sincronice rápidamente endpoints API actuales y claves a sus herramientas AI Agent locales.",
-      "card_title": "Configuración de {{name}}",
-      "status": {
-        "not_installed": "No detectado",
-        "installed": "v{{version}}",
-        "synced": "Apuntando a esta app",
-        "not_synced": "No sincronizado",
-        "detecting": "Detectando...",
-        "current_base_url": "URL Base Actual"
-      },
-      "model_select": "Seleccionar modelo",
-      "btn_sync": "Sincronizar Config Ahora",
-      "btn_view": "Ver Config",
-      "btn_restore": "Restaurar Predeterminados",
-      "btn_restore_backup": "Restaurar Respaldo",
-      "restore_confirm": "¿Está seguro de que desea restaurar la configuración de {{name}} a la URL predeterminada oficial?",
-      "restore_backup_confirm": "Se encontró configuración de respaldo. ¿Está seguro de que desea restaurarla?",
-      "modal": {
-        "view_title": "Contenido de Configuración de {{name}}",
-        "copy_success": "Contenido de configuración copiado"
-      },
-      "toast": {
-        "sync_success": "¡Sincronización exitosa! {{name}} está listo.",
-        "sync_error": "Error de sincronización: {{error}}"
-      },
-      "sync_confirm_title": "Confirmación de Sincronización",
-      "sync_confirm_message": "Listo para sincronizar configuración de {{name}}. ⚠️ Advertencia: Esto sobrescribirá sus archivos de configuración locales existentes (ej. tokens de inicio de sesión, Claves API). ¿Está seguro de que desea continuar?"
     }
   },
   "monitor": {
@@ -1716,13 +1590,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "Pegue su API Key...",
     "queryButton": "Actualizar",
-    "cli": {
-      "quickConfig": "Configuración local en un clic",
-      "syncDesc": "Sincronizar con la configuración estándar oficial",
-      "codexTooltip": "Sync API Key & BaseURL to Antigravity Codex",
-      "claudeTooltip": "Sincronizar API Key y BaseURL con Claude Code",
-      "opencodeTooltip": "Sincronizar API Key, BaseURL y modelos con OpenCode"
-    },
     "models": {
       "title": "Modelos disponibles",
       "empty": "No se devolvieron modelos para la API Key actual."

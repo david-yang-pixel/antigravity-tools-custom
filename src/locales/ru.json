@@ -950,58 +950,6 @@
         "thinking_retention_days_label": "Thinking-store retention (sliding window, days)",
         "thinking_retention_days_desc": "Default is a 15-day sliding window. While the client session ID stays active, each request refreshes expiry; records are cleaned only after the window lapses with no requests."
       },
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "Обнаружение...",
-          "installed": "Установлено ({{version}})",
-          "not_installed": "Не установлено",
-          "synced": "Синхронизировано",
-          "not_synced": "Не синхронизировано",
-          "current_base_url": "Текущий Base URL"
-        },
-        "sync_accounts": "Синхронизировать аккаунты в antigravity-accounts.json",
-        "btn_sync": "Синхронизировать конфигурацию",
-        "btn_view": "Просмотреть конфигурацию",
-        "btn_restore": "Восстановить",
-        "btn_restore_backup": "Восстановить из резервной копии",
-        "btn_clear": "Очистить конфигурацию",
-        "clear_confirm_title": "Подтверждение очистки конфигурации",
-        "clear_confirm_message": "Вы уверены, что хотите очистить конфигурацию OpenCode? Это приведет к удалению файла настроек.",
-        "toast": {
-          "config_missing": "Сначала сгенерируйте API-ключ и запустите службу",
-          "sync_success": "Конфигурация OpenCode успешно синхронизирована",
-          "sync_error": "Ошибка синхронизации OpenCode: {{error}}",
-          "clear_success": "Конфигурация OpenCode успешно очищена",
-          "clear_error": "Не удалось очистить конфигурацию OpenCode: {{error}}"
-        },
-        "modal": {
-          "view_title": "Просмотр конфигурации OpenCode",
-          "copy_success": "Конфигурация скопирована"
-        },
-        "sync_confirm_title": "Подтверждение синхронизации",
-        "sync_confirm_message": "Конфигурация OpenCode будет перезаписана на основе текущих настроек прокси. Продолжить?",
-        "restore_confirm": "Вы уверены, что хотите восстановить настройки OpenCode по умолчанию?",
-        "restore_backup_confirm": "Вы уверены, что хотите восстановить конфигурацию OpenCode из резервной копии?",
-        "modal_title": "Выбор моделей OpenCode",
-        "select_models": "Выберите модели для синхронизации",
-        "auth_plugin_warning": "Обнаружен плагин opencode-antigravity-auth. Синхронизация создаст только провайдера antigravity-manager и не перезапишет плагин/провайдера google.",
-        "btn_confirm_sync": "Подтвердить синхронизацию",
-        "custom_base_url_label": "Пользовательский BaseURL менеджера",
-        "custom_base_url_desc": "Для сетевого взаимодействия в Docker Compose",
-        "custom_base_url_reset": "Сбросить"
-      },
-      "droid_sync": {
-        "modal_title": "Добавить модели в Droid",
-        "modal_desc": "Выбранные модели будут добавлены как customModels в settings.json",
-        "selected": "выбрано",
-        "btn_confirm_sync": "Добавить выбранные модели",
-        "toast": {
-          "no_models_selected": "Пожалуйста, выберите хотя бы одну модель",
-          "sync_success_count": "В Droid добавлено моделей: {{count}}",
-          "sync_error": "Ошибка синхронизации: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "Thinking Budget Control",
         "description": "Normalize cross-protocol reasoning parameters and centrally manage thinking token budgets and adaptive behaviors for Gemini and Claude models.",
@@ -1107,50 +1055,6 @@
       "log_retention_storage_gb_desc": "When reaching limit, sliding window evicts oldest 30% logs to accommodate new entries",
       "log_retention_current_usage": "Current database disk usage",
       "log_retention_rows": "Maximum log rows"
-    },
-    "cloudflared": {
-      "title": "Публичный доступ (Cloudflared)",
-      "subtitle": "Предоставьте доступ к локальному сервису через интернет с помощью Cloudflare Tunnel",
-      "not_installed": "Cloudflared не установлен",
-      "install_hint": "Cloudflared — это бесплатный инструмент туннелирования от Cloudflare. Он предоставляет доступ к вашему локальному прокси через интернет без публичного IP или проброса портов. Нажмите кнопку ниже для установки.",
-      "install": "Установить сейчас",
-      "installing": "Установка...",
-      "install_success": "Cloudflared успешно установлен",
-      "install_failed": "Ошибка установки: {{error}}",
-      "installed": "Установлен",
-      "version": "Версия",
-      "mode_label": "Режим туннеля",
-      "mode_quick": "Быстрый туннель",
-      "mode_quick_desc": "Автоматически сгенерированный временный URL (*.trycloudflare.com), аккаунт не требуется, URL меняется при перезапуске",
-      "mode_auth": "Именованный туннель",
-      "mode_auth_desc": "Используйте токен аккаунта Cloudflare, поддержка пользовательского домена, постоянный URL",
-      "token": "Токен туннеля",
-      "token_placeholder": "Вставьте ваш Cloudflare Tunnel Token сюда",
-      "token_hint": "Получите в панели Cloudflare Zero Trust",
-      "token_required": "Токен требуется для режима Именованного туннеля",
-      "use_http2": "Использовать HTTP/2",
-      "use_http2_desc": "Более совместимо, рекомендуется для материкового Китая",
-      "status_label": "Статус туннеля",
-      "status_stopped": "Остановлен",
-      "status_starting": "Запуск...",
-      "status_running": "Работает",
-      "status_stopping": "Остановка...",
-      "status_error": "Ошибка",
-      "public_url": "Публичный URL",
-      "public_url_placeholder": "Публичный URL появится здесь после запуска туннеля",
-      "copy_url": "Копировать URL",
-      "url_copied": "URL скопирован",
-      "start_tunnel": "Запустить туннель",
-      "stop_tunnel": "Остановить туннель",
-      "running": "Туннель работает",
-      "started": "Туннель запущен",
-      "stopped": "Туннель остановлен",
-      "start_failed": "Не удалось запустить туннель: {{error}}",
-      "stop_failed": "Не удалось остановить туннель: {{error}}",
-      "require_proxy_running": "Сначала запустите локальную службу прокси",
-      "connection_info": "Сведения о подключении",
-      "local_port": "Локальный порт",
-      "tunnel_protocol": "Протокол туннеля"
     },
     "example": {
       "title": "Примеры использования",
@@ -1326,104 +1230,6 @@
       "model_id": "ID модели",
       "description": "Описание",
       "action": "Действие"
-    },
-    "cli_sync": {
-      "title": "Быстрая настройка инструментов Agent",
-      "subtitle": "Синхронизируйте текущий API URL и ключ с вашими локальными AI Agent инструментами",
-      "card_title": "Конфиг {{name}}",
-      "status": {
-        "not_installed": "Не установлено",
-        "installed": "v{{version}}",
-        "synced": "Указывает на это приложение",
-        "not_synced": "Не синхронизировано",
-        "detecting": "Определение...",
-        "current_base_url": "Текущий Base URL"
-      },
-      "model_select": "Выбор модели",
-      "btn_sync": "Синхронизировать",
-      "btn_view": "Просмотр конфига",
-      "btn_restore": "Восстановить",
-      "btn_restore_backup": "Восстановить резервную копию",
-      "restore_confirm": "Вы уверены, что хотите сбросить конфиг {{name}} на значения по умолчанию?",
-      "restore_backup_confirm": "Обнаружена резервная копия конфигурации. Вы уверены, что хотите восстановить ее?",
-      "modal": {
-        "view_title": "Содержимое конфига {{name}}",
-        "copy_success": "Скопировано в буфер обмена"
-      },
-      "toast": {
-        "sync_success": "Успешно! {{name}} готов к работе.",
-        "sync_error": "Ошибка синхронизации: {{error}}"
-      },
-      "sync_confirm_title": "Подтверждение синхронизации",
-      "sync_confirm_message": "Готово к синхронизации конфигурации {{name}}. ⚠️ Внимание: это перезапишет ваши существующие локальные файлы конфигурации (например, токены входа, API ключи). Вы уверены, что хотите продолжить?"
-    },
-    "hermes_sync": {
-      "modal_title": "Настройка Antigravity Manager в Hermes",
-      "endpoint_title": "Адрес подключения",
-      "local_endpoint": "Локальный прокси",
-      "custom_endpoint": "Другой адрес",
-      "custom_endpoint_desc": "Docker, LAN или reverse proxy",
-      "url_required": "Укажите адрес подключения Hermes",
-      "models_title": "Модели, доступные в Hermes",
-      "discover_models": "Обнаруживать автоматически",
-      "discover_models_desc": "Hermes получает актуальный список моделей через /v1/models",
-      "selected_models": "Только выбранные модели",
-      "models_required": "Выберите хотя бы одну модель",
-      "activate_provider": "Сделать Antigravity Manager провайдером Hermes по умолчанию",
-      "activate_provider_desc": "По умолчанию выключено, чтобы не менять текущего провайдера Hermes.",
-      "default_model": "Модель по умолчанию",
-      "select_default_model": "Выберите модель",
-      "default_model_required": "Выберите модель по умолчанию",
-      "default_model_invalid": "Выберите модель, доступную через Antigravity Manager",
-      "currently_active": "Сейчас активен в Hermes",
-      "btn_confirm_sync": "Сохранить в Hermes",
-      "btn_view": "Просмотреть конфиг",
-      "btn_restore": "Восстановить",
-      "btn_clear": "Удалить",
-      "clear_confirm_title": "Удалить конфигурацию Hermes",
-      "clear_confirm_message": "Провайдер Antigravity Manager будет удалён из Hermes. Продолжить?",
-      "toast": {
-        "sync_success": "Конфигурация Hermes успешно сохранена",
-        "clear_success": "Конфигурация Hermes успешно удалена",
-        "clear_error": "Не удалось удалить конфигурацию Hermes: {{error}}"
-      }
-    },
-    "openclaw_sync": {
-      "modal_title": "Настройка Antigravity Manager в OpenClaw",
-      "version_title": "Спецификация версии OpenClaw SDK",
-      "detected_hint": "Обнаружено окружение: {{target}}",
-      "v2_label": "≥ 2026.8.1 (v2.0 Спецификация)",
-      "v2_desc": "Использует белый список modelPolicy.allow и структуру entries с нативной поддержкой изображений и инструментов",
-      "v1_label": "< 2026.8.1 (v1.0 Спецификация)",
-      "v1_desc": "Использует словарь agents.defaults.models, полностью совместимо с 2026.7 и старыми SDK",
-      "endpoint_title": "Адрес подключения (Base URL)",
-      "local_endpoint": "Локальный прокси",
-      "custom_endpoint": "Другой адрес",
-      "custom_endpoint_desc": "Docker, LAN или reverse proxy",
-      "url_required": "Укажите адрес подключения OpenClaw",
-      "models_title": "Модели, доступные в OpenClaw",
-      "all_models": "Синхронизировать все",
-      "all_models_desc": "Синхронизировать все доступные модели ({{count}})",
-      "selected_models": "Выбранные модели",
-      "models_required": "Выберите хотя бы одну модель",
-      "activate_provider": "Сделать основной моделью OpenClaw (Primary)",
-      "activate_provider_desc": "Автоматически обновит agents.defaults.model.primary",
-      "default_model": "Модель по умолчанию",
-      "select_default_model": "Выберите модель",
-      "default_model_required": "Выберите модель по умолчанию",
-      "currently_active": "Сейчас активна как основная модель",
-      "btn_sync_v1": "Синхронизация (< 2026.8.1 v1.0)",
-      "btn_sync_v2": "Синхронизация (≥ 2026.8.1 v2.0)",
-      "btn_view": "Просмотреть конфиг",
-      "btn_restore": "Восстановить",
-      "btn_clear": "Удалить",
-      "clear_confirm_title": "Удалить конфигурацию OpenClaw",
-      "clear_confirm_message": "Провайдер Antigravity Manager и списки моделей будут удалены из OpenClaw. Продолжить?",
-      "toast": {
-        "sync_success": "Конфигурация OpenClaw ({{version}}) успешно сохранена",
-        "clear_success": "Конфигурация OpenClaw успешно удалена",
-        "clear_error": "Не удалось удалить конфигурацию OpenClaw: {{error}}"
-      }
     }
   },
   "monitor": {
@@ -1784,13 +1590,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "Вставьте API-ключ...",
     "queryButton": "Обновить",
-    "cli": {
-      "quickConfig": "Быстрая настройка окружения",
-      "syncDesc": "Синхронизация со стандартной конфигурацией",
-      "codexTooltip": "Синхронизировать API Key и BaseURL с Codex / ChatGPT CLI",
-      "claudeTooltip": "Синхронизировать API Key и BaseURL с Claude Code",
-      "opencodeTooltip": "Синхронизировать API Key, BaseURL и модели в OpenCode"
-    },
     "models": {
       "title": "Доступные модели",
       "empty": "Введите ключ и нажмите «Обновить», чтобы загрузить список моделей.",
@@ -1800,22 +1599,7 @@
       "parseFormat": "Ошибка формата ответа: {{err}}",
       "fetchFailed": "Ошибка запроса: {{err}}",
       "queryFailed": "Не удалось получить данные о балансе или моделях. Проверьте правильность ключа и адреса."
-    },
-    "opencode": {
-      "modelsRequired": "Обновите данные ключа, чтобы загрузить модели перед активацией профиля OpenCode.",
-      "active": "Активен",
-      "modified": "Изменен",
-      "inactive": "Нет профиля",
-      "syncedToast": "Синхронизировано с OpenCode: {{name}}",
-      "removedToast": "Удалено из OpenCode: {{name}}",
-      "clickToRemove": "OpenCode профиль активен и синхронизирован. Кликните для отключения",
-      "clickToUpdate": "Есть отличия в настройках. Кликните для обновления",
-      "clickToActivate": "Кликните для создания отдельного профиля в OpenCode",
-      "syncedActiveTooltip": "OpenCode: профиль активен и полностью синхронизирован. Кликните, чтобы отключить",
-      "partialTooltip": "OpenCode: настройки или модели отличаются. Кликните для синхронизации"
-    },
-    "syncSuccess": "Успешно синхронизировано с {{app}}",
-    "syncError": "Ошибка синхронизации: {{error}}"
+    }
   },
   "suggestion_delete_thinking": {
     "title": "Рекомендация по обновлению",

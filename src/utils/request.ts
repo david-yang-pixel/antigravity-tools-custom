@@ -66,37 +66,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_debug_console_logs': { url: '/api/debug/logs', method: 'GET' },
   'clear_debug_console_logs': { url: '/api/debug/logs/clear', method: 'POST' },
 
-  // CLI Sync
-  'get_cli_sync_status': { url: '/api/proxy/cli/status', method: 'POST' },
-  'execute_cli_sync': { url: '/api/proxy/cli/sync', method: 'POST' },
-  'execute_cli_restore': { url: '/api/proxy/cli/restore', method: 'POST' },
-  'get_cli_config_content': { url: '/api/proxy/cli/config', method: 'POST' },
-
-  // OpenCode Sync
-  'get_opencode_sync_status': { url: '/api/proxy/opencode/status', method: 'POST' },
-  'get_opencode_providers': { url: '/api/proxy/opencode/providers', method: 'GET' },
-  'execute_opencode_sync': { url: '/api/proxy/opencode/sync', method: 'POST' },
-  'execute_opencode_openai_sync': { url: '/api/proxy/opencode/openai-sync', method: 'POST' },
-  'execute_opencode_remove_provider': { url: '/api/proxy/opencode/remove-provider', method: 'POST' },
-  'execute_opencode_restore': { url: '/api/proxy/opencode/restore', method: 'POST' },
-  'execute_opencode_clear': { url: '/api/proxy/opencode/clear', method: 'POST' },
-  'get_opencode_config_content': { url: '/api/proxy/opencode/config', method: 'POST' },
-  'get_canonical_families': { url: '/api/proxy/opencode/families', method: 'GET' },
-
-  // Hermes Agent provider and model configuration
-  'get_hermes_sync_status': { url: '/api/proxy/hermes/status', method: 'POST' },
-  'execute_hermes_sync': { url: '/api/proxy/hermes/sync', method: 'POST' },
-  'execute_hermes_restore': { url: '/api/proxy/hermes/restore', method: 'POST' },
-  'execute_hermes_clear': { url: '/api/proxy/hermes/clear', method: 'POST' },
-  'get_hermes_config_content': { url: '/api/proxy/hermes/config', method: 'POST' },
-
-  // OpenClaw provider and model configuration (supports v1.0 and v2.0)
-  'get_openclaw_sync_status': { url: '/api/proxy/openclaw/status', method: 'POST' },
-  'execute_openclaw_sync': { url: '/api/proxy/openclaw/sync', method: 'POST' },
-  'execute_openclaw_restore': { url: '/api/proxy/openclaw/restore', method: 'POST' },
-  'execute_openclaw_clear': { url: '/api/proxy/openclaw/clear', method: 'POST' },
-  'get_openclaw_config_content': { url: '/api/proxy/openclaw/config', method: 'POST' },
-
   // Stats
   'get_token_stats_hourly': { url: '/api/stats/token/hourly', method: 'GET' },
   'get_token_stats_daily': { url: '/api/stats/token/daily', method: 'GET' },
@@ -124,11 +93,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_antigravity_path': { url: '/api/system/antigravity/path', method: 'GET' },
   'get_antigravity_args': { url: '/api/system/antigravity/args', method: 'GET' },
 
-  // Cloudflared
-  'cloudflared_install': { url: '/api/proxy/cloudflared/install', method: 'POST' },
-  'cloudflared_start': { url: '/api/proxy/cloudflared/start', method: 'POST' },
-  'cloudflared_stop': { url: '/api/proxy/cloudflared/stop', method: 'POST' },
-  'cloudflared_get_status': { url: '/api/proxy/cloudflared/status', method: 'GET' },
 
   // Updates
   'should_check_updates': { url: '/api/system/updates/check-status', method: 'GET' },

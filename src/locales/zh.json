@@ -24,7 +24,6 @@
     "error_order_not_found": "未找到这笔订单，请刷新充值记录。",
     "error_payment_timeout": "支付请求超时，订单可能已创建。请关闭弹窗，在待支付订单中查看并继续支付。",
     "error_payment_check_failed": "暂时无法确认订单的支付状态，请稍后再试。",
-
     "button": "充值",
     "hint": "在线付款后余额即时到账，最低 {{min}}。",
     "orders": "充值记录",
@@ -1328,58 +1327,6 @@
         "thinking_retention_days_label": "思考块保留天数（滑动窗口）",
         "thinking_retention_days_desc": "默认 15 天滑动窗口。只要客户端 sessionID 仍在活跃窗口内，每次请求都会自动刷新过期时间；超过窗口没有请求后才会清理。"
       },
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "检测中...",
-          "installed": "已安装 ({{version}})",
-          "not_installed": "未安装",
-          "synced": "已同步",
-          "not_synced": "未同步",
-          "current_base_url": "当前接口地址 (BASE URL)"
-        },
-        "sync_accounts": "同步账号到 antigravity-accounts.json",
-        "btn_sync": "立即同步配置",
-        "btn_view": "查看配置",
-        "btn_restore": "还原配置",
-        "btn_restore_backup": "从备份还原",
-        "btn_clear": "清除配置",
-        "clear_confirm_title": "确认清除配置",
-        "clear_confirm_message": "确定要清除 OpenCode 配置吗？这将删除配置文件。",
-        "toast": {
-          "config_missing": "请先生成 API Key 并启动服务",
-          "sync_success": "OpenCode 配置同步成功",
-          "sync_error": "OpenCode 同步失败: {{error}}",
-          "clear_success": "OpenCode 配置已清除",
-          "clear_error": "清除 OpenCode 配置失败: {{error}}"
-        },
-        "modal": {
-          "view_title": "OpenCode 配置文件预览",
-          "copy_success": "配置已复制"
-        },
-        "sync_confirm_title": "确认同步",
-        "sync_confirm_message": "将根据当前反代设置覆盖 OpenCode 配置。确定继续？",
-        "restore_confirm": "确定要将 OpenCode 还原为默认配置吗？",
-        "restore_backup_confirm": "确定要从备份还原 OpenCode 配置吗？",
-        "modal_title": "选择 OpenCode 模型",
-        "select_models": "选择要同步的模型",
-        "auth_plugin_warning": "检测到 opencode-antigravity-auth 插件。同步仅会创建 antigravity-manager provider，不会覆盖 google provider/plugin。",
-        "btn_confirm_sync": "确认同步",
-        "custom_base_url_label": "自定义 Manager BaseURL",
-        "custom_base_url_desc": "适用于 Docker Compose 网络环境",
-        "custom_base_url_reset": "重置"
-      },
-      "droid_sync": {
-        "modal_title": "添加模型到 Droid",
-        "modal_desc": "选中的模型将作为 customModels 写入 settings.json",
-        "selected": "已选",
-        "btn_confirm_sync": "添加所选模型",
-        "toast": {
-          "no_models_selected": "请至少选择一个模型",
-          "sync_success_count": "已添加 {{count}} 个模型到 Droid",
-          "sync_error": "同步失败: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "思考链预算控制 (Thinking Budget)",
         "description": "跨协议归一化思考参数，统一调控 Gemini 与 Claude 模型的深度思考 Token 预算及自适应行为。",
@@ -1485,50 +1432,6 @@
       "agent_settings": {
         "title": "特定 Agent 配置 (Specific Agent Settings)"
       }
-    },
-    "cloudflared": {
-      "title": "公网访问 (Cloudflared)",
-      "subtitle": "通过 Cloudflare 隧道将本地服务暴露到公网",
-      "not_installed": "Cloudflared 未安装",
-      "install_hint": "Cloudflared 是 Cloudflare 提供的免费隧道工具,可将本地反代服务暴露到公网,无需公网IP或端口映射。点击下方按钮一键下载安装。",
-      "install": "一键安装",
-      "installing": "安装中...",
-      "install_success": "Cloudflared 安装成功",
-      "install_failed": "安装失败: {{error}}",
-      "installed": "已安装",
-      "version": "版本",
-      "mode_label": "隧道模式",
-      "mode_quick": "快速隧道",
-      "mode_quick_desc": "自动生成临时 URL (*.trycloudflare.com),无需账号,重启后URL会变化",
-      "mode_auth": "命名隧道",
-      "mode_auth_desc": "使用 Cloudflare 账号 Token,支持自定义域名,URL固定不变",
-      "token": "隧道 Token",
-      "token_placeholder": "粘贴您的 Cloudflare Tunnel Token",
-      "token_hint": "从 Cloudflare Zero Trust 控制台获取",
-      "token_required": "命名隧道模式需要提供 Token",
-      "use_http2": "使用 HTTP/2",
-      "use_http2_desc": "兼容性更好,推荐中国大陆用户开启",
-      "status_label": "隧道状态",
-      "status_stopped": "未运行",
-      "status_starting": "启动中...",
-      "status_running": "运行中",
-      "status_stopping": "停止中...",
-      "status_error": "错误",
-      "public_url": "公网地址",
-      "public_url_placeholder": "隧道启动后将显示公网访问地址",
-      "copy_url": "复制地址",
-      "url_copied": "地址已复制",
-      "start_tunnel": "启动隧道",
-      "stop_tunnel": "停止隧道",
-      "running": "隧道运行中",
-      "started": "隧道已启动",
-      "stopped": "隧道已停止",
-      "start_failed": "启动失败: {{error}}",
-      "stop_failed": "停止失败: {{error}}",
-      "require_proxy_running": "请先启动本地反代服务,再开启隧道",
-      "connection_info": "连接信息",
-      "local_port": "本地端口",
-      "tunnel_protocol": "隧道协议"
     },
     "example": {
       "title": "使用示例",
@@ -1707,112 +1610,6 @@
       "model_id": "模型 ID",
       "description": "描述",
       "action": "操作"
-    },
-    "cli_sync": {
-      "title": "Agent工具一键配置",
-      "subtitle": "快速将当前 API 服务地址与 API 密钥同步到本地 AI Agent 工具中",
-      "card_title": "{{name}} 配置",
-      "jeikcode_recommended": "推荐使用",
-      "jeikcode_badge": "Best Matched",
-      "jeikcode_author": "by Jeikl",
-      "jeikcode_tagline": "核心维护者深度打造 · 原生网关最佳兼容",
-      "jeikcode_tag_cache": "95%+ 恐怖缓存",
-      "jeikcode_tag_codegraph": "代码图谱",
-      "jeikcode_tag_surpass": "超越 CC / Codex",
-      "jeikcode_tag_custom": "自由定制",
-      "status": {
-        "not_installed": "未检测到安装",
-        "installed": "v{{version}}",
-        "synced": "已指向本项目",
-        "not_synced": "未同步",
-        "detecting": "检测中...",
-        "current_base_url": "当前接口地址 (Base URL)"
-      },
-      "model_select": "选择同步模型",
-      "btn_sync": "立即同步配置",
-      "btn_view": "查看当前配置",
-      "btn_restore": "恢复默认配置",
-      "btn_restore_backup": "恢复原有配置",
-      "restore_confirm": "确定要将 {{name}} 的配置恢复为官方默认地址吗？",
-      "restore_backup_confirm": "检测到旧的配置文件备份，确定要还原吗？",
-      "modal": {
-        "view_title": "{{name}} 配置文件内容",
-        "copy_success": "配置内容已复制"
-      },
-      "toast": {
-        "sync_success": "同步成功！{{name}} 已准备就绪。",
-        "sync_error": "同步失败：{{error}}"
-      },
-      "sync_confirm_title": "同步确认",
-      "sync_confirm_message": "即将为您同步 {{name}} 的配置。⚠️ 注意：此操作将覆盖您本地已有的配置文件（如登录状态、API Key 等）。确定要继续吗？"
-    },
-    "hermes_sync": {
-      "modal_title": "在 Hermes 中配置 Antigravity Manager",
-      "endpoint_title": "连接地址",
-      "local_endpoint": "本地代理",
-      "custom_endpoint": "自定义地址",
-      "custom_endpoint_desc": "Docker、局域网或反向代理",
-      "url_required": "请输入 Hermes 连接地址",
-      "models_title": "Hermes 中可用的模型",
-      "discover_models": "自动发现",
-      "discover_models_desc": "Hermes 通过 /v1/models 获取实时模型列表",
-      "selected_models": "仅使用选中的模型",
-      "models_required": "请至少选择一个模型",
-      "activate_provider": "将 Antigravity Manager 设为 Hermes 默认提供商",
-      "activate_provider_desc": "默认关闭，以避免更改当前的 Hermes 提供商。",
-      "default_model": "默认模型",
-      "select_default_model": "选择模型",
-      "default_model_required": "请选择默认模型",
-      "default_model_invalid": "请选择 Antigravity Manager 提供的可用模型",
-      "currently_active": "当前已在 Hermes 中启用",
-      "btn_confirm_sync": "保存到 Hermes",
-      "btn_view": "查看配置",
-      "btn_restore": "恢复",
-      "btn_clear": "清除",
-      "clear_confirm_title": "清除 Hermes 配置",
-      "clear_confirm_message": "此操作将从 Hermes 中移除 Antigravity Manager 提供商。确定要继续吗？",
-      "toast": {
-        "sync_success": "Hermes 配置同步成功",
-        "clear_success": "Hermes 配置已成功清除",
-        "clear_error": "清除 Hermes 配置失败：{{error}}"
-      }
-    },
-    "openclaw_sync": {
-      "modal_title": "在 OpenClaw 中配置 Antigravity Manager",
-      "version_title": "OpenClaw SDK 版本规范",
-      "detected_hint": "环境已检测: {{target}}",
-      "v2_label": "≥ 2026.8.1 (v2.0 规范)",
-      "v2_desc": "采用 modelPolicy.allow 白名单规范与 entries 架构，原生支持图像/工具多模态",
-      "v1_label": "< 2026.8.1 (v1.0 规范)",
-      "v1_desc": "采用 agents.defaults.models 显式模型字典注册，全面兼容 2026.7 及更早 SDK",
-      "endpoint_title": "连接地址 (Base URL)",
-      "local_endpoint": "本地代理",
-      "custom_endpoint": "自定义地址",
-      "custom_endpoint_desc": "Docker、局域网或反向代理",
-      "url_required": "请输入 OpenClaw 连接地址",
-      "models_title": "同步到 OpenClaw 的模型",
-      "all_models": "全部同步",
-      "all_models_desc": "同步当前全部 {{count}} 个可用模型",
-      "selected_models": "部分挑选",
-      "models_required": "请至少选择一个模型",
-      "activate_provider": "设为 OpenClaw 默认主要模型 (Primary)",
-      "activate_provider_desc": "勾选后将自动更新 agents.defaults.model.primary",
-      "default_model": "默认模型",
-      "select_default_model": "选择模型",
-      "default_model_required": "请选择默认模型",
-      "currently_active": "当前已激活为主模型",
-      "btn_sync_v1": "同步 (< 2026.8.1 v1.0)",
-      "btn_sync_v2": "同步 (≥ 2026.8.1 v2.0)",
-      "btn_view": "查看配置",
-      "btn_restore": "恢复",
-      "btn_clear": "清除",
-      "clear_confirm_title": "清除 OpenClaw 配置",
-      "clear_confirm_message": "此操作将从 OpenClaw 中移除 Antigravity Manager 提供商及模型白名单。确定要继续吗？",
-      "toast": {
-        "sync_success": "OpenClaw ({{version}}) 配置同步成功",
-        "clear_success": "OpenClaw 配置已成功清除",
-        "clear_error": "清除 OpenClaw 配置失败：{{error}}"
-      }
     },
     "error": {
       "load_failed": "加载失败"
@@ -2255,13 +2052,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "粘贴你的 API Key...",
     "queryButton": "刷新",
-    "cli": {
-      "quickConfig": "一键配置本地开发环境",
-      "syncDesc": "同步至官方标准配置",
-      "codexTooltip": "将 API Key 与 BaseURL 同步至 Codex / ChatGPT CLI",
-      "claudeTooltip": "将 API Key 与 BaseURL 同步至 Claude Code",
-      "opencodeTooltip": "将 API Key、BaseURL 和模型同步至 OpenCode"
-    },
     "models": {
       "title": "可用模型",
       "empty": "输入 API Key 并查询以获取可用模型列表。",
@@ -2271,22 +2061,7 @@
       "parseFormat": "解析格式异常: {{err}}",
       "fetchFailed": "获取失败: {{err}}",
       "queryFailed": "无法获取有效的额度数据或模型列表，请确认 API Key 是否有效，以及接口地址是否正确。"
-    },
-    "opencode": {
-      "modelsRequired": "请先刷新此密钥以加载可用模型，再激活其 OpenCode 配置。",
-      "active": "已同步",
-      "modified": "有差异",
-      "inactive": "未激活",
-      "syncedToast": "已同步至 OpenCode: {{name}}",
-      "removedToast": "已从 OpenCode 移除配置 {{name}}",
-      "clickToRemove": "OpenCode 配置已激活且一致。点击取消激活（移除配置）",
-      "clickToUpdate": "设置或模型存在差异。点击更新",
-      "clickToActivate": "点击以在 OpenCode 中激活独立配置",
-      "syncedActiveTooltip": "OpenCode: 配置完全匹配（已激活）。点击取消激活/移除",
-      "partialTooltip": "OpenCode: 设置或模型存在差异。点击更新"
-    },
-    "syncSuccess": "成功同步至 {{app}}",
-    "syncError": "同步失败: {{error}}"
+    }
   },
   "suggestion_delete_thinking": {
     "title": "版本更新提示",
