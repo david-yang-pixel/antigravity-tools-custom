@@ -166,6 +166,7 @@ async fn dispatch(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let namespaced = codec::namespaced_tools(&payload);
     let payload = match codec::request(protocol, payload) {
         Ok(payload) => payload,
         Err(message) => {
@@ -188,7 +189,15 @@ async fn dispatch(
         .map(|identity| identity.token_id.as_str())
         .unwrap_or("administrator");
     forward(
-        timeout, payload, streaming, &alias, target, protocol, scope, policy,
+        timeout,
+        payload,
+        streaming,
+        &alias,
+        target,
+        protocol,
+        &namespaced,
+        scope,
+        policy,
     )
     .await
 }
@@ -222,6 +231,7 @@ fn retryable_status(status: StatusCode) -> bool {
     !matches!(status.as_u16(), 400 | 413 | 422)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn forward(
     timeout: u64,
     payload: Value,
@@ -229,6 +239,7 @@ async fn forward(
     alias: &str,
     target: &str,
     protocol: codec::Protocol,
+    namespaced: &codec::Namespaced,
     scope: &str,
     policy: Policy,
 ) -> Response {
@@ -250,7 +261,7 @@ async fn forward(
     loop {
         tried.push(lease.account.id.clone());
         let failure = match attempt(
-            lease, &payload, streaming, alias, target, protocol, scope, deadline,
+            lease, &payload, streaming, alias, target, protocol, namespaced, scope, deadline,
         )
         .await
         {
@@ -286,6 +297,7 @@ async fn attempt(
     alias: &str,
     target: &str,
     protocol: codec::Protocol,
+    namespaced: &codec::Namespaced,
     scope: &str,
     deadline: tokio::time::Instant,
 ) -> Result<Response, Failure> {
@@ -377,7 +389,7 @@ async fn attempt(
         Ok(chunk)
     });
     let mut events = source.eventsource();
-    let mut output = codec::Output::new(protocol, alias);
+    let mut output = codec::Output::new(protocol, alias).with_namespaced(namespaced.clone());
     if streaming {
         // Inspect provider errors before committing HTTP 200. Shared billing must
         // see a failed status when no generation has started (including per-call prices).

@@ -249,6 +249,96 @@ fn workbuddy_codec_preserves_tools_images_and_rejects_stateful_loss() {
     assert_eq!(converted["messages"][2]["content"][0]["text"], "thanks");
 }
 #[test]
+fn workbuddy_codec_round_trips_codex_namespace_tools() {
+    use codec::{namespaced_tools, request as convert, Output, Protocol};
+    // Shape captured from Codex: grouped function tools plus an MCP server namespace.
+    let body = json!({
+        "input":[
+            {"role":"user","content":"run it"},
+            {"type":"function_call","call_id":"call_js","namespace":"mcp__node_repl","name":"js","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call_js","output":"2"}
+        ],
+        "tools":[
+            {"type":"function","name":"exec_command","parameters":{"type":"object"}},
+            {"type":"namespace","name":"multi_agent_v1","description":"Agents","tools":[
+                {"type":"function","name":"spawn_agent","description":"Spawn","strict":false,"parameters":{"type":"object"}}
+            ]},
+            {"type":"namespace","name":"mcp__node_repl","description":"REPL","tools":[
+                {"type":"function","name":"js","description":"Run JS","strict":false,"parameters":{"type":"object"}}
+            ]},
+            {"type":"web_search","external_web_access":false}
+        ],
+        "tool_choice":{"type":"function","namespace":"multi_agent_v1","name":"spawn_agent"}
+    });
+    let namespaced = namespaced_tools(&body);
+    let converted = convert(Protocol::Responses, body).unwrap();
+    let names: Vec<&str> = converted["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "exec_command",
+            "multi_agent_v1__spawn_agent",
+            "mcp__node_repl__js"
+        ]
+    );
+    assert!(converted["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["type"] == "function" && t["function"].get("type").is_none()));
+    // Replayed history and forced choices use the same flat names as the tool list.
+    assert_eq!(
+        converted["messages"][1]["tool_calls"][0]["function"]["name"],
+        "mcp__node_repl__js"
+    );
+    assert_eq!(
+        converted["tool_choice"]["function"]["name"],
+        "multi_agent_v1__spawn_agent"
+    );
+    for name in &names[1..] {
+        assert!(namespaced.contains_key(*name), "{name}");
+    }
+
+    // Upstream calls by flat name come back as the client's namespace + name.
+    let mut output = Output::new(Protocol::Responses, "wb-test").with_namespaced(namespaced);
+    let mut frames = output.start();
+    for chunk in [json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"call_a","type":"function","function":{"name":"mcp__node_repl__js","arguments":"{}"}},
+            {"index":1,"id":"call_b","type":"function","function":{"name":"exec_command","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}]})]
+    {
+        frames.extend(output.push(chunk).unwrap());
+    }
+    let (value, end) = output.end().unwrap();
+    frames.extend(end);
+    let calls = value["output"].as_array().unwrap();
+    assert_eq!(calls[0]["name"], "js");
+    assert_eq!(calls[0]["namespace"], "mcp__node_repl");
+    assert_eq!(calls[1]["name"], "exec_command");
+    assert!(calls[1].get("namespace").is_none());
+    let added: Vec<Value> = frames
+        .concat()
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["type"] == "response.output_item.added")
+        .collect();
+    assert_eq!(added[0]["item"]["namespace"], "mcp__node_repl");
+    assert_eq!(added[0]["item"]["name"], "js");
+
+    // Only function and custom tools may appear inside a namespace.
+    assert!(convert(
+        Protocol::Responses,
+        json!({"input":"hi","tools":[{"type":"namespace","name":"ns","tools":[{"type":"file_search"}]}]})
+    )
+    .is_err());
+}
+#[test]
 fn workbuddy_codec_streaming_tools_reasoning_and_incomplete_errors() {
     for protocol in [
         codec::Protocol::Chat,
@@ -891,6 +981,7 @@ async fn send(streaming: bool, policy: Policy) -> Response {
         "wb-sonnet",
         "claude-sonnet-4-6",
         codec::Protocol::Chat,
+        &codec::Namespaced::new(),
         "scope",
         policy,
     )
