@@ -131,6 +131,7 @@
     "menu_balance": "余额",
     "title": "用量中心",
     "kicker": "我的 API 用量",
+    "support_hint": "如有使用问题，请添加 QQ：{{qq}}",
     "login_title": "查看你的 Token 用量",
     "login_description": "使用 API Token 登录，查看余额、累计用量和各模型的使用明细。",
     "login": "查看用量",
