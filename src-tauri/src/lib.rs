@@ -332,7 +332,6 @@ pub fn run() {
             // Let's check `modules::logger`.
 
             let proxy_state = commands::proxy::ProxyServiceState::new();
-            let cf_state = Arc::new(commands::cloudflared::CloudflaredState::new());
 
             // Load config
             match modules::config::load_app_config() {
@@ -437,7 +436,6 @@ pub fn run() {
                         config.proxy,
                         &proxy_state,
                         crate::modules::integration::SystemManager::Headless,
-                        cf_state.clone(),
                     ).await {
                         error!("Failed to start proxy service in headless mode: {}", e);
                         std::process::exit(1);
@@ -487,7 +485,6 @@ pub fn run() {
             let _ = modules::lightweight::exit_lightweight_mode(app);
         }))
         .manage(commands::proxy::ProxyServiceState::new())
-        .manage(commands::cloudflared::CloudflaredState::new())
         .manage(AppRuntimeFlags { tray_enabled })
         .setup(|app| {
             info!("Setup starting...");
@@ -565,7 +562,6 @@ pub fn run() {
                 // Load config
                 if let Ok(config) = modules::config::load_app_config() {
                     let state = handle.state::<commands::proxy::ProxyServiceState>();
-                    let cf_state = handle.state::<commands::cloudflared::CloudflaredState>();
                     let integration =
                         crate::modules::integration::SystemManager::Desktop(handle.clone());
 
@@ -574,7 +570,6 @@ pub fn run() {
                         config.proxy.clone(),
                         &state,
                         integration.clone(),
-                        Arc::new(cf_state.inner().clone()),
                     )
                     .await
                     {
@@ -592,7 +587,6 @@ pub fn run() {
                             config.proxy,
                             &state,
                             integration,
-                            Arc::new(cf_state.inner().clone()),
                         )
                         .await
                         {
@@ -797,12 +791,6 @@ pub fn run() {
             commands::security::check_ip_in_whitelist,
             commands::security::get_security_config,
             commands::security::update_security_config,
-            // Cloudflared commands
-            commands::cloudflared::cloudflared_check,
-            commands::cloudflared::cloudflared_install,
-            commands::cloudflared::cloudflared_start,
-            commands::cloudflared::cloudflared_stop,
-            commands::cloudflared::cloudflared_get_status,
             // Debug console commands
             modules::log_bridge::enable_debug_console,
             modules::log_bridge::disable_debug_console,
@@ -875,21 +863,15 @@ pub fn run() {
                     if let Some(state) =
                         app_handle.try_state::<crate::commands::proxy::ProxyServiceState>()
                     {
-                        let cf_state = app_handle.try_state::<crate::commands::cloudflared::CloudflaredState>();
                         tauri::async_runtime::block_on(async {
-                            // 1. 停止 cloudflared 隧道
-                            if let Some(cf) = cf_state {
-                                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), cf.stop()).await;
-                            }
-
-                            // 2. 停止 Admin Server（释放 TCP 监听器和 Socket）
+                            // 1. 停止 Admin Server（释放 TCP 监听器和 Socket）
                             if let Ok(mut lock) = tokio::time::timeout(std::time::Duration::from_millis(1000), state.admin_server.write()).await {
                                 if let Some(admin) = lock.take() {
                                     admin.stop().await;
                                 }
                             }
 
-                            // 3. 停止业务代理实例及后台任务
+                            // 2. 停止业务代理实例及后台任务
                             if let Ok(mut lock) = tokio::time::timeout(std::time::Duration::from_millis(1000), state.instance.write()).await {
                                 if let Some(instance) = lock.take() {
                                     let _ = tokio::time::timeout(

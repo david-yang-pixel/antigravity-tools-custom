@@ -93,11 +93,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_antigravity_path': { url: '/api/system/antigravity/path', method: 'GET' },
   'get_antigravity_args': { url: '/api/system/antigravity/args', method: 'GET' },
 
-  // Cloudflared
-  'cloudflared_install': { url: '/api/proxy/cloudflared/install', method: 'POST' },
-  'cloudflared_start': { url: '/api/proxy/cloudflared/start', method: 'POST' },
-  'cloudflared_stop': { url: '/api/proxy/cloudflared/stop', method: 'POST' },
-  'cloudflared_get_status': { url: '/api/proxy/cloudflared/status', method: 'GET' },
 
   // Updates
   'should_check_updates': { url: '/api/system/updates/check-status', method: 'GET' },

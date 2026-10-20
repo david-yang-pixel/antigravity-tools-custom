@@ -368,7 +368,6 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
         config.clone(),
         &state,
         crate::modules::integration::SystemManager::Headless,
-        std::sync::Arc::new(crate::commands::cloudflared::CloudflaredState::new()),
     )
     .await
     .unwrap();

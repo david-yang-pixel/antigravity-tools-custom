@@ -85,12 +85,6 @@ function Settings() {
         pinned_quota_models: {
             models: ['gemini-3.1-pro-high', 'gemini-3.8-flash-high', 'gemini-3.1-flash-image', 'claude-opus-4-6-thinking']
         },
-        cloudflared: {
-            enabled: false,
-            mode: 'quick',
-            port: 7860,
-            use_http2: true
-        },
         circuit_breaker: {
             enabled: false,
             backoff_steps: [30, 60, 120, 300, 600]

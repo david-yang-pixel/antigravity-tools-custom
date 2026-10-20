@@ -101,9 +101,8 @@ pub struct AppState {
     pub integration: crate::modules::integration::SystemManager, // [NEW] 系统集成层实现
     pub account_service: Arc<crate::modules::account_service::AccountService>, // [NEW] 账号管理服务层
     pub security: Arc<RwLock<crate::proxy::ProxySecurityConfig>>,              // [NEW] 安全配置状态
-    pub cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>, // [NEW] Cloudflared 插件状态
-    pub is_running: Arc<RwLock<bool>>, // [NEW] 运行状态标识
-    pub port: u16,                     // [NEW] 本地监听端口 (v4.0.8 修复)
+    pub is_running: Arc<RwLock<bool>>,                                         // [NEW] 运行状态标识
+    pub port: u16, // [NEW] 本地监听端口 (v4.0.8 修复)
     pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>, // [FIX Web Mode]
     pub proxy_pool_manager: Arc<crate::proxy::proxy_pool::ProxyPoolManager>, // [FIX Web Mode]
     pub only_raw_quota_models: Arc<tokio::sync::RwLock<bool>>, // [NEW] 是否只暴露真实配额模型
@@ -416,8 +415,6 @@ pub struct AxumServer {
     security_state: Arc<RwLock<crate::proxy::ProxySecurityConfig>>,
     experimental: Arc<RwLock<crate::proxy::config::ExperimentalConfig>>,
     debug_logging: Arc<RwLock<crate::proxy::config::DebugLoggingConfig>>,
-    #[allow(dead_code)] // 预留给 cloudflared 运行状态查询与后续控制
-    pub cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
     pub is_running: Arc<RwLock<bool>>,
     pub token_manager: Arc<TokenManager>, // [NEW] 暴露出 TokenManager 供反代服务复用
     pub proxy_pool_state: Arc<tokio::sync::RwLock<crate::proxy::config::ProxyPoolConfig>>, // [NEW] 代理池配置状态
@@ -515,7 +512,6 @@ impl AxumServer {
         debug_logging: crate::proxy::config::DebugLoggingConfig,
 
         integration: crate::modules::integration::SystemManager,
-        cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
         proxy_pool_config: crate::proxy::config::ProxyPoolConfig, // [NEW]
         only_raw_quota_models: bool,
         image_scheduler_config: crate::proxy::config::ImageSchedulerConfig,
@@ -580,7 +576,6 @@ impl AxumServer {
                 integration.clone(),
             )),
             security: security_state.clone(),
-            cloudflared_state: cloudflared_state.clone(),
             is_running: is_running_state.clone(),
             port,
             proxy_pool_state: proxy_pool_state.clone(),
@@ -822,16 +817,6 @@ impl AxumServer {
                 "/proxy/monitor/health-logs/toggle",
                 post(admin_set_proxy_capture_health_logs),
             )
-            .route(
-                "/proxy/cloudflared/status",
-                get(admin_cloudflared_get_status),
-            )
-            .route(
-                "/proxy/cloudflared/install",
-                post(admin_cloudflared_install),
-            )
-            .route("/proxy/cloudflared/start", post(admin_cloudflared_start))
-            .route("/proxy/cloudflared/stop", post(admin_cloudflared_stop))
             .route("/system/open-folder", post(admin_open_folder))
             .route("/proxy/stats", get(admin_get_proxy_stats))
             .route("/logs", get(admin_get_proxy_logs_filtered))
@@ -1091,7 +1076,6 @@ impl AxumServer {
             security_state,
             experimental: experimental_state.clone(),
             debug_logging: debug_logging_state.clone(),
-            cloudflared_state,
             is_running: is_running_state,
             token_manager: token_manager.clone(),
             proxy_pool_state,
@@ -3275,145 +3259,6 @@ async fn admin_save_http_api_settings(
         )
     })?;
     Ok(StatusCode::OK)
-}
-
-// Cloudflared Handlers
-async fn admin_cloudflared_get_status(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .cloudflared_state
-        .ensure_manager()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-
-    let lock = state.cloudflared_state.manager.read().await;
-    if let Some(manager) = lock.as_ref() {
-        let (installed, version) = manager.check_installed().await;
-        let mut status = manager.get_status().await;
-        status.installed = installed;
-        status.version = version;
-        if !installed {
-            status.running = false;
-            status.url = None;
-        }
-        Ok(Json(status))
-    } else {
-        Ok(Json(
-            crate::modules::cloudflared::CloudflaredStatus::default(),
-        ))
-    }
-}
-
-async fn admin_cloudflared_install(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .cloudflared_state
-        .ensure_manager()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-
-    let lock = state.cloudflared_state.manager.read().await;
-    if let Some(manager) = lock.as_ref() {
-        let status = manager.install().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-        Ok(Json(status))
-    } else {
-        Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Manager not initialized".to_string(),
-            }),
-        ))
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CloudflaredStartRequest {
-    config: crate::modules::cloudflared::CloudflaredConfig,
-}
-
-async fn admin_cloudflared_start(
-    State(state): State<AppState>,
-    Json(payload): Json<CloudflaredStartRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .cloudflared_state
-        .ensure_manager()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-
-    let lock = state.cloudflared_state.manager.read().await;
-    if let Some(manager) = lock.as_ref() {
-        let status = manager.start(payload.config).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-        Ok(Json(status))
-    } else {
-        Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Manager not initialized".to_string(),
-            }),
-        ))
-    }
-}
-
-async fn admin_cloudflared_stop(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .cloudflared_state
-        .ensure_manager()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-
-    let lock = state.cloudflared_state.manager.read().await;
-    if let Some(manager) = lock.as_ref() {
-        let status = manager.stop().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: e }),
-            )
-        })?;
-        Ok(Json(status))
-    } else {
-        Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Manager not initialized".to_string(),
-            }),
-        ))
-    }
 }
 
 // --- Supplementary Account Handlers ---

@@ -68,14 +68,12 @@ impl ProxyServiceState {
 pub async fn start_proxy_service(
     config: ProxyConfig,
     state: State<'_, ProxyServiceState>,
-    cf_state: State<'_, crate::commands::cloudflared::CloudflaredState>,
     app_handle: tauri::AppHandle,
 ) -> Result<ProxyStatus, String> {
     let result = internal_start_proxy_service(
         config,
         &state,
         crate::modules::integration::SystemManager::Desktop(app_handle),
-        Arc::new(cf_state.inner().clone()),
     )
     .await?;
 
@@ -105,7 +103,6 @@ pub async fn internal_start_proxy_service(
     config: ProxyConfig,
     state: &ProxyServiceState,
     integration: crate::modules::integration::SystemManager,
-    cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
 ) -> Result<ProxyStatus, String> {
     // 1. 检查状态并加锁
     {
@@ -149,13 +146,7 @@ pub async fn internal_start_proxy_service(
     let _monitor = state.monitor.read().await.as_ref().unwrap().clone();
 
     // 檢查並啟動管理服務器（如果尚未運行）
-    ensure_admin_server(
-        config.clone(),
-        state,
-        integration.clone(),
-        cloudflared_state.clone(),
-    )
-    .await?;
+    ensure_admin_server(config.clone(), state, integration.clone()).await?;
 
     // 2. [FIX] 复用管理服务器的 Token 管理器 (单实例，解决热更新同步问题)
     let token_manager = {
@@ -241,7 +232,6 @@ pub async fn ensure_admin_server(
     config: ProxyConfig,
     state: &ProxyServiceState,
     integration: crate::modules::integration::SystemManager,
-    cloudflared_state: Arc<crate::commands::cloudflared::CloudflaredState>,
 ) -> Result<(), String> {
     let mut admin_lock = state.admin_server.write().await;
     if admin_lock.is_some() {
@@ -290,7 +280,6 @@ pub async fn ensure_admin_server(
         config.experimental.clone(),
         config.debug_logging.clone(),
         integration.clone(),
-        cloudflared_state,
         config.proxy_pool.clone(),
         config.only_raw_quota_models,
         config.image_scheduler.clone(),

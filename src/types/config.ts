@@ -180,33 +180,10 @@ export interface AppConfig {
     pinned_quota_models: PinnedQuotaModelsConfig; // [NEW] 配额关注列表
     circuit_breaker: CircuitBreakerConfig; // [NEW] 熔断器配置
     proxy: ProxyConfig;
-    cloudflared: CloudflaredConfig; // [NEW] Cloudflared 配置
     lightweight_mode?: boolean; // [NEW] 轻量模式：关闭到托盘时释放 WebView
     suggestion_delete_thinking_store?: boolean; // [NEW] 建议删除历史思考块缓存开关
     thinking_cleanup_dismissed?: boolean; // [NEW] 用户是否已确认/忽略该建议
     dismissed_thinking_cleanup_version?: string; // [NEW] 用户已确认或忽略建议的目标版本号
-}
-
-// ============================================================================
-// Cloudflared (CF隧道) 类型定义
-// ============================================================================
-
-export type TunnelMode = 'quick' | 'auth';
-
-export interface CloudflaredConfig {
-    enabled: boolean;
-    mode: TunnelMode;
-    port: number;
-    token?: string;
-    use_http2: boolean;
-}
-
-export interface CloudflaredStatus {
-    installed: boolean;
-    version?: string;
-    running: boolean;
-    url?: string;
-    error?: string;
 }
 
 // ============================================================================

@@ -116,17 +116,8 @@ pub fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                         tracing::info!("[Tray] 退出网关触发，开始全面清理服务与端口...");
 
                         let state = app_handle.state::<crate::commands::proxy::ProxyServiceState>();
-                        let cf_state =
-                            app_handle.state::<crate::commands::cloudflared::CloudflaredState>();
 
-                        // 1. 终止 cloudflared 隧道子进程
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_millis(500),
-                            cf_state.stop(),
-                        )
-                        .await;
-
-                        // 2. 停止 Admin Server（关闭 TCP 监听器和所有活动连接）
+                        // 1. 停止 Admin Server（关闭 TCP 监听器和所有活动连接）
                         if let Ok(mut lock) = tokio::time::timeout(
                             std::time::Duration::from_millis(1000),
                             state.admin_server.write(),
@@ -138,7 +129,7 @@ pub fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                             }
                         }
 
-                        // 3. 停止业务代理实例及后台任务
+                        // 2. 停止业务代理实例及后台任务
                         if let Ok(mut lock) = tokio::time::timeout(
                             std::time::Duration::from_millis(1000),
                             state.instance.write(),
@@ -157,7 +148,7 @@ pub fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                             }
                         }
 
-                        // 4. 给予底层套接字彻底注销的微小缓冲，然后干净退出进程
+                        // 3. 给予底层套接字彻底注销的微小缓冲，然后干净退出进程
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         std::process::exit(0);
                     });
