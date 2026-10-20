@@ -1,3 +1,4 @@
+use crate::proxy::common::model_mapping::ModelRoutingMode;
 // OpenAI Handler
 use axum::{
     body::Body, extract::Json, extract::State, http::StatusCode, response::IntoResponse,
@@ -10,7 +11,7 @@ use tracing::{debug, error, info}; // Import Engine trait for encode method
 
 use crate::proxy::mappers::gemini::SUMMARY_REQUEST_TIMEOUT_SECS;
 use crate::proxy::mappers::openai::{
-    transform_openai_request, transform_openai_request_with_session, transform_openai_response,
+    transform_openai_request, transform_openai_request_with_routing, transform_openai_response,
     OpenAIContent, OpenAIContentBlock, OpenAIMessage, OpenAIRequest, OpenAIResponse,
 };
 // use crate::proxy::upstream::client::UpstreamClient; // 通过 state 获取
@@ -1730,6 +1731,7 @@ fn prefix_with_step_marker(_marker: Option<String>, content: String) -> String {
 
 pub async fn handle_chat_completions(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     headers: HeaderMap, // [CHANGED] Extract headers
     upstream_recorder: Option<
         axum::extract::Extension<crate::proxy::monitor::UpstreamRequestBodyHolder>,
@@ -1768,6 +1770,7 @@ pub async fn handle_chat_completions(
             user_identity.map(|identity| identity.token_id.clone()),
             body,
             &model_name,
+            routing,
         )
         .await;
     }
@@ -2004,16 +2007,17 @@ pub async fn handle_chat_completions(
     let effort_tier =
         crate::proxy::common::variant_mapping::tier_from_effort(effort_hint.as_deref());
 
-    let variant_spec =
-        if crate::proxy::mappers::openai::request::is_tiered_flash_model(&openai_req.model) {
-            None
-        } else {
-            crate::proxy::common::variant_mapping::resolve_with_tier(
-                &openai_req.model,
-                effort_tier,
-                effective_budget_hint,
-            )
-        };
+    let variant_spec = if routing.is_exact()
+        || crate::proxy::mappers::openai::request::is_tiered_flash_model(&openai_req.model)
+    {
+        None
+    } else {
+        crate::proxy::common::variant_mapping::resolve_with_tier(
+            &openai_req.model,
+            effort_tier,
+            effective_budget_hint,
+        )
+    };
     if let Some(spec) = variant_spec {
         tracing::info!(
             "[{}] [Variant] canonical='{}' effort={:?} budget_hint={:?} -> real_model='{}' budget={} maxOut={}",
@@ -2087,7 +2091,7 @@ pub async fn handle_chat_completions(
     let mut retried_without_thinking = false;
 
     // 2. 模型路由解析 (移到循环外以支持在所有路径返回 X-Mapped-Model)
-    let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+    let mapped_model = routing.resolve(
         &openai_req.model,
         &*state.custom_mapping.read().await,
         effort_hint.as_deref(),
@@ -2118,7 +2122,7 @@ pub async fn handle_chat_completions(
             .tools
             .as_ref()
             .map(|list| list.iter().cloned().collect());
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(
+        let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
             &openai_req.model,
             &mapped_model,
             &tools_val,
@@ -2126,6 +2130,7 @@ pub async fn handle_chat_completions(
             None, // quality
             None, // image_size
             None, // body
+            routing,
         );
 
         // 4. 获取 Token (使用准确的 request_type)
@@ -2137,12 +2142,13 @@ pub async fn handle_chat_completions(
         } else if config.request_type == "image_gen" {
             drop(image_permit.take());
             match token_manager
-                .get_image_token(
+                .get_image_token_with_routing(
                     force_rotate,
                     Some(&affinity_key),
                     &mapped_model,
                     &image_scheduler,
                     request_timeout,
+                    routing,
                 )
                 .await
             {
@@ -2158,11 +2164,12 @@ pub async fn handle_chat_completions(
             }
         } else {
             let mut token_result = token_manager
-                .get_token(
+                .get_token_with_routing(
                     &config.request_type,
                     force_rotate,
                     Some(&affinity_key),
                     &mapped_model,
+                    routing,
                 )
                 .await;
 
@@ -2174,11 +2181,12 @@ pub async fn handle_chat_completions(
                         );
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     token_result = token_manager
-                        .get_token(
+                        .get_token_with_routing(
                             &config.request_type,
                             true,
                             Some(&affinity_key),
                             &mapped_model,
+                            routing,
                         )
                         .await;
                 }
@@ -2209,7 +2217,7 @@ pub async fn handle_chat_completions(
         // [NEW v4.1.29] 获取完整 Token 对象用于动态规格查询
         let proxy_token = token_manager.get_token_by_id(&account_id);
         let mapped_model = token_manager
-            .resolve_dynamic_model_for_account(&account_id, &mapped_model)
+            .resolve_dynamic_model_for_account(&account_id, &mapped_model, routing)
             .await;
 
         last_email = Some(email.clone());
@@ -2218,7 +2226,7 @@ pub async fn handle_chat_completions(
         // 4. 转换请求 (返回内容包含 session_id, message_count, prefix_hash)
         let tf_start = std::time::Instant::now();
         let (mut gemini_body, _routed_session, message_count, _prefix_hash) =
-            transform_openai_request_with_session(
+            transform_openai_request_with_routing(
                 &openai_req,
                 &project_id,
                 &mapped_model,
@@ -2226,6 +2234,7 @@ pub async fn handle_chat_completions(
                 &affinity_key,
                 None,
                 false,
+                routing,
             );
         let session_id = store_key.clone();
         let tf_micros = tf_start.elapsed().as_micros() as u64;
@@ -3098,6 +3107,7 @@ fn responses_store_enabled(body: &Value) -> bool {
 pub async fn handle_completions(
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     headers: HeaderMap,
     upstream_recorder: Option<
         axum::extract::Extension<crate::proxy::monitor::UpstreamRequestBodyHolder>,
@@ -3854,7 +3864,7 @@ pub async fn handle_completions(
                 .and_then(|t| t.effort.as_deref())
         });
 
-    let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+    let mapped_model = routing.resolve(
         &openai_req.model,
         &*state.custom_mapping.read().await,
         effort_hint,
@@ -3933,7 +3943,7 @@ pub async fn handle_completions(
             .tools
             .as_ref()
             .map(|list| list.iter().cloned().collect());
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(
+        let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
             &openai_req.model,
             &mapped_model,
             &tools_val,
@@ -3941,6 +3951,7 @@ pub async fn handle_completions(
             None, // quality
             None, // image_size
             None, // body
+            routing,
         );
 
         let session_id = Some(affinity_key.as_str());
@@ -3951,11 +3962,12 @@ pub async fn handle_completions(
             credentials
         } else {
             let mut token_result = token_manager
-                .get_token(
+                .get_token_with_routing(
                     &config.request_type,
                     force_rotate,
                     session_id,
                     &mapped_model,
+                    routing,
                 )
                 .await;
 
@@ -3967,7 +3979,13 @@ pub async fn handle_completions(
                         );
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     token_result = token_manager
-                        .get_token(&config.request_type, true, session_id, &mapped_model)
+                        .get_token_with_routing(
+                            &config.request_type,
+                            true,
+                            session_id,
+                            &mapped_model,
+                            routing,
+                        )
                         .await;
                 }
             }
@@ -3991,7 +4009,7 @@ pub async fn handle_completions(
         };
 
         let mapped_model = token_manager
-            .resolve_dynamic_model_for_account(&account_id, &mapped_model)
+            .resolve_dynamic_model_for_account(&account_id, &mapped_model, routing)
             .await;
 
         last_email = Some(email.clone());
@@ -4001,7 +4019,7 @@ pub async fn handle_completions(
         let proxy_token = token_manager.get_token_by_id(&account_id);
         let tf_start = std::time::Instant::now();
         let (mut gemini_body, _routed_session, message_count, _prefix_hash) = if is_responses_api {
-            transform_openai_request_with_session(
+            transform_openai_request_with_routing(
                 &openai_req,
                 &project_id,
                 &mapped_model,
@@ -4009,9 +4027,10 @@ pub async fn handle_completions(
                 &affinity_key,
                 signature_read_key.as_deref(),
                 true, // is_responses_api
+                routing,
             )
         } else {
-            transform_openai_request_with_session(
+            transform_openai_request_with_routing(
                 &openai_req,
                 &project_id,
                 &mapped_model,
@@ -4019,6 +4038,7 @@ pub async fn handle_completions(
                 &affinity_key,
                 None,
                 false,
+                routing,
             )
         };
         let session_id = session_id_str.clone();
@@ -4952,13 +4972,22 @@ pub async fn handle_retrieve_model(
 /// 处理图像生成请求，转换为 Gemini API 格式
 pub async fn handle_chat_redirection(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     headers: HeaderMap,
     upstream_recorder: Option<
         axum::extract::Extension<crate::proxy::monitor::UpstreamRequestBodyHolder>,
     >,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    handle_chat_completions(State(state), headers, upstream_recorder, None, Json(body)).await
+    handle_chat_completions(
+        State(state),
+        axum::Extension(routing),
+        headers,
+        upstream_recorder,
+        None,
+        Json(body),
+    )
+    .await
 }
 
 async fn intercept_chat_to_image(
@@ -4967,6 +4996,7 @@ async fn intercept_chat_to_image(
     tenant_id: Option<String>,
     body: Value,
     model_name: &str,
+    routing: ModelRoutingMode,
 ) -> Result<Response, (StatusCode, String)> {
     // 1. Extract prompt from messages
     let mut prompt = String::new();
@@ -5007,7 +5037,7 @@ async fn intercept_chat_to_image(
         "response_format": "url"
     });
 
-    match handle_images_generations_internal(state, headers, tenant_id, img_req).await {
+    match handle_images_generations_internal(state, headers, tenant_id, img_req, routing).await {
         Ok((email, img_res)) => {
             // Extract URL
             let mut img_markdown = String::new();
@@ -5098,6 +5128,7 @@ async fn intercept_chat_to_image(
 
 pub async fn handle_images_generations(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     headers: HeaderMap,
     user_identity: Option<
         axum::extract::Extension<crate::proxy::middleware::auth::UserTokenIdentity>,
@@ -5109,6 +5140,7 @@ pub async fn handle_images_generations(
         headers,
         user_identity.map(|identity| identity.token_id.clone()),
         body,
+        routing,
     )
     .await
     {
@@ -5132,6 +5164,7 @@ pub async fn handle_images_generations_internal(
     headers: HeaderMap,
     tenant_id: Option<String>,
     body: Value,
+    routing: ModelRoutingMode,
 ) -> Result<(String, Value), (StatusCode, String, Option<String>)> {
     // 1. 解析请求参数
     let prompt = body.get("prompt").and_then(|v| v.as_str()).ok_or((
@@ -5229,7 +5262,11 @@ pub async fn handle_images_generations_internal(
         let image_config = image_config.clone(); // 使用解析后的完整配置
         let _response_format = response_format.to_string();
 
-        let model_to_use = clean_model_name.clone();
+        let model_to_use = if routing.is_exact() {
+            model.to_string()
+        } else {
+            clean_model_name.clone()
+        };
         let attempted_account = attempted_account.clone();
         let image_scheduler = image_scheduler.clone();
         let affinity_key = affinity_key.clone();
@@ -5254,13 +5291,15 @@ pub async fn handle_images_generations_internal(
                     } else {
                         drop(image_permit.take());
                         match token_manager
-                            .get_image_token(
+                            .get_image_token_with_routing(
                                 force_rotate,
                                 Some(&affinity_key),
                                 &model_to_use,
                                 &image_scheduler,
                                 request_timeout,
-                            )
+
+        routing,
+    )
                             .await
                         {
                             Ok((
@@ -5297,7 +5336,9 @@ pub async fn handle_images_generations_internal(
                 // alias (e.g. "gemini-3-pro-image") made upstream return 404 "Requested entity was
                 // not found" because each account exposes its own concrete image model id.
                 let resolved_model = token_manager
-                    .resolve_dynamic_model_for_account(&account_id, &model_to_use)
+                    .resolve_dynamic_model_for_account(&account_id, &model_to_use,
+        routing,
+    )
                     .await;
 
                 let gemini_body = json!({
@@ -5591,6 +5632,7 @@ pub async fn handle_images_generations_internal(
 
 pub async fn handle_images_edits(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     headers: HeaderMap,
     user_identity: Option<
         axum::extract::Extension<crate::proxy::middleware::auth::UserTokenIdentity>,
@@ -5768,7 +5810,11 @@ pub async fn handle_images_edits(
         let contents_parts = contents_parts.clone();
         let image_config = image_config.clone();
         let response_format = response_format.clone();
-        let model_to_use = clean_model_name.clone();
+        let model_to_use = if routing.is_exact() {
+            model.to_string()
+        } else {
+            clean_model_name.clone()
+        };
         let image_scheduler = image_scheduler.clone();
         let affinity_key = affinity_key.clone();
 
@@ -5793,12 +5839,13 @@ pub async fn handle_images_edits(
                     } else {
                         drop(image_permit.take());
                         match token_manager
-                            .get_image_token(
+                            .get_image_token_with_routing(
                                 force_rotate,
                                 Some(&affinity_key),
                                 image_account_selection_target(&model_to_use),
                                 &image_scheduler,
                                 request_timeout,
+                                routing,
                             )
                             .await
                         {
@@ -5822,7 +5869,7 @@ pub async fn handle_images_edits(
                     };
 
                 let resolved_model = token_manager
-                    .resolve_dynamic_model_for_account(&account_id, &model_to_use)
+                    .resolve_dynamic_model_for_account(&account_id, &model_to_use, routing)
                     .await;
 
                 // 4.2 Construct Request Body (Need project_id and account-resolved model)
@@ -6209,6 +6256,18 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             .await;
         }
 
+        let routing = ModelRoutingMode::from_only_raw(*state.only_raw_quota_models.read().await);
+        if routing.is_exact() {
+            if let Some(model) = payload.get("model").and_then(Value::as_str) {
+                if !crate::proxy::middleware::model_catalog::is_supported(&state, model).await {
+                    let mut event =
+                        crate::proxy::middleware::model_catalog::unsupported_model_error(model);
+                    event["type"] = json!("error");
+                    let _ = socket.send(Message::Text(event.to_string())).await;
+                    continue;
+                }
+            }
+        }
         if should_handle_prewarm_locally(&payload, &session_state) {
             let (created, completed) = handle_prewarm_locally(&payload, &mut session_state);
             let _ = socket.send(Message::Text(created.to_string())).await;
@@ -6246,6 +6305,18 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             }
         };
 
+        if routing.is_exact() {
+            if let Some(model) = normalized.get("model").and_then(Value::as_str) {
+                if !crate::proxy::middleware::model_catalog::is_supported(&state, model).await {
+                    let mut event =
+                        crate::proxy::middleware::model_catalog::unsupported_model_error(model);
+                    event["type"] = json!("error");
+                    let _ = socket.send(Message::Text(event.to_string())).await;
+                    continue;
+                }
+            }
+        }
+
         // WorkBuddy's HTTP adapter is outside this legacy WebSocket path. Never
         // silently send one of its aliases to the Google account scheduler.
         let workbuddy_error = if let Some(model) = normalized.get("model").and_then(Value::as_str) {
@@ -6282,6 +6353,7 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
         let openai_body = convert_codex_to_openai_request(normalized);
         let response_result = handle_chat_completions(
             State(state.clone()),
+            axum::Extension(routing),
             headers.clone(),
             None,
             None,

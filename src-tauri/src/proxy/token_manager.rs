@@ -1,3 +1,4 @@
+use crate::proxy::common::model_mapping::ModelRoutingMode;
 // 移除冗余的顶层导入，因为这些在代码中已由 full path 或局部导入处理
 use axum::http::StatusCode;
 use dashmap::DashMap;
@@ -136,6 +137,7 @@ pub struct ProxyToken {
     pub validation_blocked: bool, // [NEW] Check for validation block (VALIDATION_REQUIRED temporary block)
     pub validation_blocked_until: i64, // [NEW] Timestamp until which the account is blocked
     pub validation_url: Option<String>, // [NEW] Validation URL (#1522)
+    pub raw_models: HashSet<String>, // Exact account-reported IDs, independent of quota buckets.
     pub model_quotas: HashMap<String, i32>, // [OPTIMIZATION] In-memory cache for model-specific quotas
     pub model_limits: HashMap<String, u64>, // [NEW] max_output_tokens per model from quota data
 }
@@ -1172,6 +1174,7 @@ impl TokenManager {
                 .get("validation_url")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            raw_models: Self::raw_model_ids(&account).unwrap_or_default(),
             model_quotas,
             model_limits,
         }))
@@ -1405,6 +1408,10 @@ impl TokenManager {
     fn get_raw_model_ids_from_json(account_path: &PathBuf) -> Option<HashSet<String>> {
         let content = std::fs::read_to_string(account_path).ok()?;
         let account: serde_json::Value = serde_json::from_str(&content).ok()?;
+        Self::raw_model_ids(&account)
+    }
+
+    fn raw_model_ids(account: &serde_json::Value) -> Option<HashSet<String>> {
         let models = account.get("quota")?.get("models")?.as_array()?;
         let mut result = HashSet::new();
         for model in models {
@@ -1495,7 +1502,11 @@ impl TokenManager {
         &self,
         account_id: &str,
         mapped_model: &str,
+        routing: ModelRoutingMode,
     ) -> String {
+        if routing.is_exact() {
+            return mapped_model.to_owned();
+        }
         let candidates = match Self::build_dynamic_model_candidates(mapped_model) {
             Some(c) => c,
             None => return mapped_model.to_string(),
@@ -1909,6 +1920,24 @@ impl TokenManager {
         session_id: Option<&str>,
         target_model: &str,
     ) -> Result<(String, String, String, String, u64), String> {
+        self.get_token_with_routing(
+            quota_group,
+            force_rotate,
+            session_id,
+            target_model,
+            ModelRoutingMode::Compatible,
+        )
+        .await
+    }
+
+    pub async fn get_token_with_routing(
+        &self,
+        quota_group: &str,
+        force_rotate: bool,
+        session_id: Option<&str>,
+        target_model: &str,
+        routing: ModelRoutingMode,
+    ) -> Result<(String, String, String, String, u64), String> {
         let excluded_accounts = HashSet::new();
         self.get_token_filtered(
             quota_group,
@@ -1916,6 +1945,7 @@ impl TokenManager {
             session_id,
             target_model,
             &excluded_accounts,
+            routing,
         )
         .await
     }
@@ -1927,6 +1957,26 @@ impl TokenManager {
         target_model: &str,
         scheduler: &Arc<ImageScheduler>,
         request_timeout: u64,
+    ) -> Result<(String, String, String, String, u64, ImagePermit), (StatusCode, String)> {
+        self.get_image_token_with_routing(
+            force_rotate,
+            session_id,
+            target_model,
+            scheduler,
+            request_timeout,
+            ModelRoutingMode::Compatible,
+        )
+        .await
+    }
+
+    pub async fn get_image_token_with_routing(
+        &self,
+        force_rotate: bool,
+        session_id: Option<&str>,
+        target_model: &str,
+        scheduler: &Arc<ImageScheduler>,
+        request_timeout: u64,
+        routing: ModelRoutingMode,
     ) -> Result<(String, String, String, String, u64, ImagePermit), (StatusCode, String)> {
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_secs(request_timeout);
@@ -1945,6 +1995,7 @@ impl TokenManager {
                         session_id,
                         target_model,
                         &busy_accounts,
+                        routing,
                     ),
                 )
                 .await;
@@ -1990,14 +2041,7 @@ impl TokenManager {
         }
     }
 
-    async fn get_token_filtered(
-        &self,
-        quota_group: &str,
-        force_rotate: bool,
-        session_id: Option<&str>,
-        target_model: &str,
-        excluded_accounts: &HashSet<String>,
-    ) -> Result<(String, String, String, String, u64), String> {
+    pub async fn refresh_pending_accounts(&self) {
         // [FIX] 检查并处理待重新加载的账号（配额保护同步）
         let pending_reload = crate::proxy::server::take_pending_reload_accounts();
         for account_id in pending_reload {
@@ -2020,6 +2064,18 @@ impl TokenManager {
                 account_id
             );
         }
+    }
+
+    async fn get_token_filtered(
+        &self,
+        quota_group: &str,
+        force_rotate: bool,
+        session_id: Option<&str>,
+        target_model: &str,
+        excluded_accounts: &HashSet<String>,
+        routing: ModelRoutingMode,
+    ) -> Result<(String, String, String, String, u64), String> {
+        self.refresh_pending_accounts().await;
 
         // 【优化 Issue #284】添加 15 秒超时，防止死锁（为多账号热路径刷新容灾留足窗口）
         let timeout_duration = std::time::Duration::from_secs(15);
@@ -2031,6 +2087,7 @@ impl TokenManager {
                 session_id,
                 target_model,
                 excluded_accounts,
+                routing,
             ),
         )
         .await
@@ -2051,10 +2108,20 @@ impl TokenManager {
         session_id: Option<&str>,
         target_model: &str,
         excluded_accounts: &HashSet<String>,
+        routing: ModelRoutingMode,
     ) -> Result<(String, String, String, String, u64), String> {
         let mut tokens_snapshot: Vec<ProxyToken> =
             self.tokens.iter().map(|e| e.value().clone()).collect();
         tokens_snapshot.retain(|token| !excluded_accounts.contains(&token.account_id));
+        if routing.is_exact() {
+            tokens_snapshot.retain(|token| token.raw_models.contains(target_model));
+            if tokens_snapshot.is_empty() {
+                return Err(format!(
+                    "No accounts report the requested model: {}",
+                    target_model
+                ));
+            }
+        }
         let mut total = tokens_snapshot.len();
         if total == 0 {
             return Err("Token pool is empty".to_string());
@@ -2067,7 +2134,7 @@ impl TokenManager {
         // 当存在明确具备该模型能力的账号时，严格只保留具备能力的账号。
         // 若所有账号皆尚未拉取到明确的模型目录（例如冷启动或离线），则平滑降级为 PRO / ULTRA 订阅层门禁兜底。
         let is_advanced_claude = crate::proxy::model_specs::is_claude_v5_or_above(target_model);
-        if is_advanced_claude {
+        if is_advanced_claude && !routing.is_exact() {
             let before_tier = tokens_snapshot.len();
 
             // 1.1 先行保留符合基本高级订阅资质的账号 (PRO / ULTRA)
@@ -4260,9 +4327,7 @@ impl TokenManager {
     pub fn get_raw_collected_models(&self) -> std::collections::HashSet<String> {
         self.tokens
             .iter()
-            .flat_map(|entry| {
-                Self::get_raw_model_ids_from_json(&entry.value().account_path).unwrap_or_default()
-            })
+            .flat_map(|entry| entry.value().raw_models.clone())
             .collect()
     }
 
@@ -5308,6 +5373,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_model_selection_does_not_use_a_shared_quota_bucket_as_capability() {
+        let root = std::env::temp_dir().join(format!("exact-model-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("accounts")).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        for (id, model) in [
+            ("original", "gemini-2.5-flash"),
+            ("other", "gemini-3.1-flash-lite"),
+        ] {
+            let account = serde_json::json!({
+                "id": id, "email": format!("{}@test.invalid", id),
+                "token": {
+                    "access_token": "test", "refresh_token": "test",
+                    "expires_in": 3600, "expiry_timestamp": now + 3600,
+                    "project_id": "test-project"
+                },
+                "quota": {"models": [
+                    {"name": model, "percentage": 80},
+                    {"name": "gemini-3.1-flash-image", "percentage": 80}
+                ]},
+                "disabled": false, "proxy_disabled": false
+            });
+            std::fs::write(
+                root.join("accounts").join(format!("{}.json", id)),
+                serde_json::to_vec(&account).unwrap(),
+            )
+            .unwrap();
+        }
+        let manager = TokenManager::new(root.clone());
+        manager.load_accounts().await.unwrap();
+        manager.set_preferred_account(Some("other".into())).await;
+        manager
+            .session_accounts
+            .insert("same-session".into(), "other".into());
+        let selected = manager
+            .get_token_with_routing(
+                "gemini",
+                false,
+                Some("same-session"),
+                "gemini-2.5-flash",
+                ModelRoutingMode::Exact,
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected.3, "original");
+        // Missing max_output_tokens metadata must not hide a reported model.
+        assert!(manager
+            .get_token_by_id("original")
+            .unwrap()
+            .model_limits
+            .is_empty());
+        assert_eq!(
+            manager
+                .resolve_dynamic_model_for_account(
+                    "other",
+                    "gemini-3-flash-image",
+                    ModelRoutingMode::Exact,
+                )
+                .await,
+            "gemini-3-flash-image"
+        );
+        assert_eq!(
+            manager
+                .resolve_dynamic_model_for_account(
+                    "other",
+                    "gemini-3-flash-image",
+                    ModelRoutingMode::Compatible,
+                )
+                .await,
+            "gemini-3.1-flash-image"
+        );
+        manager.remove_account("original");
+        let error = manager
+            .get_token_with_routing(
+                "gemini",
+                false,
+                None,
+                "gemini-2.5-flash",
+                ModelRoutingMode::Exact,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("No accounts report the requested model"));
+        // Catalog admission observes queued account refreshes before rejecting a new ID.
+        let path = root.join("accounts/other.json");
+        let mut account: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        account["quota"]["models"] = serde_json::json!([
+            {"name": "gemini-3.8-flash-high", "percentage": 80}
+        ]);
+        std::fs::write(path, serde_json::to_vec(&account).unwrap()).unwrap();
+        crate::proxy::server::trigger_account_reload("other");
+        let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
+            &tokio::sync::RwLock::new(Default::default()),
+            Some(&manager),
+            true,
+        )
+        .await;
+        assert!(catalog.contains(&"gemini-3.8-flash-high".to_owned()));
+        assert!(!catalog.contains(&"gemini-3.1-flash-lite".to_owned()));
+        assert!(manager
+            .get_token_by_id("other")
+            .unwrap()
+            .raw_models
+            .contains("gemini-3.8-flash-high"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_sticky_session_skips_bound_account_when_disabled_on_disk_without_reload() {
         let tmp_root = std::env::temp_dir().join(format!(
             "antigravity-token-manager-test-sticky-disabled-{}",
@@ -5408,6 +5581,7 @@ mod tests {
             validation_blocked: false,
             validation_blocked_until: 0,
             validation_url: None,
+            raw_models: Default::default(),
             model_quotas: HashMap::new(),
             model_limits: HashMap::new(),
         }
@@ -5799,6 +5973,7 @@ mod tests {
             validation_blocked: false,
             validation_blocked_until: 0,
             validation_url: None,
+            raw_models: Default::default(),
             model_quotas: HashMap::new(),
             model_limits: HashMap::new(),
         }
@@ -6405,6 +6580,7 @@ mod tests {
             validation_blocked: false,
             validation_blocked_until: 0,
             validation_url: None,
+            raw_models: Default::default(),
             model_quotas: quotas1,
             model_limits: limits1,
         };
@@ -6432,6 +6608,7 @@ mod tests {
             validation_blocked: false,
             validation_blocked_until: 0,
             validation_url: None,
+            raw_models: Default::default(),
             model_quotas: quotas2,
             model_limits: limits2,
         };
@@ -6525,6 +6702,7 @@ mod tests {
             validation_blocked: false,
             validation_blocked_until: 0,
             validation_url: None,
+            raw_models: Default::default(),
             model_quotas: quotas,
             model_limits: limits,
         };
@@ -6594,6 +6772,7 @@ mod tests {
             validation_blocked: false,
             validation_blocked_until: 0,
             validation_url: None,
+            raw_models: Default::default(),
             model_quotas: HashMap::new(),
             model_limits: HashMap::new(),
         };

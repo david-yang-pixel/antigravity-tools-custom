@@ -333,7 +333,7 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
     let config = crate::proxy::ProxyConfig {
         port,
         api_key: "test-gateway-admin".into(),
-        only_raw_quota_models: false,
+        only_raw_quota_models: true,
         custom_mapping: std::collections::HashMap::from([(
             "customer-sonnet".into(),
             "claude-sonnet-4-6".into(),
@@ -358,6 +358,32 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
         .build()
         .unwrap();
     let base = status.base_url;
+    // Raw model admission runs before billing and any provider call.
+    for path in [
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/v1/messages",
+        "/v1beta/models/unsupported-model:generateContent",
+    ] {
+        let rejected = client.post(format!("{base}{path}")).bearer_auth(&token.token)
+            .json(&json!({"model":"unsupported-model","messages":[{"role":"user","content":"hello"}]}))
+            .send().await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let body: Value = rejected.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "model_not_supported");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("可用模型"));
+    }
+    assert_eq!(
+        db::get_token_by_id(&token.id)
+            .unwrap()
+            .unwrap()
+            .balance_micros,
+        Some(1_000_000)
+    );
+    assert_eq!(db::usage_logs_for_token(&token.id, 1).unwrap().total, 0);
     // The same settings save used by the Web UI must update the running scheduler.
     let mut saved = crate::models::AppConfig::new();
     saved.proxy = config;
@@ -700,8 +726,8 @@ async fn assert_zero_balance_admin_policy(client: &reqwest::Client, base: &str) 
         (model, StatusCode::PAYMENT_REQUIRED, "insufficient_balance"),
         (
             "unpriced-workbuddy-model",
-            StatusCode::FORBIDDEN,
-            "model_not_priced",
+            StatusCode::BAD_REQUEST,
+            "model_not_supported",
         ),
     ] {
         let denied = client

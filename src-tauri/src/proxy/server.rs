@@ -700,7 +700,7 @@ impl AxumServer {
             )
             // 应用 AI 服务特定的层
             // 注意：Axum layer 执行顺序是从下往上（洋葱模型）
-            // 请求: ip_filter -> auth -> user_token_limits -> monitor -> upstream routing -> handler
+            // 请求: ip_filter -> auth -> model_catalog -> user_token_limits -> monitor -> upstream routing -> handler
             // 响应: handler -> monitor -> user_token_limits -> auth -> ip_filter
             // monitor 需要在 auth 之后执行才能获取 UserTokenIdentity
             .layer(axum::middleware::from_fn_with_state(
@@ -713,6 +713,10 @@ impl AxumServer {
             ))
             .layer(axum::middleware::from_fn(
                 crate::proxy::middleware::user_token_limits::user_token_limits_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::proxy::middleware::model_catalog::validate_model,
             ))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),

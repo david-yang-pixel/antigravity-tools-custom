@@ -1,3 +1,4 @@
+use crate::proxy::common::model_mapping::ModelRoutingMode;
 use crate::proxy::server::AppState;
 use axum::{
     extract::State,
@@ -502,6 +503,7 @@ pub fn should_rotate_account(status_code: u16, strategy: Option<&RetryStrategy>)
 /// POST /v1/models/detect
 pub async fn handle_detect_model(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     Json(body): Json<Value>,
 ) -> Response {
     let model_name = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -511,13 +513,10 @@ pub async fn handle_detect_model(
     }
 
     // 1. Resolve mapping
-    let mapped_model = crate::proxy::common::model_mapping::resolve_model_route(
-        model_name,
-        &*state.custom_mapping.read().await,
-    );
+    let mapped_model = routing.resolve(model_name, &*state.custom_mapping.read().await, None);
 
     // 2. Resolve capabilities
-    let config = crate::proxy::mappers::common_utils::resolve_request_config(
+    let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
         model_name,
         &mapped_model,
         &None, // We don't check tools for static capability detection
@@ -525,6 +524,7 @@ pub async fn handle_detect_model(
         None,  // quality
         None,  // image_size
         None,  // body (not needed for static detection)
+        routing,
     );
 
     // 3. Construct response
