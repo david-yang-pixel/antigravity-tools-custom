@@ -1,4 +1,3 @@
-use crate::proxy::common::model_mapping::ModelRoutingMode;
 // Gemini v1internal 包装/解包
 use serde_json::{json, Value};
 use tracing::{debug, info};
@@ -15,33 +14,6 @@ pub fn wrap_request_v2(
     // 内容压缩已不再在网关执行。参数保留，避免改动各协议调用点。
     _upstream: Option<&std::sync::Arc<crate::proxy::upstream::client::UpstreamClient>>,
     upstream_session_id: Option<&str>,
-) -> Value {
-    wrap_request_with_routing(
-        body,
-        project_id,
-        mapped_model,
-        account_id,
-        session_id,
-        token,
-        _token_manager,
-        _upstream,
-        upstream_session_id,
-        ModelRoutingMode::Compatible,
-    )
-}
-
-pub fn wrap_request_with_routing(
-    body: &Value,
-    project_id: &str,
-    mapped_model: &str,
-    account_id: Option<&str>,
-    session_id: Option<&str>,
-    token: Option<&crate::proxy::token_manager::ProxyToken>, // [NEW] 动态规格注入
-    _token_manager: Option<&std::sync::Arc<crate::proxy::TokenManager>>,
-    // 内容压缩已不再在网关执行。参数保留，避免改动各协议调用点。
-    _upstream: Option<&std::sync::Arc<crate::proxy::upstream::client::UpstreamClient>>,
-    upstream_session_id: Option<&str>,
-    routing: ModelRoutingMode,
 ) -> Value {
     // 优先使用传入的 mapped_model，其次尝试从 body 获取
     let original_model = body
@@ -693,7 +665,7 @@ pub fn wrap_request_with_routing(
     let image_size = body.get("imageSize").and_then(|v| v.as_str()); // [NEW] Direct imageSize support
 
     // Use shared grounding/config logic
-    let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
+    let config = crate::proxy::mappers::common_utils::resolve_request_config(
         original_model,
         final_model_name,
         &tools_val,
@@ -701,7 +673,6 @@ pub fn wrap_request_with_routing(
         quality,    // [FIX] Pass quality parameter
         image_size, // [NEW] Pass direct imageSize parameter
         Some(body), // [NEW] Pass request body for imageConfig parsing
-        routing,
     );
 
     // Clean tool declarations (remove forbidden Schema fields like multipleOf, and remove redundant search decls)

@@ -1,35 +1,7 @@
 // Common utilities for request mapping across all protocols
 // Provides unified grounding/networking logic
 
-use crate::proxy::common::model_mapping::ModelRoutingMode;
 use serde_json::{json, Value};
-
-/// Keep payload adaptation, while preventing compatibility aliases from changing
-/// the exact account-reported model selected by the caller.
-pub fn resolve_request_config_with_routing(
-    original_model: &str,
-    mapped_model: &str,
-    tools: &Option<Vec<Value>>,
-    size: Option<&str>,
-    quality: Option<&str>,
-    image_size: Option<&str>,
-    body: Option<&Value>,
-    routing: ModelRoutingMode,
-) -> RequestConfig {
-    let mut config = resolve_request_config(
-        original_model,
-        mapped_model,
-        tools,
-        size,
-        quality,
-        image_size,
-        body,
-    );
-    if routing.is_exact() {
-        config.final_model = mapped_model.to_owned();
-    }
-    config
-}
 
 /// Request configuration after grounding resolution
 #[derive(Debug, Clone)]

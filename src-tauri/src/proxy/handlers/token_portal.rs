@@ -330,12 +330,12 @@ fn priced_models(
 
 fn permitted_catalog(
     catalog: Vec<String>,
-    _free_models: &[String],
+    free_models: &[String],
     rules: &[billing::ModelPrice],
 ) -> Vec<String> {
     catalog
         .into_iter()
-        .filter(|model| billing::match_price(rules, model).is_some())
+        .filter(|model| billing::policy_for_model(free_models, rules, model).is_some())
         .collect()
 }
 
@@ -929,7 +929,7 @@ mod tests {
     use crate::proxy::monitor::prompt_log_tests::TestDataDir;
 
     #[test]
-    fn user_token_portal_catalog_requires_price_even_with_free_grant() {
+    fn user_token_portal_catalog_requires_explicit_free_grant_or_price() {
         let catalog = vec![
             "upstream-a".into(),
             "upstream-b".into(),
@@ -946,7 +946,7 @@ mod tests {
         let free = vec!["models/free-model".into(), "old-alias".into()];
         assert_eq!(
             permitted_catalog(catalog.clone(), &free, &rules),
-            vec!["upstream-a", "upstream-b"]
+            vec!["upstream-a", "upstream-b", "free-model"]
         );
         assert_eq!(
             permitted_catalog(catalog.clone(), &[], &rules),
@@ -954,7 +954,7 @@ mod tests {
         );
         assert_eq!(
             permitted_catalog(catalog.clone(), &free, &[]),
-            Vec::<String>::new()
+            vec!["free-model"]
         );
         assert!(permitted_catalog(catalog, &[], &[]).is_empty());
         assert!(permitted_catalog(vec![], &free, &rules).is_empty());
@@ -964,17 +964,7 @@ mod tests {
                 &["free-model".into()],
                 &[]
             ),
-            Vec::<String>::new()
-        );
-        let zero = vec![billing::ModelPrice {
-            pattern: "free-model".into(),
-            price: billing::Price::PerCall {
-                call_price_micros: 0,
-            },
-        }];
-        assert_eq!(
-            permitted_catalog(vec!["free-model".into()], &[], &zero),
-            vec!["free-model"]
+            vec!["models/free-model"]
         );
     }
 

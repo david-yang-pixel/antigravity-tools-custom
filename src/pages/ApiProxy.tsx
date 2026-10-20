@@ -31,7 +31,6 @@ import ModalDialog from '../components/common/ModalDialog';
 import { showToast } from '../components/common/ToastContainer';
 import { cn } from '../utils/cn';
 import { useProxyModels } from '../hooks/useProxyModels';
-import ModelCatalogManager from '../components/proxy/ModelCatalogManager';
 import GroupedSelect, { SelectOption } from '../components/common/GroupedSelect';
 import { CliSyncCard } from '../components/proxy/CliSyncCard';
 import { listAccounts } from '../services/accountService';
@@ -1406,15 +1405,12 @@ print(response.choices[0].message.content)`;
         if (!appConfig) return null;
         return (
             <div className="bg-white dark:bg-base-100 rounded-xl shadow-sm border border-gray-100 dark:border-base-200 overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-gray-100 dark:border-base-200 flex flex-wrap items-center justify-between gap-3">
-                    <div>
+                <div className="px-4 py-2.5 border-b border-gray-100 dark:border-base-200">
                     <h2 className="text-base font-bold text-gray-900 dark:text-base-content flex items-center gap-2">
                         <Terminal size={18} />
                         {t('proxy.supported_models.title')}
                     </h2>
                     {(appConfig.proxy.only_raw_quota_models ?? true) && <p className="text-xs text-gray-500 mt-1">{t('proxy.supported_models.upstream_notice')}</p>}
-                    </div>
-                    <ModelCatalogManager models={models.map(model => model.id)} onChange={refreshModels} />
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-0 lg:divide-x dark:divide-gray-700">

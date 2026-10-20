@@ -52,9 +52,6 @@ pub struct Account {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_history: Vec<DeviceProfileVersion>,
     pub quota: Option<QuotaData>,
-    /// Actual inference results; a candidate catalog alone never grants model access.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_verification: Option<crate::modules::model_verification::Evidence>,
     /// Disabled accounts are ignored by the proxy token pool (e.g. revoked refresh_token -> invalid_grant).
     #[serde(default)]
     pub disabled: bool,
@@ -116,7 +113,6 @@ impl Account {
             device_profile: None,
             device_history: Vec::new(),
             quota: None,
-            model_verification: None,
             disabled: false,
             disabled_reason: None,
             disabled_at: None,

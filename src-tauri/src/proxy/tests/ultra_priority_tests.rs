@@ -37,7 +37,6 @@ fn create_test_token(
     }
 
     ProxyToken {
-        raw_models: Default::default(),
         account_id: email.to_string(),
         priority: crate::models::account::default_priority(),
         access_token: "test_token".to_string(),

@@ -20,7 +20,7 @@
 
 - 概览展示余额、累计 Token 用量、请求数、并发和到期状态；Token 数以 M tokens（百万）展示。
 - 余额页提供充值及充值记录；有效期内的待支付订单可继续支付并显示倒计时。
-- 可用模型只展示管理员已添加、当前有账号通过测试且已定价的模型。免费授权不代替定价；价格可以设置为 0。
+- 可用模型来自当前上游目录，只展示该 Key 的免费模型或已定价模型，并显示对应价格。
 - 每模型汇总请求、失败、输入、输出、缓存及总用量；日统计为最近 30 天，周统计为最近 12 周，按 UTC+8 切日、周一开始。
 - 调用日志每页 20 条，包含时间、模型、状态码、输入、输出、缓存、总 Token 和实际扣费金额。支持 UTC+8 起止时间筛选，包含边界。鉴权或计费准入阶段拒绝的请求不进入调用日志。
 
@@ -54,64 +54,23 @@
 
 部署前备份镜像引用、Compose 和数据目录。自动回滚恢复旧镜像并保留数据库；回滚后的计费行为取决于该旧版本，不应通过删除兼容列或清零用量来处理。完整快照恢复需要单独评估。
 
-### Model discovery, testing, selection and pricing
+### Upstream model catalogs
 
-`proxy.only_raw_quota_models` defaults to `true`. In this mode, **API Proxy →
-Supported Models & Integration → Fetch Models** opens the model manager:
+`proxy.only_raw_quota_models` defaults to `true` for new configurations. Enable
+**Upstream Models Only** on existing installations to use exact model IDs reported
+by accounts in the proxy pool. The admin integration table, CLI model choices,
+Token model selector, protocol model-list APIs and usage portal share the backend
+catalog. No built-in models, derived names, normalized quota buckets or version
+baseline substitutions are added in this mode. Empty pools produce empty catalogs.
 
-1. Choose **Antigravity** or **WorkBuddy** and fetch candidate IDs. Discovery does
-   not prove permission and does not run inference.
-2. Select candidates and test individually or in a batch. Checks consume upstream
-   quota. A successful test never adds a model automatically.
-3. Select successful models and click **Add Selected**. Added IDs become available
-   to administrators for model pricing, including models not yet priced.
-4. Use **Model Pricing** to assign per-call or per-token prices. Only added,
-   currently verified models matching a price rule appear in the public protocol
-   model-list APIs and the usage portal. Zero prices and wildcard price rules are
-   supported. A per-key free grant alone does not make an unpriced model visible.
+The portal filters this catalog to models explicitly free for the key or matched
+by a configured price. Free-model grants and request routing are not rewritten
+when catalog entries change.
+Disabling the option restores the legacy expanded catalog. Web/Docker settings
+apply immediately, without restarting the service.
 
-Selection is stored in `published_models.json` under the data directory, with one
-provider per model ID. Remove an ID before adding it from another provider.
-Existing accounts require verification and explicit selection when upgrading;
-there is no automatic import from the upstream catalog. Configure selections and
-prices before serving traffic. Removing a selection does not erase price rules.
-Disabling the setting restores the legacy expanded catalog/routing behavior;
-public lists still require pricing. Settings apply without a restart.
-
-The headless admin API uses the same workflow (admin authentication required):
-
-- `POST /api/model-catalog/candidates` with
-  `{"provider":"antigravity","refresh":true}` fetches candidates. Omit `refresh`
-  or use `false` to read cached results without contacting upstream.
-- `POST /api/model-catalog/test` with
-  `{"provider":"antigravity","model_ids":["exact-upstream-id"]}` starts tests.
-  Poll `GET /api/model-catalog/test?provider=antigravity` for progress.
-- `POST /api/model-catalog/selection` with
-  `{"provider":"antigravity","add":["exact-upstream-id"],"remove":[]}` changes
-  the manual selection; unverified additions are rejected. Use `workbuddy` as the
-  provider for WorkBuddy accounts.
-- `GET /api/user-token-models` returns the admin's added IDs, including unpriced
-  IDs. Existing model-pricing endpoints then configure prices.
-
-Jobs are limited to 500 account/model pairs, one inference at a time, 30 seconds
-per probe and 30 minutes overall. Antigravity results persist after each probe;
-WorkBuddy saves completed accounts. Account credentials/project changes invalidate
-Antigravity evidence. Token refresh and quota sync preserve newer verification
-results. Provider selection prevents success on one provider being treated as
-proof for another, and inference only selects verified eligible accounts.
-
-Generated output establishes point-in-time support, not a guarantee of future
-capacity or every optional feature. Explicit model permission/not-found errors
-revoke support; throttling, quota exhaustion, transport errors and request
-parameter errors remain inconclusive and preserve earlier successes. Exact mode
-keeps upstream IDs without automatic version/model substitution. Unselected or
-unsupported IDs return HTTP 400 `model_not_supported` with a link-free instruction
-to check Available Models, before billing or inference.
-
-Antigravity penalty compatibility is shared by all incoming protocols: zero
-`presencePenalty` / `frequencyPenalty` values are omitted. If upstream returns
-HTTP 400 with `Penalty is not enabled for this model`, the gateway removes only
-these two parameters and retries once on the same endpoint, model and account.
-Nonzero penalty preferences are ignored only after this explicit rejection;
-other errors and unrelated generation settings are preserved. This does not
-claim to fix every HTTP 400 or make an unsupported model usable.
+An upstream catalog is not a health check: a listed model may still be limited or
+routed to another model. In the 2026-10-14 production checks, 17 of 18 upstream IDs
+returned generated content across the checks; `gemini-2.5-pro` returned HTTP 429.
+The three Gemini 2.5 Flash IDs returned `gemini-3.1-flash-lite` in response metadata.
+These observations are point-in-time, not permanent capability guarantees.
