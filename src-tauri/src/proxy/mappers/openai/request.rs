@@ -72,7 +72,7 @@ fn should_preserve_tool_output(tool_name: &str, output: &str) -> bool {
         || output.contains("Expected update hunk")
 }
 
-fn qualify_namespace_tool_name(namespace_name: &str, child_name: &str) -> String {
+pub(crate) fn qualify_namespace_tool_name(namespace_name: &str, child_name: &str) -> String {
     let child = child_name.trim();
     let ns = namespace_name.trim();
     if child.is_empty() || ns.is_empty() || child.starts_with("mcp__") {

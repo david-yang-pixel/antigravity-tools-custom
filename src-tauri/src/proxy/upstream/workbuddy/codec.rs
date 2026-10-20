@@ -1,7 +1,7 @@
 //! Protocol conversion at the native provider boundary; billing remains in shared middleware.
 use crate::proxy::pipeline::usage::CanonicalUsage;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -151,9 +151,9 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
                 for item in items {
                     match item.get("type").and_then(Value::as_str).unwrap_or("message") {
                     "message" => messages.push(json!({"role":item.get("role").cloned().unwrap_or(json!("user")),"content":response_content(&item["content"])?})),
-                    "function_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":required(item,"name")?,"arguments":required(item,"arguments")?}}]})),
+                    "function_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":call_name(item)?,"arguments":required(item,"arguments")?}}]})),
                     // Custom (freeform) tool calls travel as function calls with a single `input` string argument.
-                    "custom_tool_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":required(item,"name")?,"arguments":json!({"input":text(item,"input")}).to_string()}}]})),
+                    "custom_tool_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":call_name(item)?,"arguments":json!({"input":text(item,"input")}).to_string()}}]})),
                     "function_call_output" | "custom_tool_call_output" => messages.push(json!({"role":"tool","tool_call_id":required(item,"call_id")?,"content": if item["output"].is_string() { item["output"].clone() } else { response_content(&item["output"])? }})),
                     "reasoning" => { /* Reasoning summaries are metadata, not user instructions. */ }
                     _ if drop_hosted_web_search(item, "input item") => {}
@@ -170,32 +170,33 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
             out["reasoning_effort"] = effort.clone();
         }
         if let Some(tools) = body.get("tools") {
-            let tools = tools
-                .as_array()
-                .ok_or("tools must be an array")?
-                .iter()
-                .filter(|tool| !drop_hosted_web_search(tool, "tool"))
-                .map(|tool| {
-                    if tool["type"] == "custom" {
-                        return Ok(custom_tool_as_function(tool));
+            let mut converted = Vec::new();
+            for tool in tools.as_array().ok_or("tools must be an array")? {
+                if drop_hosted_web_search(tool, "tool") {
+                    continue;
+                }
+                if tool["type"] == "namespace" {
+                    // Native tools are flat; the qualified name maps back in `Output`.
+                    let namespace = required(tool, "name")?;
+                    for child in array(tool, "tools")? {
+                        let mut child = child.clone();
+                        child["name"] =
+                            json!(namespaced_name(&namespace, &required(&child, "name")?));
+                        converted.push(responses_tool(&child)?);
                     }
-                    if tool["type"] != "function" {
-                        return Err("WorkBuddy supports function and custom tools only".to_owned());
-                    }
-                    let mut function = tool.clone();
-                    function.as_object_mut().unwrap().remove("type");
-                    Ok(json!({"type":"function","function":function}))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            if !tools.is_empty() {
-                out["tools"] = json!(tools);
+                    continue;
+                }
+                converted.push(responses_tool(tool)?);
+            }
+            if !converted.is_empty() {
+                out["tools"] = json!(converted);
             }
         }
         if let Some(choice) = body.get("tool_choice") {
             out["tool_choice"] = if choice.is_string() {
                 choice.clone()
             } else if choice["type"] == "function" || choice["type"] == "custom" {
-                json!({"type":"function","function":{"name":required(choice,"name")?}})
+                json!({"type":"function","function":{"name":call_name(choice)?}})
             } else if drop_hosted_web_search(choice, "tool_choice") {
                 json!("auto")
             } else {
@@ -299,6 +300,64 @@ fn drop_hosted_web_search(value: &Value, kind: &str) -> bool {
     dropped
 }
 
+/// One Responses tool as a native function tool.
+fn responses_tool(tool: &Value) -> Result<Value, String> {
+    if tool["type"] == "custom" {
+        return Ok(custom_tool_as_function(tool));
+    }
+    if tool["type"] != "function" {
+        return Err("WorkBuddy supports function, custom and namespace tools only".to_owned());
+    }
+    let mut function = tool.clone();
+    function.as_object_mut().unwrap().remove("type");
+    Ok(json!({"type":"function","function":function}))
+}
+
+/// Gateway-wide flat name for a namespaced Responses tool (see the OpenAI mapper).
+fn namespaced_name(namespace: &str, name: &str) -> String {
+    crate::proxy::mappers::openai::request::qualify_namespace_tool_name(namespace, name)
+}
+
+/// Name a replayed call or forced choice used upstream: namespaced tools travel flat.
+fn call_name(item: &Value) -> Result<String, String> {
+    let name = required(item, "name")?;
+    Ok(
+        match item
+            .get("namespace")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty())
+        {
+            Some(namespace) => namespaced_name(namespace, &name),
+            None => name,
+        },
+    )
+}
+
+/// Flat upstream name -> (namespace, client name) for every namespaced Responses
+/// tool, so tool calls return in the form the client registered.
+pub type Namespaced = HashMap<String, (String, String)>;
+
+pub fn namespaced_tools(body: &Value) -> Namespaced {
+    let mut map = Namespaced::new();
+    for tool in body["tools"].as_array().into_iter().flatten() {
+        let Some(namespace) = tool["name"]
+            .as_str()
+            .filter(|_| tool["type"] == "namespace")
+        else {
+            continue;
+        };
+        for child in tool["tools"].as_array().into_iter().flatten() {
+            if let Some(name) = child["name"].as_str() {
+                map.insert(
+                    namespaced_name(namespace, name),
+                    (namespace.into(), name.into()),
+                );
+            }
+        }
+    }
+    map
+}
+
 /// Maps a Responses `custom` (freeform) tool onto a function tool whose only
 /// argument is the raw `input` string, matching the gateway-wide convention.
 fn custom_tool_as_function(tool: &Value) -> Value {
@@ -338,6 +397,7 @@ pub struct Output {
     slots: BTreeMap<String, usize>,
     blocks: Vec<Value>,
     active_block: Option<(String, usize)>,
+    namespaced: Namespaced,
 }
 fn event(value: Value) -> String {
     format!(
@@ -362,7 +422,13 @@ impl Output {
             slots: BTreeMap::new(),
             blocks: Vec::new(),
             active_block: None,
+            namespaced: Namespaced::new(),
         }
+    }
+    /// Restore namespaced Responses tool calls from their flat upstream names.
+    pub fn with_namespaced(mut self, namespaced: Namespaced) -> Self {
+        self.namespaced = namespaced;
+        self
     }
     fn response_event(&mut self, mut value: Value) -> String {
         value["sequence_number"] = json!(self.sequence);
@@ -555,7 +621,12 @@ impl Output {
                         let item_id = format!("fc_{}_{}", self.id, index);
                         let first = !self.slots.contains_key(&key);
                         let args = if first { all_args } else { args };
-                        let output_index = self.response_slot(&key,json!({"id":item_id,"type":"function_call","call_id":tool_id,"name":name,"arguments":"","status":"in_progress"}),&mut events);
+                        let mut item = json!({"id":item_id,"type":"function_call","call_id":tool_id,"name":name,"arguments":"","status":"in_progress"});
+                        if let Some((namespace, client_name)) = self.namespaced.get(&name) {
+                            item["name"] = json!(client_name);
+                            item["namespace"] = json!(namespace);
+                        }
+                        let output_index = self.response_slot(&key, item, &mut events);
                         if !args.is_empty() {
                             events.push(self.response_event(json!({"type":"response.function_call_arguments.delta","item_id":item_id,"output_index":output_index,"delta":args})));
                         }
