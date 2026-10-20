@@ -124,8 +124,11 @@ struct Envelope {
 fn path() -> Result<PathBuf, String> {
     Ok(crate::modules::account::get_data_dir()?.join("workbuddy_accounts.json"))
 }
+fn key_path() -> Result<PathBuf, String> {
+    Ok(crate::modules::account::get_data_dir()?.join("workbuddy_accounts.key"))
+}
 fn key(create: bool) -> Result<[u8; 32], String> {
-    let path = crate::modules::account::get_data_dir()?.join("workbuddy_accounts.key");
+    let path = key_path()?;
     if create && !path.exists() {
         let mut value = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut value);
@@ -151,8 +154,40 @@ fn key(create: bool) -> Result<[u8; 32], String> {
         .try_into()
         .map_err(|_| "Invalid WorkBuddy encryption key".into())
 }
+/// Decrypted accounts and the store/key versions they came from. Every request
+/// reads the pool, while the store changes only on maintenance and admin edits.
+type StoreStamp = (crate::utils::fs::FileStamp, crate::utils::fs::FileStamp);
+static DECRYPTED: Mutex<Option<(StoreStamp, Vec<Account>)>> = Mutex::new(None);
+
 fn read() -> Result<Vec<Account>, String> {
-    let data = match std::fs::read(path()?) {
+    let path = path()?;
+    // Stamp before reading: a rewrite during the read only causes one extra reload.
+    let stamp = crate::utils::fs::file_stamp(&path).zip(crate::utils::fs::file_stamp(&key_path()?));
+    let cached = stamp.as_ref().and_then(|stamp| {
+        let cache = DECRYPTED.lock().ok()?;
+        cache
+            .as_ref()
+            .filter(|(cached, _)| cached == stamp)
+            .map(|(_, accounts)| accounts.clone())
+    });
+    let mut accounts = match cached {
+        Some(accounts) => accounts,
+        None => {
+            let accounts = decrypt_store(&path)?;
+            if let (Some(stamp), Ok(mut cache)) = (stamp, DECRYPTED.lock()) {
+                *cache = Some((stamp, accounts.clone()));
+            }
+            accounts
+        }
+    };
+    // Depends on in-process activity state, so it runs on every read.
+    for account in &mut accounts {
+        super::activity::recover_interrupted(&mut account.management.activity);
+    }
+    Ok(accounts)
+}
+fn decrypt_store(path: &std::path::Path) -> Result<Vec<Account>, String> {
+    let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(_) => return Err("Cannot read WorkBuddy accounts".into()),
@@ -174,12 +209,7 @@ fn read() -> Result<Vec<Account>, String> {
         .map_err(|_| {
             "Cannot decrypt WorkBuddy accounts; restore the matching key and account backup"
         })?;
-    let mut accounts: Vec<Account> =
-        serde_json::from_slice(&plain).map_err(|_| "Invalid WorkBuddy accounts")?;
-    for account in &mut accounts {
-        super::activity::recover_interrupted(&mut account.management.activity);
-    }
-    Ok(accounts)
+    serde_json::from_slice(&plain).map_err(|_| "Invalid WorkBuddy accounts".into())
 }
 fn write(accounts: &[Account]) -> Result<(), String> {
     let cipher = Aes256Gcm::new(&key(true)?.into());
@@ -760,6 +790,21 @@ mod tests {
                 0o600
             );
         }
+    }
+    #[test]
+    fn workbuddy_store_cache_follows_writes_and_external_restores() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let value = json!({"account":{"uid":"u1","nickname":"test"},"auth":{"accessToken":"a","refreshToken":"r","expiresAt":now()+3600}});
+        let id = upsert(parse_import(value).unwrap()).unwrap().id;
+        assert!(get(&id).unwrap().enabled);
+        let backup = std::fs::read(path().unwrap()).unwrap();
+        set_enabled(&id, false).unwrap();
+        assert!(!get(&id).unwrap().enabled);
+        // An in-place restore (same inode) must still be observed.
+        std::fs::write(path().unwrap(), &backup).unwrap();
+        assert!(get(&id).unwrap().enabled);
+        std::fs::remove_file(path().unwrap()).unwrap();
+        assert!(get(&id).is_err());
     }
     #[test]
     fn workbuddy_stale_writes_cannot_resurrect_removed_or_reauthorized_accounts() {

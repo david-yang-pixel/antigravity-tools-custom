@@ -55,7 +55,19 @@ pub(super) fn try_acquire(
     session: &str,
     policy: &Policy,
 ) -> Result<Option<Lease>, String> {
-    try_acquire_inner(model, session, policy, false)
+    try_acquire_inner(model, session, policy, false, &[])
+}
+
+/// Failover for a request whose earlier accounts failed before generation. It never
+/// waits, skips `excluded` (so a session bound to a failed account cannot pin it, even
+/// with the breaker off) and rebinds the session to the account it picks.
+pub fn try_acquire_excluding(
+    model: &str,
+    session: &str,
+    policy: &Policy,
+    excluded: &[String],
+) -> Result<Option<Lease>, String> {
+    try_acquire_inner(model, session, policy, false, excluded)
 }
 
 fn try_acquire_inner(
@@ -63,6 +75,7 @@ fn try_acquire_inner(
     session: &str,
     policy: &Policy,
     probe: bool,
+    excluded: &[String],
 ) -> Result<Option<Lease>, String> {
     let accounts: Vec<_> = all()?
         .into_iter()
@@ -75,6 +88,7 @@ fn try_acquire_inner(
                 }
         })
         .filter(|a| policy.preferred.as_ref().is_none_or(|id| &a.id == id))
+        .filter(|a| !excluded.contains(&a.id))
         .collect();
     if accounts.is_empty() {
         return Err("No eligible WorkBuddy account for this model; check the fixed account, enablement and fetch verified models".into());
@@ -167,7 +181,7 @@ pub async fn acquire_probe(account: &Account, model: &str) -> Result<Lease, Stri
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(lease) = try_acquire_inner(model, "", &policy, true)? {
+        if let Some(lease) = try_acquire_inner(model, "", &policy, true, &[])? {
             if lease.account.revision != account.revision {
                 return Err("WorkBuddy credentials changed while waiting to verify models".into());
             }

@@ -149,6 +149,11 @@ pub fn connect_db() -> Result<Connection, String> {
 /// 初始化数据库
 pub fn init_db() -> Result<(), String> {
     let mut conn = connect_db()?;
+    // Persistent per file. Request admission reads this database while finished
+    // requests settle into it; WAL keeps those reads from waiting on writers.
+    // `synchronous` stays at its default (FULL) because balances live here.
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| format!("Failed to enable WAL: {e}"))?;
     init_db_connection(&mut conn)
 }
 
@@ -1245,87 +1250,112 @@ pub fn record_token_usage_with_policy(
 /// 检查 Token 是否有效 (包含过期时间检查和 IP 限制检查)
 /// 返回: (是否有效, 拒绝原因)
 pub fn validate_token(token_str: &str, ip: &str) -> Result<(bool, Option<String>), String> {
-    let token_opt = get_token_by_value(token_str)?;
+    Ok(
+        match authorize_token(&connect_db()?, TokenLookup::Value(token_str), ip)? {
+            Ok(_) => (true, None),
+            Err(reason) => (false, Some(reason)),
+        },
+    )
+}
 
-    if let Some(token) = token_opt {
-        if !token.enabled {
-            return Ok((false, Some("This token is disabled".into())));
-        }
-        // 1. 检查过期时间
-        if token.expires_type != "never" {
-            if let Some(expires_at) = token.expires_at {
-                if expires_at < Utc::now().timestamp() {
-                    return Ok((
-                        false,
-                        Some(
-                            "Your token has expired. Please contact the administrator to renew it."
-                                .to_string(),
-                        ),
-                    ));
-                }
-            }
-        }
+/// How a request identifies its key.
+#[derive(Clone, Copy)]
+pub enum TokenLookup<'a> {
+    Id(&'a str),
+    Value(&'a str),
+}
 
-        // 2. 检查 IP 限制
-        if token.max_ips > 0 {
-            let conn = connect_db()?;
+/// Loads and validates a key on one connection, so request admission does not
+/// reopen the database for each check. `Ok(Err(reason))` is a rejection.
+pub fn authorize_token(
+    conn: &Connection,
+    lookup: TokenLookup<'_>,
+    ip: &str,
+) -> Result<Result<UserToken, String>, String> {
+    let (sql, value) = match lookup {
+        TokenLookup::Id(id) => ("SELECT * FROM user_tokens WHERE id = ?1", id),
+        TokenLookup::Value(token) => ("SELECT * FROM user_tokens WHERE token = ?1", token),
+    };
+    let token = conn
+        .query_row(sql, params![value], token_from_row)
+        .optional()
+        .map_err(|e| format!("Failed to query token: {}", e))?;
+    let Some(token) = token else {
+        return Ok(Err("Invalid token. Please check your API key.".to_string()));
+    };
+    Ok(match rejection_reason(conn, &token, ip) {
+        Some(reason) => Err(reason),
+        None => Ok(token),
+    })
+}
 
-            // 检查当前 IP 是否已绑定
-            let is_bound: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM token_ip_bindings WHERE token_id = ?1 AND ip_address = ?2)",
-                params![token.id, ip],
-                |row| row.get(0)
-            ).unwrap_or(false);
-
-            if !is_bound {
-                // 如果未绑定，检查是否达到上限
-                let current_ip_count: i32 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM token_ip_bindings WHERE token_id = ?1",
-                        params![token.id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-
-                if current_ip_count >= token.max_ips {
-                    return Ok((false, Some(format!("IP limit reached ({}/{}). Please contact the administrator to increase the limit.", current_ip_count, token.max_ips))));
-                }
-            }
-        }
-
-        // 3. 检查宵禁时间 (Curfew)
-        // 逻辑：如果当前北京时间在 start 和 end 之间，则拒绝
-        // 格式：HH:MM
-        // 使用固定 UTC+8 (北京时间)，不依赖服务器本地时区
-        if let (Some(start_str), Some(end_str)) = (&token.curfew_start, &token.curfew_end) {
-            if !start_str.is_empty() && !end_str.is_empty() {
-                let beijing_offset = FixedOffset::east_opt(8 * 3600).unwrap();
-                let now_beijing = Utc::now().with_timezone(&beijing_offset);
-                let current_time_str =
-                    format!("{:02}:{:02}", now_beijing.hour(), now_beijing.minute());
-
-                // 跨午夜处理: start > end (e.g. 23:00 to 06:00)
-                // 正常: start < end (e.g. 09:00 to 18:00)
-                let is_curfew = if start_str > end_str {
-                    current_time_str >= *start_str || current_time_str < *end_str
-                } else {
-                    current_time_str >= *start_str && current_time_str < *end_str
-                };
-
-                if is_curfew {
-                    return Ok((false, Some(format!("Service is not available between {} and {} Beijing Time (Curfew enabled). Current Beijing time: {}", start_str, end_str, current_time_str))));
-                }
-            }
-        }
-
-        // 一切正常，Token 有效
-        Ok((true, None))
-    } else {
-        Ok((
-            false,
-            Some("Invalid token. Please check your API key.".to_string()),
-        ))
+fn rejection_reason(conn: &Connection, token: &UserToken, ip: &str) -> Option<String> {
+    if !token.enabled {
+        return Some("This token is disabled".into());
     }
+    // 1. 检查过期时间
+    if token.expires_type != "never" {
+        if let Some(expires_at) = token.expires_at {
+            if expires_at < Utc::now().timestamp() {
+                return Some(
+                    "Your token has expired. Please contact the administrator to renew it."
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // 2. 检查 IP 限制
+    if token.max_ips > 0 {
+        // 检查当前 IP 是否已绑定
+        let is_bound: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM token_ip_bindings WHERE token_id = ?1 AND ip_address = ?2)",
+            params![token.id, ip],
+            |row| row.get(0)
+        ).unwrap_or(false);
+
+        if !is_bound {
+            // 如果未绑定，检查是否达到上限
+            let current_ip_count: i32 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM token_ip_bindings WHERE token_id = ?1",
+                    params![token.id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            if current_ip_count >= token.max_ips {
+                return Some(format!("IP limit reached ({}/{}). Please contact the administrator to increase the limit.", current_ip_count, token.max_ips));
+            }
+        }
+    }
+
+    // 3. 检查宵禁时间 (Curfew)
+    // 逻辑：如果当前北京时间在 start 和 end 之间，则拒绝
+    // 格式：HH:MM
+    // 使用固定 UTC+8 (北京时间)，不依赖服务器本地时区
+    if let (Some(start_str), Some(end_str)) = (&token.curfew_start, &token.curfew_end) {
+        if !start_str.is_empty() && !end_str.is_empty() {
+            let beijing_offset = FixedOffset::east_opt(8 * 3600).unwrap();
+            let now_beijing = Utc::now().with_timezone(&beijing_offset);
+            let current_time_str = format!("{:02}:{:02}", now_beijing.hour(), now_beijing.minute());
+
+            // 跨午夜处理: start > end (e.g. 23:00 to 06:00)
+            // 正常: start < end (e.g. 09:00 to 18:00)
+            let is_curfew = if start_str > end_str {
+                current_time_str >= *start_str || current_time_str < *end_str
+            } else {
+                current_time_str >= *start_str && current_time_str < *end_str
+            };
+
+            if is_curfew {
+                return Some(format!("Service is not available between {} and {} Beijing Time (Curfew enabled). Current Beijing time: {}", start_str, end_str, current_time_str));
+            }
+        }
+    }
+
+    // 一切正常，Token 有效
+    None
 }
 
 /// 获取 IP 关联的用户名 (用于 IP 管理页面)
@@ -1371,6 +1401,39 @@ mod tests {
             Some(models.iter().map(|model| (*model).to_string()).collect()),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn user_token_db_reads_do_not_wait_for_writers() {
+        let _dir = TestDataDir::new();
+        init_db().unwrap();
+        let writer = connect_db().unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let token = create_token(
+            "wal-test".into(),
+            "never".into(),
+            None,
+            0,
+            None,
+            None,
+            None,
+            0,
+            0,
+            Vec::new(),
+        )
+        .unwrap();
+        writer
+            .execute_batch("BEGIN EXCLUSIVE; UPDATE user_tokens SET description = 'busy'")
+            .unwrap();
+        let reader = connect_db().unwrap();
+        reader.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let admitted =
+            authorize_token(&reader, TokenLookup::Value(&token.token), "127.0.0.1").unwrap();
+        assert_eq!(admitted.unwrap().id, token.id);
+        writer.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]

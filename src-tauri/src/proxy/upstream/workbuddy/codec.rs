@@ -106,6 +106,13 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
         if array(&body, "messages")?.is_empty() {
             return Err("messages cannot be empty".into());
         }
+        // Native WorkBuddy names a forced tool by string only; reject other object
+        // choices here so they surface as request errors instead of account failures.
+        if body.get("tool_choice").is_some_and(|c| {
+            c.is_object() && c.pointer("/function/name").is_none_or(|n| !n.is_string())
+        }) {
+            return Err("Unsupported WorkBuddy tool choice".into());
+        }
         return Ok(body);
     }
     let mut out = json!({});

@@ -77,12 +77,28 @@ pub fn valid_model_id(id: &str) -> bool {
 fn settings_path() -> Result<PathBuf, String> {
     Ok(crate::modules::account::get_data_dir()?.join("workbuddy.json"))
 }
+/// Parsed `workbuddy.json`, reused until the file is rewritten; every inference
+/// request consults it.
+static STORED: Mutex<Option<(crate::utils::fs::FileStamp, Settings)>> = Mutex::new(None);
+
 fn stored() -> Result<Settings, String> {
-    match std::fs::read(settings_path()?) {
-        Ok(data) => serde_json::from_slice(&data).map_err(|_| "Invalid workbuddy.json".into()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-        Err(_) => Err("Cannot read WorkBuddy settings".into()),
+    let path = settings_path()?;
+    // Stamp before reading: a rewrite during the read only causes one extra reload.
+    let stamp = crate::utils::fs::file_stamp(&path);
+    if let (Some(stamp), Ok(cache)) = (&stamp, STORED.lock()) {
+        if let Some((_, settings)) = cache.as_ref().filter(|(cached, _)| cached == stamp) {
+            return Ok(settings.clone());
+        }
     }
+    let settings: Settings = match std::fs::read(&path) {
+        Ok(data) => serde_json::from_slice(&data).map_err(|_| "Invalid workbuddy.json")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(_) => return Err("Cannot read WorkBuddy settings".into()),
+    };
+    if let (Some(stamp), Ok(mut cache)) = (stamp, STORED.lock()) {
+        *cache = Some((stamp, settings.clone()));
+    }
+    Ok(settings)
 }
 fn overrides(settings: &mut Settings) -> Result<Vec<&'static str>, String> {
     let mut locked = Vec::new();
@@ -330,6 +346,21 @@ mod tests {
         let settings = load().unwrap();
         assert!(!settings.enabled);
         assert_eq!(settings.models["native-model"], "native-model");
+    }
+
+    #[test]
+    fn workbuddy_settings_cache_follows_manual_edits() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let path = settings_path().unwrap();
+        std::fs::write(&path, r#"{"enabled":true,"models":{"a":"x"}}"#).unwrap();
+        assert_eq!(load().unwrap().models["a"], "x");
+        // Same length, rewritten in place.
+        std::fs::write(&path, r#"{"enabled":true,"models":{"a":"y"}}"#).unwrap();
+        assert_eq!(load().unwrap().models["a"], "y");
+        std::fs::write(&path, "{").unwrap();
+        assert!(load().is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(load().unwrap().models.is_empty());
     }
 
     #[test]

@@ -866,11 +866,10 @@ pub async fn monitor_middleware(
                     }
                 } else if let Ok(s) = std::str::from_utf8(&bytes) {
                     if model.is_none() {
-                        model = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
-                            v.get("model")
-                                .and_then(|m| m.as_str())
-                                .map(|s| s.to_string())
-                        });
+                        model = super::user_token_models::memoized_model(&parts.extensions)
+                            .unwrap_or_else(|| {
+                                super::user_token_models::json_model(&bytes).ok().flatten()
+                            });
                     }
                     Some(s.to_string())
                 } else {

@@ -120,16 +120,27 @@ pub async fn user_token_limits_middleware(mut request: Request, next: Next) -> R
     };
     let ip = super::ip_filter::extract_client_ip(&request).unwrap_or_else(|| "127.0.0.1".into());
     // Also enforce user-key restrictions when proxy auth is Off but a known key is supplied.
-    match crate::modules::user_token_db::validate_token(&identity.token, &ip) {
-        Ok((true, _)) => {},
-        Ok((false, reason)) => return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": {
-            "type": "token_rejected", "code": "token_rejected", "message": reason.unwrap_or_else(|| "Token rejected".into())
-        }}))).into_response(),
-        Err(_) => return LimitError::AccountingUnavailable.into_response(),
-    }
-    let token = match crate::modules::user_token_db::get_token_by_id(&identity.token_id) {
-        Ok(Some(token)) => token,
-        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+    // One connection serves the key check and the price list; nothing awaits while it is open.
+    let admission = crate::modules::user_token_db::connect_db().and_then(|conn| {
+        let token = crate::modules::user_token_db::authorize_token(
+            &conn,
+            crate::modules::user_token_db::TokenLookup::Id(&identity.token_id),
+            &ip,
+        )?;
+        let rules = crate::modules::billing::load_prices_with(&conn)?;
+        Ok((token, rules))
+    });
+    let (token, rules) = match admission {
+        Ok((Ok(token), rules)) => (token, rules),
+        Ok((Err(reason), _)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": {
+                    "type": "token_rejected", "code": "token_rejected", "message": reason
+                }})),
+            )
+                .into_response()
+        }
         Err(_) => return LimitError::AccountingUnavailable.into_response(),
     };
     if request.headers().contains_key(axum::http::header::UPGRADE) {
@@ -154,10 +165,6 @@ pub async fn user_token_limits_middleware(mut request: Request, next: Next) -> R
         Err(response) => return response,
     };
     request = resolved_request;
-    let rules = match crate::modules::billing::load_prices() {
-        Ok(rules) => rules,
-        Err(_) => return LimitError::AccountingUnavailable.into_response(),
-    };
     if let Some(model) = model {
         let Some(policy) =
             crate::modules::billing::policy_for_model(&token.free_models, &rules, &model)

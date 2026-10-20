@@ -173,38 +173,37 @@ async fn auth_middleware_internal(
         let client_ip = crate::proxy::middleware::ip_filter::extract_client_ip(&request)
             .unwrap_or_else(|| "127.0.0.1".to_string()); // Default fallback
 
-        // 验证 Token
-        match crate::modules::user_token_db::validate_token(token, &client_ip) {
-            Ok((true, _)) => {
-                // Token 有效，查询信息以便传递
-                if let Ok(Some(user_token)) =
-                    crate::modules::user_token_db::get_token_by_value(token)
-                {
-                    let identity = UserTokenIdentity {
-                        token_id: user_token.id,
-                        token: user_token.token,
-                        username: user_token.username,
-                    };
+        // 验证 Token (单次连接内完成查询与校验)
+        let authorized = crate::modules::user_token_db::connect_db().and_then(|conn| {
+            crate::modules::user_token_db::authorize_token(
+                &conn,
+                crate::modules::user_token_db::TokenLookup::Value(token),
+                &client_ip,
+            )
+        });
+        match authorized {
+            Ok(Ok(user_token)) => {
+                let identity = UserTokenIdentity {
+                    token_id: user_token.id,
+                    token: user_token.token,
+                    username: user_token.username,
+                };
 
-                    // [FIX] 将身份信息注入到请求 extensions 中，而不是响应
-                    // 这样 monitor_middleware 在处理请求时就能获取到 identity
-                    // 因为中间件执行顺序：auth (外层) -> monitor (内层) -> handler
-                    // 响应返回时：handler -> monitor -> auth
-                    // 如果注入到 response，monitor 执行时 identity 还不存在
-                    let (mut parts, body) = request.into_parts();
-                    parts.extensions.insert(identity);
-                    let request = Request::from_parts(parts, body);
+                // [FIX] 将身份信息注入到请求 extensions 中，而不是响应
+                // 这样 monitor_middleware 在处理请求时就能获取到 identity
+                // 因为中间件执行顺序：auth (外层) -> monitor (内层) -> handler
+                // 响应返回时：handler -> monitor -> auth
+                // 如果注入到 response，monitor 执行时 identity 还不存在
+                let (mut parts, body) = request.into_parts();
+                parts.extensions.insert(identity);
+                let request = Request::from_parts(parts, body);
 
-                    // 执行请求
-                    let response = next.run(request).await;
+                // 执行请求
+                let response = next.run(request).await;
 
-                    Ok(response)
-                } else {
-                    Err(StatusCode::UNAUTHORIZED)
-                }
+                Ok(response)
             }
-            Ok((false, reason)) => {
-                let reason_str = reason.unwrap_or_else(|| "Access denied".to_string());
+            Ok(Err(reason_str)) => {
                 tracing::warn!("UserToken rejected: {}", reason_str);
                 let body = serde_json::json!({
                     "error": {

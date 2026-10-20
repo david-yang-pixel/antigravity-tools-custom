@@ -35,10 +35,67 @@ pub fn is_model_list(request: &Request) -> bool {
         )
 }
 
+/// Memoized result of [`requested_model`]; later layers reuse it instead of
+/// buffering and parsing the same body again.
+#[derive(Clone)]
+struct RequestedModel(Option<String>);
+
+/// The model an earlier layer already resolved for this request, if any.
+pub(crate) fn memoized_model(extensions: &axum::http::Extensions) -> Option<Option<String>> {
+    extensions
+        .get::<RequestedModel>()
+        .map(|RequestedModel(model)| model.clone())
+}
+
+/// Reads only the top-level `model` string of a JSON object. Other fields are
+/// skipped without being materialized, which matters for multi-megabyte contexts.
+/// Matches `Value::get("model").and_then(Value::as_str)` (last duplicate wins).
+pub(crate) fn json_model(bytes: &[u8]) -> Result<Option<String>, serde_json::Error> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+    struct ModelOnly(Option<String>);
+    impl<'de> serde::Deserialize<'de> for ModelOnly {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct ObjectVisitor;
+            impl<'de> Visitor<'de> for ObjectVisitor {
+                type Value = ModelOnly;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a JSON object")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ModelOnly, A::Error> {
+                    let mut model = None;
+                    while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                        if key == "model" {
+                            model = map.next_value::<Value>()?.as_str().map(str::to_owned);
+                        } else {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                    Ok(ModelOnly(model))
+                }
+            }
+            deserializer.deserialize_map(ObjectVisitor)
+        }
+    }
+    serde_json::from_slice::<ModelOnly>(bytes).map(|parsed| parsed.0)
+}
+
 /// The one model a request targets, read without consuming it. `None` for routes
 /// that use no model (model lists, telemetry); a request whose model cannot be
 /// determined is rejected so per-model policies cannot be bypassed.
-pub async fn requested_model(mut request: Request) -> Result<(Request, Option<String>), Response> {
+pub async fn requested_model(request: Request) -> Result<(Request, Option<String>), Response> {
+    if let Some(RequestedModel(model)) = request.extensions().get::<RequestedModel>().cloned() {
+        return Ok((request, model));
+    }
+    let (mut request, model) = resolve_requested_model(request).await?;
+    request
+        .extensions_mut()
+        .insert(RequestedModel(model.clone()));
+    Ok((request, model))
+}
+
+async fn resolve_requested_model(
+    mut request: Request,
+) -> Result<(Request, Option<String>), Response> {
     if is_model_list(&request) {
         return Ok((request, None));
     }
@@ -109,12 +166,10 @@ pub async fn requested_model(mut request: Request) -> Result<(Request, Option<St
             }
             model.ok_or_else(invalid_model)?
         } else {
-            let body: Value = serde_json::from_slice(&bytes).map_err(|_| invalid_model())?;
-            body.get("model")
-                .and_then(Value::as_str)
+            json_model(&bytes)
+                .map_err(|_| invalid_model())?
                 .filter(|v| !v.is_empty())
                 .ok_or_else(invalid_model)?
-                .to_owned()
         };
         request = Request::from_parts(parts, Body::from(bytes));
         model
@@ -229,6 +284,51 @@ mod tests {
                 .unwrap();
             assert_eq!(app().oneshot(req).await.unwrap().status(), status);
         }
+    }
+    #[test]
+    fn user_token_models_json_model_matches_value_lookup() {
+        for body in [
+            r#"{"model":"m1","messages":[{"model":"nested"}]}"#,
+            r#"{"messages":[],"model":"m\u0032"}"#,
+            r#"{"model":"first","model":"last"}"#,
+            r#"{"model":7}"#,
+            r#"{"model":null}"#,
+            r#"{}"#,
+        ] {
+            let expected = serde_json::from_str::<Value>(body)
+                .unwrap()
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            assert_eq!(json_model(body.as_bytes()).unwrap(), expected, "{body}");
+        }
+        // Positional struct forms and malformed JSON must not yield a model.
+        for body in [
+            r#"["m1"]"#,
+            r#""m1""#,
+            r#"{"model":"m1""#,
+            r#"{"model":"m1"} x"#,
+        ] {
+            assert!(json_model(body.as_bytes()).is_err(), "{body}");
+        }
+    }
+    #[tokio::test]
+    async fn user_token_models_memoize_resolution_for_later_layers() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .body(Body::from(r#"{"model":"m1"}"#))
+            .unwrap();
+        let (req, model) = requested_model(req).await.unwrap();
+        assert_eq!(model.as_deref(), Some("m1"));
+        assert_eq!(memoized_model(req.extensions()), Some(Some("m1".into())));
+        // A later layer reuses the resolution and still receives the full body.
+        let (req, model) = requested_model(req).await.unwrap();
+        assert_eq!(model.as_deref(), Some("m1"));
+        assert_eq!(
+            to_bytes(req.into_body(), 100).await.unwrap(),
+            r#"{"model":"m1"}"#
+        );
     }
     #[tokio::test]
     async fn user_token_models_enforce_decoded_gemini_path_and_websocket() {
