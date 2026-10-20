@@ -145,7 +145,9 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
                     match item.get("type").and_then(Value::as_str).unwrap_or("message") {
                     "message" => messages.push(json!({"role":item.get("role").cloned().unwrap_or(json!("user")),"content":response_content(&item["content"])?})),
                     "function_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":required(item,"name")?,"arguments":required(item,"arguments")?}}]})),
-                    "function_call_output" => messages.push(json!({"role":"tool","tool_call_id":required(item,"call_id")?,"content": if item["output"].is_string() { item["output"].clone() } else { response_content(&item["output"])? }})),
+                    // Custom (freeform) tool calls travel as function calls with a single `input` string argument.
+                    "custom_tool_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":required(item,"name")?,"arguments":json!({"input":text(item,"input")}).to_string()}}]})),
+                    "function_call_output" | "custom_tool_call_output" => messages.push(json!({"role":"tool","tool_call_id":required(item,"call_id")?,"content": if item["output"].is_string() { item["output"].clone() } else { response_content(&item["output"])? }})),
                     "reasoning" => { /* Reasoning summaries are metadata, not user instructions. */ }
                     _ => return Err("Unsupported WorkBuddy Responses input item; provide message or function call history".into()),
                 }
@@ -165,8 +167,11 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
                 .ok_or("tools must be an array")?
                 .iter()
                 .map(|tool| {
+                    if tool["type"] == "custom" {
+                        return Ok(custom_tool_as_function(tool));
+                    }
                     if tool["type"] != "function" {
-                        return Err("WorkBuddy supports function tools only".to_owned());
+                        return Err("WorkBuddy supports function and custom tools only".to_owned());
                     }
                     let mut function = tool.clone();
                     function.as_object_mut().unwrap().remove("type");
@@ -177,7 +182,7 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
         if let Some(choice) = body.get("tool_choice") {
             out["tool_choice"] = if choice.is_string() {
                 choice.clone()
-            } else if choice["type"] == "function" {
+            } else if choice["type"] == "function" || choice["type"] == "custom" {
                 json!({"type":"function","function":{"name":required(choice,"name")?}})
             } else {
                 return Err("Unsupported WorkBuddy tool choice".into());
@@ -267,6 +272,24 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
     }
     out["messages"] = json!(messages);
     Ok(out)
+}
+
+/// Maps a Responses `custom` (freeform) tool onto a function tool whose only
+/// argument is the raw `input` string, matching the gateway-wide convention.
+fn custom_tool_as_function(tool: &Value) -> Value {
+    let mut input = json!({"type":"string","description":"Raw freeform input for this tool."});
+    if let Some(definition) = tool.pointer("/format/definition").and_then(Value::as_str) {
+        let syntax = tool
+            .pointer("/format/syntax")
+            .and_then(Value::as_str)
+            .unwrap_or("grammar");
+        input["description"] = json!(format!("Raw freeform input for this tool; it must follow this {syntax} definition:\n{definition}"));
+    }
+    json!({"type":"function","function":{
+        "name": tool["name"],
+        "description": tool.get("description").cloned().unwrap_or(json!("")),
+        "parameters": {"type":"object","properties":{"input":input},"required":["input"]},
+    }})
 }
 
 #[derive(Default)]

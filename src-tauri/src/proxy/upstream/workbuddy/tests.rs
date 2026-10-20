@@ -218,6 +218,24 @@ fn workbuddy_codec_preserves_tools_images_and_rejects_stateful_loss() {
         json!({"input":"hello","tools":[{"type":"web_search"}]})
     )
     .is_err());
+    let converted = convert(Protocol::Responses,json!({"input":[{"type":"custom_tool_call","call_id":"call_p","name":"apply_patch","input":"*** Begin Patch"},{"type":"custom_tool_call_output","call_id":"call_p","output":"ok"}],"tools":[{"type":"custom","name":"apply_patch","description":"Edit files","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}],"tool_choice":{"type":"custom","name":"apply_patch"}})).unwrap();
+    assert_eq!(converted["tools"][0]["function"]["name"], "apply_patch");
+    assert_eq!(
+        converted["tools"][0]["function"]["parameters"]["required"][0],
+        "input"
+    );
+    assert!(
+        converted["tools"][0]["function"]["parameters"]["properties"]["input"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("start: patch")
+    );
+    assert_eq!(
+        converted["messages"][0]["tool_calls"][0]["function"]["arguments"],
+        r#"{"input":"*** Begin Patch"}"#
+    );
+    assert_eq!(converted["messages"][1]["tool_call_id"], "call_p");
+    assert_eq!(converted["tool_choice"]["function"]["name"], "apply_patch");
     let converted = convert(Protocol::Messages,json!({"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"weather","input":{"city":"Shanghai"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"rain"},{"type":"text","text":"thanks"}]}],"tools":[{"name":"weather","input_schema":{"type":"object"}}]})).unwrap();
     assert_eq!(converted["messages"][1]["role"], "tool");
     assert_eq!(converted["messages"][2]["content"][0]["text"], "thanks");
