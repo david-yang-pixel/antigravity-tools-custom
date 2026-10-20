@@ -9,6 +9,7 @@
 
 pub mod auto_heal;
 pub mod estimator;
+pub mod generation;
 pub mod inbound;
 #[cfg(test)]
 mod official_alignment_tests;

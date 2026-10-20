@@ -193,7 +193,7 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
         "blocked-wildcard".into(),
     ];
     super::super::extend_catalog(&mut catalog, &mapping);
-    assert_eq!(catalog, ["shared"]);
+    assert_eq!(catalog, ["allowed-alias", "shared"]);
     let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
         &tokio::sync::RwLock::new(mapping.clone()),
         None,

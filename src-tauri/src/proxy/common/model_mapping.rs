@@ -3,6 +3,45 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
+#[cfg(test)]
+#[path = "model_routing_tests.rs"]
+mod model_routing_tests;
+
+/// Snapshot once per request; adapters and account retries share the same policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelRoutingMode {
+    #[default]
+    Compatible,
+    Exact,
+}
+
+impl ModelRoutingMode {
+    pub fn from_only_raw(only_raw: bool) -> Self {
+        if only_raw {
+            Self::Exact
+        } else {
+            Self::Compatible
+        }
+    }
+
+    pub fn is_exact(self) -> bool {
+        self == Self::Exact
+    }
+
+    pub fn resolve(
+        self,
+        model: &str,
+        custom_mapping: &HashMap<String, String>,
+        effort: Option<&str>,
+    ) -> String {
+        if self.is_exact() {
+            model.to_string()
+        } else {
+            resolve_model_route_with_effort(model, custom_mapping, effort)
+        }
+    }
+}
+
 // 动态官方废弃模型转发表 (old_model_id -> new_model_id)
 pub static DYNAMIC_MODEL_FORWARDING_RULES: Lazy<DashMap<String, String>> =
     Lazy::new(|| DashMap::new());
@@ -507,17 +546,20 @@ pub async fn get_all_dynamic_models(
     token_manager: Option<&crate::proxy::token_manager::TokenManager>,
     only_raw_quota_models: bool,
 ) -> Vec<String> {
+    if let Some(manager) = token_manager {
+        manager.refresh_pending_accounts().await;
+    }
     use std::collections::HashSet;
-    // Raw mode is an exact catalog, not a compatibility or health filter.
-    // Preserve upstream IDs even when the legacy baseline rejects their version.
+    // Raw IDs are exposed only after successful inference on an eligible account.
     if only_raw_quota_models {
-        let mut models: Vec<_> = token_manager
+        let models = token_manager
             .map(|tm| tm.get_raw_collected_models())
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        crate::modules::workbuddy::extend_catalog(&mut models, &*custom_mapping.read().await);
-        return models;
+            .unwrap_or_default();
+        return crate::modules::model_catalog::published(models, &*custom_mapping.read().await)
+            .unwrap_or_else(|error| {
+                tracing::error!("Model selection unavailable: {}", error);
+                Vec::new()
+            });
     }
     let mut model_ids = HashSet::new();
     let mut custom_keys = HashSet::new();
@@ -689,7 +731,15 @@ pub fn resolve_custom_model_route(
         return Some(forwarded.value().clone());
     }
 
-    // 1. 自定义映射匹配 (次高优先级：精确匹配 -> 大小写不敏感匹配 -> 规范化 ID 匹配)
+    resolve_user_model_route(original_model, custom_mapping)
+}
+
+/// Explicit user mappings only. Provider dispatch must not inherit automatic redirects.
+pub fn resolve_user_model_route(
+    original_model: &str,
+    custom_mapping: &HashMap<String, String>,
+) -> Option<String> {
+    // 1. 自定义映射匹配 (精确匹配 -> 大小写不敏感匹配 -> 规范化 ID 匹配)
     if let Some(target) = custom_mapping.get(original_model) {
         crate::modules::logger::log_info(&format!(
             "[Router] 精确映射: {} -> {}",

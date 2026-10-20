@@ -1267,11 +1267,36 @@ fn save_account_at_path(account_path: &PathBuf, account: &Account) -> Result<(),
     let _lock = get_account_lock(&account.id);
     let _guard = _lock.lock().unwrap();
 
-    let content = serde_json::to_string_pretty(account)
+    let mut account = account.clone();
+    if let Ok(content) = std::fs::read(account_path) {
+        if let Ok(persisted) = serde_json::from_slice(&content) {
+            crate::modules::model_verification::preserve_newer_evidence(&mut account, &persisted);
+        }
+    }
+    let content = serde_json::to_string_pretty(&account)
         .map_err(|e| format!("failed_to_serialize_account_data: {}", e))?;
 
     crate::utils::fs::write_atomic(account_path, content.as_bytes())
         .map_err(|e| format!("failed_to_save_account_file: {}", e))
+}
+
+/// Read, validate and mutate under one file lock. Verification uses this for
+/// credential preparation and evidence writes, without stale snapshot saves.
+pub(crate) fn mutate_account_file(
+    account_id: &str,
+    edit: impl FnOnce(&mut Account) -> Result<(), String>,
+) -> Result<Account, String> {
+    let path = get_accounts_dir()?.join(format!("{}.json", account_id));
+    let lock = get_account_lock(account_id);
+    let _guard = lock.lock().map_err(|_| "Account file lock unavailable")?;
+    // The ordinary loader can repair files by saving them; it must not run
+    // while this non-reentrant file lock is held.
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let mut account = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    edit(&mut account)?;
+    let content = serde_json::to_vec_pretty(&account).map_err(|e| e.to_string())?;
+    crate::utils::fs::write_atomic(path, &content).map_err(|e| e.to_string())?;
+    Ok(account)
 }
 
 /// Save account data (thread-safe and atomic)

@@ -1,3 +1,4 @@
+use crate::proxy::common::model_mapping::ModelRoutingMode;
 // Gemini Handler
 use axum::{
     body::Body,
@@ -16,7 +17,7 @@ use crate::proxy::handlers::common::{
     next_rotation_attempt, should_rotate_account, FailureStatusTracker, RequestRetryState,
     RetryStrategy,
 };
-use crate::proxy::mappers::gemini::{unwrap_response, wrap_request_v2};
+use crate::proxy::mappers::gemini::unwrap_response;
 use crate::proxy::server::AppState;
 use crate::proxy::session_manager::SessionManager;
 use crate::proxy::upstream::client::mask_email;
@@ -70,6 +71,7 @@ mod image_success_tests {
 /// 路径参数: model_name, method (e.g. "gemini-pro", "generateContent")
 pub async fn handle_generate(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     Path(model_action): Path<String>,
     headers: HeaderMap, // [NEW] Extract headers for adapter detection
     upstream_recorder: Option<
@@ -126,6 +128,7 @@ pub async fn handle_generate(
                 .map(|identity| identity.token_id.clone()),
             model_name,
             body,
+            routing,
         )
         .await);
     }
@@ -189,7 +192,7 @@ pub async fn handle_generate(
         .and_then(|tc| tc.get("thinkingLevel").or_else(|| tc.get("effort")))
         .and_then(|v| v.as_str());
 
-    let initial_mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+    let initial_mapped_model = routing.resolve(
         &model_name,
         &*state.custom_mapping.read().await,
         client_effort,
@@ -226,7 +229,7 @@ pub async fn handle_generate(
                 flattened
             });
 
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(
+        let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
             &model_name,
             &mapped_model,
             &tools_val,
@@ -234,6 +237,7 @@ pub async fn handle_generate(
             None,                // quality
             None,                // [NEW] image_size
             Some(effective_req), // [NEW] Pass request body for imageConfig parsing
+            routing,
         );
 
         // 内容锚点只进思维库。账号粘性与上游 sessionId 用 affinity_key。
@@ -259,12 +263,13 @@ pub async fn handle_generate(
         } else if config.request_type == "image_gen" {
             drop(image_permit.take());
             match token_manager
-                .get_image_token(
+                .get_image_token_with_routing(
                     force_rotate,
                     Some(&affinity_key),
                     &config.final_model,
                     &image_scheduler,
                     request_timeout,
+                    routing,
                 )
                 .await
             {
@@ -280,11 +285,12 @@ pub async fn handle_generate(
             }
         } else {
             let mut token_result = token_manager
-                .get_token(
+                .get_token_with_routing(
                     &config.request_type,
                     force_rotate,
                     Some(&affinity_key),
                     &config.final_model,
+                    routing,
                 )
                 .await;
 
@@ -296,11 +302,12 @@ pub async fn handle_generate(
                         );
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     token_result = token_manager
-                        .get_token(
+                        .get_token_with_routing(
                             &config.request_type,
                             true,
                             Some(&affinity_key),
                             &config.final_model,
+                            routing,
                         )
                         .await;
                 }
@@ -325,7 +332,7 @@ pub async fn handle_generate(
         };
 
         let mapped_model = token_manager
-            .resolve_dynamic_model_for_account(&account_id, &mapped_model)
+            .resolve_dynamic_model_for_account(&account_id, &mapped_model, routing)
             .await;
 
         last_email = Some(email.clone());
@@ -336,7 +343,7 @@ pub async fn handle_generate(
         // [NEW] 获取完整 Token 对象以注入动态规格 (dynamic > static default > 65535)
         let token_obj = token_manager.get_token_by_id(&account_id);
         let tf_start = std::time::Instant::now();
-        let mut wrapped_body = wrap_request_v2(
+        let mut wrapped_body = crate::proxy::mappers::gemini::wrap_request_with_routing(
             &body,
             &project_id,
             &mapped_model,
@@ -346,6 +353,7 @@ pub async fn handle_generate(
             Some(&token_manager),
             Some(&state.upstream),
             Some(&affinity_key),
+            routing,
         );
         let tf_micros = tf_start.elapsed().as_micros() as u64;
         let norm_total_micros = norm_start.elapsed().as_micros() as u64;
@@ -1245,9 +1253,14 @@ pub async fn handle_list_models(
     let models: Vec<_> = model_ids
         .into_iter()
         .filter(|id| {
-            !workbuddy
-                .as_ref()
-                .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+            if only_raw {
+                crate::modules::model_catalog::selected_provider(id)
+                    != Some(crate::modules::model_catalog::Provider::Workbuddy)
+            } else {
+                !workbuddy
+                    .as_ref()
+                    .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+            }
         })
         .map(|id| {
             json!({
@@ -1285,9 +1298,14 @@ pub async fn handle_get_model(
     )
     .await
     .filter(|id| {
-        !workbuddy
-            .as_ref()
-            .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+        if only_raw {
+            crate::modules::model_catalog::selected_provider(id)
+                != Some(crate::modules::model_catalog::Provider::Workbuddy)
+        } else {
+            !workbuddy
+                .as_ref()
+                .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+        }
     }) {
         (
             StatusCode::OK,
@@ -1326,6 +1344,7 @@ pub async fn handle_get_model(
 
 pub async fn handle_count_tokens(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     Path(model_name): Path<String>,
     headers: HeaderMap,
     user_identity: Option<
@@ -1339,6 +1358,7 @@ pub async fn handle_count_tokens(
         user_identity.map(|identity| identity.token_id.clone()),
         model_name,
         body,
+        routing,
     )
     .await
 }
@@ -1353,6 +1373,7 @@ pub async fn execute_count_tokens(
     tenant_id: Option<String>,
     model_name: String,
     mut body: Value,
+    routing: ModelRoutingMode,
 ) -> Response {
     // [DEFENSE] 净化 Gemini 原生请求体中的所有 inlineData (过滤或降级空数据/损坏图片)
     crate::proxy::mappers::common_utils::sanitize_gemini_payload_inline_data(&mut body);
@@ -1366,14 +1387,14 @@ pub async fn execute_count_tokens(
         .and_then(|tc| tc.get("thinkingLevel").or_else(|| tc.get("effort")))
         .and_then(|v| v.as_str());
 
-    let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+    let mapped_model = routing.resolve(
         &model_name,
         &*state.custom_mapping.read().await,
         client_effort,
     );
 
     // 2. 解析请求配置并获取 Token
-    let config = crate::proxy::mappers::common_utils::resolve_request_config(
+    let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
         &model_name,
         &mapped_model,
         &None,
@@ -1381,6 +1402,7 @@ pub async fn execute_count_tokens(
         None,
         None,
         Some(&body),
+        routing,
     );
 
     let anchor = SessionManager::gemini_content_anchor(&body);
@@ -1394,11 +1416,12 @@ pub async fn execute_count_tokens(
 
     let (access_token, _project_id, email, account_id, _wait_ms) = match state
         .token_manager
-        .get_token(
+        .get_token_with_routing(
             &config.request_type,
             false,
             Some(&session_scope.affinity_key),
             &config.final_model,
+            routing,
         )
         .await
     {

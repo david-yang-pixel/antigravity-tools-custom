@@ -5,6 +5,7 @@ use std::time::Duration;
 
 #[derive(Clone, Default)]
 pub struct Policy {
+    pub require_verified: bool,
     pub sticky: StickySessionConfig,
     pub preferred: Option<String>,
     pub breaker: crate::models::CircuitBreakerConfig,
@@ -72,6 +73,7 @@ fn try_acquire_inner(
                     a.models.iter().any(|m| m.id == model)
                 } else {
                     a.supports_model(model)
+                        && (!policy.require_verified || a.verified_models.contains_key(model))
                 }
         })
         .filter(|a| policy.preferred.as_ref().is_none_or(|id| &a.id == id))

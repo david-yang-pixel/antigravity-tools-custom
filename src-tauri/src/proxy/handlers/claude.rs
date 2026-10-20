@@ -1,3 +1,4 @@
+use crate::proxy::common::model_mapping::ModelRoutingMode;
 // Claude 协议处理器
 
 use axum::{
@@ -707,6 +708,36 @@ mod variant_tests {
     }
 }
 
+fn signature_retry_model(model: &str, routing: ModelRoutingMode) -> String {
+    if routing.is_exact() || !model.contains("claude-") {
+        return model.to_owned();
+    }
+    let mut model = model.replace("-thinking", "");
+    if model.contains("claude-sonnet-4-6-") || model.contains("claude-sonnet-4-5-") {
+        model = "claude-sonnet-4-6".to_owned();
+    } else if model.contains("claude-opus-4-6-") {
+        model = "claude-opus-4-6".to_owned();
+    } else if model.contains("claude-opus-4-5-") || model.contains("claude-opus-4-") {
+        model = "claude-opus-4-5".to_owned();
+    }
+    model
+}
+
+#[test]
+fn exact_model_signature_retry_preserves_original_id() {
+    for model in [
+        "claude-opus-4-6-thinking",
+        "claude-sonnet-4-5-high",
+        "claude-sonnet-4-6",
+    ] {
+        assert_eq!(signature_retry_model(model, ModelRoutingMode::Exact), model);
+    }
+    assert_eq!(
+        signature_retry_model("claude-sonnet-4-5-high", ModelRoutingMode::Compatible),
+        "claude-sonnet-4-6"
+    );
+}
+
 fn apply_variant(
     request: &mut ClaudeRequest,
     effort_tier: Option<crate::proxy::common::variant_mapping::VariantTier>,
@@ -767,6 +798,7 @@ fn claude_stream_chunk_has_error_event(bytes: &[u8]) -> bool {
 /// 处理 Chat 消息请求流程
 pub async fn handle_messages(
     State(state): State<AppState>,
+    axum::Extension(routing): axum::Extension<ModelRoutingMode>,
     headers: HeaderMap,
     upstream_recorder: Option<
         axum::extract::Extension<crate::proxy::monitor::UpstreamRequestBodyHolder>,
@@ -827,7 +859,9 @@ pub async fn handle_messages(
         };
 
     // 0. 自定义映射优先拦截 (用户自定义路由与热更新规则拥有最高优先级，避免被后续变体推断抹平原模型意图)
-    let custom_target = {
+    let custom_target = if routing.is_exact() {
+        None
+    } else {
         let custom_mapping = state.custom_mapping.read().await;
         crate::proxy::common::model_mapping::resolve_custom_model_route(
             &request.model,
@@ -922,7 +956,12 @@ pub async fn handle_messages(
     let effort_tier =
         crate::proxy::common::variant_mapping::tier_from_effort(effort_hint.as_deref());
     let canonical_model = request.model.clone();
-    if let Some(spec) = apply_variant(&mut request, effort_tier, effective_budget_hint) {
+    let variant = if routing.is_exact() {
+        None
+    } else {
+        apply_variant(&mut request, effort_tier, effective_budget_hint)
+    };
+    if let Some(spec) = variant {
         if is_client_control && client_disabled {
             request.thinking = Some(crate::proxy::mappers::claude::models::ThinkingConfig {
                 type_: "disabled".to_string(),
@@ -976,8 +1015,11 @@ pub async fn handle_messages(
     merge_consecutive_messages(&mut request.messages);
 
     // Get model family for signature validation
-    let mapped_model =
-        crate::proxy::common::model_mapping::map_claude_model_to_gemini(&request.model);
+    let mapped_model = if routing.is_exact() {
+        request.model.clone()
+    } else {
+        crate::proxy::common::model_mapping::map_claude_model_to_gemini(&request.model)
+    };
     let target_family = if mapped_model.contains("gemini") {
         Some("gemini")
     } else {
@@ -1613,7 +1655,7 @@ pub async fn handle_messages(
         let norm_start = std::time::Instant::now();
 
         // 2. 模型路由解析
-        let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+        let mapped_model = routing.resolve(
             &request_for_body.model,
             &*state.custom_mapping.read().await,
             effort_hint.as_deref(),
@@ -1627,7 +1669,7 @@ pub async fn handle_messages(
                 .collect()
         });
 
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(
+        let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
             &request_for_body.model,
             &mapped_model,
             &tools_val,
@@ -1635,6 +1677,7 @@ pub async fn handle_messages(
             request.quality.as_deref(), // [NEW] Pass quality parameter
             None,                       // image_size
             None,                       // body
+            routing,
         );
 
         // 内容锚点只进思维库。账号粘性与上游 sessionId 用 affinity_key。
@@ -1655,11 +1698,12 @@ pub async fn handle_messages(
         let session_id = Some(affinity_key.as_str());
 
         let mut token_result = token_manager
-            .get_token(
+            .get_token_with_routing(
                 &config.request_type,
                 force_rotate,
                 session_id,
                 &config.final_model,
+                routing,
             )
             .await;
 
@@ -1671,7 +1715,13 @@ pub async fn handle_messages(
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 token_result = token_manager
-                    .get_token(&config.request_type, true, session_id, &config.final_model)
+                    .get_token_with_routing(
+                        &config.request_type,
+                        true,
+                        session_id,
+                        &config.final_model,
+                        routing,
+                    )
                     .await;
             }
         }
@@ -1715,7 +1765,7 @@ pub async fn handle_messages(
 
         let token_obj = token_manager.get_token_by_id(&account_id);
         let (mut gemini_body, transform_timing) =
-            match crate::proxy::mappers::claude::transform_claude_request_in_timed(
+            match crate::proxy::mappers::claude::transform_claude_request_with_routing(
                 &request_with_mapped,
                 &project_id,
                 retried_without_thinking,
@@ -1723,6 +1773,7 @@ pub async fn handle_messages(
                 &store_key,
                 &affinity_key,
                 token_obj.as_ref(),
+                routing,
             ) {
                 Ok((b, timing)) => {
                     debug!(
@@ -2441,21 +2492,7 @@ pub async fn handle_messages(
             // [FIX Prompt-Cache] 严禁在重试路径中注入合成消息 (close_tool_loop_for_thinking)！
             // 保持历史消息真实纯净，由 InboundThinkingPipeline 与 finalize_gemini_contents_thinking 统一兜底签名与占位。
 
-            // 清理模型名中的 -thinking 后缀
-            if request_for_body.model.contains("claude-") {
-                let mut m = request_for_body.model.clone();
-                m = m.replace("-thinking", "");
-                if m.contains("claude-sonnet-4-6-") {
-                    m = "claude-sonnet-4-6".to_string();
-                } else if m.contains("claude-sonnet-4-5-") {
-                    m = "claude-sonnet-4-6".to_string();
-                } else if m.contains("claude-opus-4-6-") {
-                    m = "claude-opus-4-6".to_string();
-                } else if m.contains("claude-opus-4-5-") || m.contains("claude-opus-4-") {
-                    m = "claude-opus-4-5".to_string();
-                }
-                request_for_body.model = m;
-            }
+            request_for_body.model = signature_retry_model(&request_for_body.model, routing);
 
             // [FIX] 强制重试：因为我们已经清理了 thinking block，所以这是一个新的、可以重试的请求
             // 不要使用 determine_retry_strategy，因为它会因为 retried_without_thinking=true 而返回 NoRetry

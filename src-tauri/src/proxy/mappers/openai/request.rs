@@ -1,3 +1,4 @@
+use crate::proxy::common::model_mapping::ModelRoutingMode;
 // OpenAI → Gemini 请求转换
 use super::models::*;
 use crate::proxy::model_specs;
@@ -183,6 +184,28 @@ pub fn transform_openai_request_with_session(
     signature_read_key: Option<&str>,
     _is_responses_api: bool,
 ) -> (Value, String, usize, String) {
+    transform_openai_request_with_routing(
+        request,
+        project_id,
+        mapped_model,
+        token,
+        routing_session_id,
+        signature_read_key,
+        _is_responses_api,
+        ModelRoutingMode::Compatible,
+    )
+}
+
+pub fn transform_openai_request_with_routing(
+    request: &OpenAIRequest,
+    project_id: &str,
+    mapped_model: &str,
+    token: Option<&ProxyToken>,
+    routing_session_id: &str,
+    signature_read_key: Option<&str>,
+    _is_responses_api: bool,
+    routing: ModelRoutingMode,
+) -> (Value, String, usize, String) {
     let remember_cwd =
         |text: &str| crate::proxy::adapters::apply_patch_preflight::remember_cwd_from_text(text);
     let found_cwd = request.instructions.as_deref().is_some_and(remember_cwd);
@@ -232,14 +255,19 @@ pub fn transform_openai_request_with_session(
     let mapped_model_lower = mapped_model.to_lowercase();
 
     // Resolve grounding config
-    let config = crate::proxy::mappers::common_utils::resolve_request_config(
+    let config = crate::proxy::mappers::common_utils::resolve_request_config_with_routing(
         &request.model,
-        &mapped_model_lower,
+        if routing.is_exact() {
+            mapped_model
+        } else {
+            &mapped_model_lower
+        },
         &tools_val,
         request.size.as_deref(),       // [NEW] Pass size parameter
         request.quality.as_deref(),    // [NEW] Pass quality parameter
         request.image_size.as_deref(), // [FIX] Pass imageSize parameter
         None,                          // body
+        routing,
     );
 
     let is_under_v3 = crate::proxy::model_specs::is_gemini_under_v3(mapped_model)
