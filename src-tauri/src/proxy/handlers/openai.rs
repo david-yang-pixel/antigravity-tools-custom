@@ -6321,24 +6321,31 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
         // silently send one of its aliases to the Google account scheduler.
         let workbuddy_error = if let Some(model) = normalized.get("model").and_then(Value::as_str) {
             let mapping = state.custom_mapping.read().await;
-            match crate::modules::workbuddy::load() {
-                Ok(settings) if settings.target_model(model, &mapping).is_some() => Some((
-                    "invalid_request_error",
-                    "workbuddy_requires_http",
-                    "WorkBuddy models require HTTP/SSE Responses, not WebSocket.",
-                )),
-                Err(_)
-                    if crate::modules::workbuddy::known_model_on_configuration_error(
-                        model, &mapping,
-                    ) =>
-                {
-                    Some((
-                        "server_error",
-                        "workbuddy_configuration_invalid",
-                        "Repair the WorkBuddy upstream configuration in admin settings.",
-                    ))
+            if routing.is_exact()
+                && crate::modules::model_catalog::selected_provider(model)
+                    == Some(crate::modules::model_catalog::Provider::Antigravity)
+            {
+                None
+            } else {
+                match crate::modules::workbuddy::load() {
+                    Ok(settings) if settings.target_model(model, &mapping).is_some() => Some((
+                        "invalid_request_error",
+                        "workbuddy_requires_http",
+                        "WorkBuddy models require HTTP/SSE Responses, not WebSocket.",
+                    )),
+                    Err(_)
+                        if crate::modules::workbuddy::known_model_on_configuration_error(
+                            model, &mapping,
+                        ) =>
+                    {
+                        Some((
+                            "server_error",
+                            "workbuddy_configuration_invalid",
+                            "Repair the WorkBuddy upstream configuration in admin settings.",
+                        ))
+                    }
+                    _ => None,
                 }
-                _ => None,
             }
         } else {
             None

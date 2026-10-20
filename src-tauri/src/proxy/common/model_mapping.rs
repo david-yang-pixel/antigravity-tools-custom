@@ -550,16 +550,16 @@ pub async fn get_all_dynamic_models(
         manager.refresh_pending_accounts().await;
     }
     use std::collections::HashSet;
-    // Raw mode is an exact catalog, not a compatibility or health filter.
-    // Preserve upstream IDs even when the legacy baseline rejects their version.
+    // Raw IDs are exposed only after successful inference on an eligible account.
     if only_raw_quota_models {
-        let mut models: Vec<_> = token_manager
+        let models = token_manager
             .map(|tm| tm.get_raw_collected_models())
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        crate::modules::workbuddy::extend_catalog(&mut models, &*custom_mapping.read().await);
-        return models;
+            .unwrap_or_default();
+        return crate::modules::model_catalog::published(models, &*custom_mapping.read().await)
+            .unwrap_or_else(|error| {
+                tracing::error!("Model selection unavailable: {}", error);
+                Vec::new()
+            });
     }
     let mut model_ids = HashSet::new();
     let mut custom_keys = HashSet::new();

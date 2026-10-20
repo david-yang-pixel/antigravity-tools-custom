@@ -812,7 +812,7 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub upstream_proxy: UpstreamProxyConfig,
 
-    /// Expose and call exact account-reported model IDs; reject unlisted models.
+    /// Expose and call exact IDs with account-specific inference verification; reject unlisted models.
     #[serde(default = "default_true")]
     pub only_raw_quota_models: bool,
 

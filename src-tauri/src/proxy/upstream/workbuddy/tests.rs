@@ -325,6 +325,22 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
     .unwrap();
     let _mock = mock().await;
     let seed_id = seed();
+    let mut verified = workbuddy::accounts::get(&seed_id).unwrap();
+    verified
+        .verified_models
+        .insert("claude-sonnet-4-6".into(), workbuddy::accounts::now());
+    verified.models_verified_at = workbuddy::accounts::now();
+    workbuddy::accounts::save_verified_models(&verified, &verified.models, &[]).unwrap();
+    crate::modules::model_catalog::seed_selection(&[
+        (
+            "claude-sonnet-4-6",
+            crate::modules::model_catalog::Provider::Workbuddy,
+        ),
+        (
+            "customer-sonnet",
+            crate::modules::model_catalog::Provider::Workbuddy,
+        ),
+    ]);
     workbuddy::register_models(&workbuddy::accounts::get(&seed_id).unwrap().models).unwrap();
     let port = {
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -358,6 +374,33 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
         .build()
         .unwrap();
     let base = status.base_url;
+    // The public list requires a price even for admin/free keys; admin choices do not.
+    let prices = billing::load_prices().unwrap();
+    billing::save_prices(vec![]).unwrap();
+    for key in [&config.api_key, &token.token] {
+        let listed: Value = client
+            .get(format!("{base}/v1/models"))
+            .bearer_auth(key)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed["data"], json!([]));
+    }
+    let admin_models: Vec<String> = client
+        .get(format!("{base}/api/user-token-models"))
+        .bearer_auth(&config.api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(admin_models.contains(&"claude-sonnet-4-6".into()));
+    billing::save_prices(prices).unwrap();
+
     // Raw model admission runs before billing and any provider call.
     for path in [
         "/v1/chat/completions",
@@ -820,4 +863,16 @@ async fn assert_zero_balance_admin_policy(client: &reqwest::Client, base: &str) 
     let body: Value = denied.json().await.unwrap();
     assert_eq!(body["error"]["code"], "insufficient_balance");
     assert_eq!(db::usage_logs_for_token(&key.id, 1).unwrap().total, 6);
+}
+
+#[tokio::test]
+async fn workbuddy_selected_provider_never_falls_through_after_route_removal() {
+    let mut request = request("/v1/chat/completions", "removed-model", false);
+    request
+        .extensions_mut()
+        .insert(crate::modules::model_catalog::Provider::Workbuddy);
+    let response = app(Settings::default()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("workbuddy_configuration_changed"));
 }

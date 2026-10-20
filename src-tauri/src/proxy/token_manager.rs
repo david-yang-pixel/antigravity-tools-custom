@@ -137,7 +137,7 @@ pub struct ProxyToken {
     pub validation_blocked: bool, // [NEW] Check for validation block (VALIDATION_REQUIRED temporary block)
     pub validation_blocked_until: i64, // [NEW] Timestamp until which the account is blocked
     pub validation_url: Option<String>, // [NEW] Validation URL (#1522)
-    pub raw_models: HashSet<String>, // Exact account-reported IDs, independent of quota buckets.
+    pub raw_models: HashSet<String>, // Exact IDs with successful account-specific inference evidence.
     pub model_quotas: HashMap<String, i32>, // [OPTIMIZATION] In-memory cache for model-specific quotas
     pub model_limits: HashMap<String, u64>, // [NEW] max_output_tokens per model from quota data
 }
@@ -1174,7 +1174,7 @@ impl TokenManager {
                 .get("validation_url")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            raw_models: Self::raw_model_ids(&account).unwrap_or_default(),
+            raw_models: crate::modules::model_verification::verified_model_ids(&account),
             model_quotas,
             model_limits,
         }))
@@ -2117,7 +2117,7 @@ impl TokenManager {
             tokens_snapshot.retain(|token| token.raw_models.contains(target_model));
             if tokens_snapshot.is_empty() {
                 return Err(format!(
-                    "No accounts report the requested model: {}",
+                    "No accounts have verified support for the requested model: {}",
                     target_model
                 ));
             }
@@ -4323,7 +4323,7 @@ impl TokenManager {
         }
     }
 
-    /// Raw upstream IDs only; never include normalized quota-protection buckets.
+    /// Verified raw IDs only; the candidate catalog is not proof of account permission.
     pub fn get_raw_collected_models(&self) -> std::collections::HashSet<String> {
         self.tokens
             .iter()
@@ -5297,6 +5297,13 @@ mod tests {
 
     #[tokio::test]
     async fn user_token_raw_model_catalog_preserves_upstream_ids_without_aliases() {
+        let _data = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        use crate::modules::model_catalog::{seed_selection, Provider};
+        seed_selection(&[
+            ("gemini-3-flash-agent", Provider::Antigravity),
+            ("gemini-2.5-flash", Provider::Antigravity),
+            ("New-Upstream-high", Provider::Antigravity),
+        ]);
         let tmp_root = std::env::temp_dir().join(format!(
             "antigravity-token-manager-test-raw-models-{}",
             uuid::Uuid::new_v4()
@@ -5335,6 +5342,22 @@ mod tests {
 
         let manager = TokenManager::new(tmp_root.clone());
         manager.load_accounts().await.unwrap();
+        assert!(manager.get_raw_collected_models().is_empty());
+        let mut verified_account = account_json.clone();
+        crate::modules::model_verification::seed_verified_fixture(
+            &mut verified_account,
+            &[
+                "gemini-3-flash-agent",
+                "gemini-2.5-flash",
+                "New-Upstream-high",
+            ],
+        );
+        std::fs::write(
+            &account_path,
+            serde_json::to_vec(&verified_account).unwrap(),
+        )
+        .unwrap();
+        manager.reload_account("acc1").await.unwrap();
 
         let collected_models = manager.get_all_collected_models();
         assert!(collected_models.contains("gemini-3-flash-agent"));
@@ -5374,6 +5397,11 @@ mod tests {
 
     #[tokio::test]
     async fn exact_model_selection_does_not_use_a_shared_quota_bucket_as_capability() {
+        let _data = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        crate::modules::model_catalog::seed_selection(&[(
+            "gemini-3.8-flash-high",
+            crate::modules::model_catalog::Provider::Antigravity,
+        )]);
         let root = std::env::temp_dir().join(format!("exact-model-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("accounts")).unwrap();
         let now = chrono::Utc::now().timestamp();
@@ -5381,7 +5409,7 @@ mod tests {
             ("original", "gemini-2.5-flash"),
             ("other", "gemini-3.1-flash-lite"),
         ] {
-            let account = serde_json::json!({
+            let mut account = serde_json::json!({
                 "id": id, "email": format!("{}@test.invalid", id),
                 "token": {
                     "access_token": "test", "refresh_token": "test",
@@ -5390,10 +5418,15 @@ mod tests {
                 },
                 "quota": {"models": [
                     {"name": model, "percentage": 80},
+                    {"name": "gemini-2.5-flash", "percentage": 80},
                     {"name": "gemini-3.1-flash-image", "percentage": 80}
                 ]},
                 "disabled": false, "proxy_disabled": false
             });
+            crate::modules::model_verification::seed_verified_fixture(
+                &mut account,
+                &[model, "gemini-3.1-flash-image"],
+            );
             std::fs::write(
                 root.join("accounts").join(format!("{}.json", id)),
                 serde_json::to_vec(&account).unwrap(),
@@ -5454,7 +5487,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("No accounts report the requested model"));
+        assert!(error.contains("No accounts have verified support"));
         // Catalog admission observes queued account refreshes before rejecting a new ID.
         let path = root.join("accounts/other.json");
         let mut account: serde_json::Value =
@@ -5463,6 +5496,26 @@ mod tests {
             {"name": "gemini-3.8-flash-high", "percentage": 80}
         ]);
         std::fs::write(path, serde_json::to_vec(&account).unwrap()).unwrap();
+        crate::proxy::server::trigger_account_reload("other");
+        let unverified_catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
+            &tokio::sync::RwLock::new(Default::default()),
+            Some(&manager),
+            true,
+        )
+        .await;
+        assert!(
+            unverified_catalog.is_empty(),
+            "New candidate models must not become verified"
+        );
+        crate::modules::model_verification::seed_verified_fixture(
+            &mut account,
+            &["gemini-3.8-flash-high"],
+        );
+        std::fs::write(
+            root.join("accounts/other.json"),
+            serde_json::to_vec(&account).unwrap(),
+        )
+        .unwrap();
         crate::proxy::server::trigger_account_reload("other");
         let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
             &tokio::sync::RwLock::new(Default::default()),

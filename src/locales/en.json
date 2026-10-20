@@ -82,7 +82,7 @@
   },
   "billing": {
     "price_load_error": "Could not load model prices. Please retry. Missing price data does not mean models are free.",
-    "unpriced_models": "{{count}} models have no price (only callable from a key’s free list)",
+    "unpriced_models": "{{count}} models have no price (hidden from public lists)",
     "unpriced_unavailable": "No price is available and free access has not been granted, so this model cannot be called.",
     "unavailable": "Unavailable",
     "model_pricing": "Model pricing",
@@ -99,7 +99,7 @@
     "cached_price": "Cache hits (CNY / 1M tokens)",
     "cached_price_placeholder": "Blank = input price",
     "add_rule": "Add price rule",
-    "no_prices": "No prices are configured. A key can only call models on its free list.",
+    "no_prices": "No prices are configured. Set a price for an added model to show it in the public Available Models list. A zero price is allowed.",
     "match_hint": "Exact model names take priority over more specific wildcard price rules. Unpriced models outside the current key’s free list cannot be called. Per-call billing charges successful requests; per-token billing settles actual token and cache usage.",
     "pattern_required": "Enter a model ID or wildcard.",
     "invalid_price": "Invalid price for {{pattern}}: enter an amount of 0 or more with up to 6 decimals.",
@@ -1121,6 +1121,31 @@
     "lightweight_mode": "Lightweight Mode (Release RAM)"
   },
   "proxy": {
+    "model_catalog": {
+      "title": "Fetch and Add Models",
+      "fetch": "Fetch Models",
+      "pricing": "Model Pricing",
+      "flow": "Choose a provider → Fetch models → Test access → Add selected models. Added models can be priced; only priced models are shown to users.",
+      "source": "Provider",
+      "refresh": "Fetch Again",
+      "search": "Search model IDs",
+      "test_hint": "Tests send real short requests and consume upstream quota. Successful tests do not add models automatically. Throttling, timeouts and exhausted quota are inconclusive.",
+      "progress": "{{completed}} / {{total}} account/model checks: {{verified}} succeeded, {{unsupported}} unsupported, {{inconclusive}} inconclusive",
+      "select_all": "Select all models in the current list",
+      "test_result": "Test result",
+      "test": "Test",
+      "test_selected": "Test Selected",
+      "add_selected": "Add Passed Models ({{count}})",
+      "remove": "Remove",
+      "added": "Added",
+      "selected": "{{count}} models selected",
+      "untested": "Not tested",
+      "verified": "Verified",
+      "unsupported": "Unsupported",
+      "inconclusive": "Inconclusive",
+      "empty": "No candidates. Check that accounts for this provider are enabled.",
+      "choose": "Choose Antigravity or WorkBuddy to fetch models"
+    },
     "title": "API Proxy Service",
     "error": {
       "load_failed": "Failed to load"
@@ -1609,8 +1634,8 @@
       "title": "Model Router",
       "subtitle": "Route models by series or add custom exact mappings.\nNote: Native Claude pass-through models (e.g. claude-sonnet-4-6-thinking, claude-opus-4-6-thinking) bypass series groups by default. Use \"Expert Custom Routing\" to override.",
       "subtitle_simple": "Customize model routing with wildcards or exact mappings",
-      "only_raw_quota_models": "Upstream Models Only",
-      "only_raw_quota_models_tooltip": "List and call account-reported model IDs without automatic model substitution. Unsupported models return an error directing users to Available Models. Requests still depend on upstream access and remaining quota.",
+      "only_raw_quota_models": "Added Models Only",
+      "only_raw_quota_models_tooltip": "Call exact model IDs that passed testing and were manually added. Fetch, test and add models under Supported Models & Integration. Configure prices before exposing them to users.",
       "background_task_title": "Background Task Model",
       "background_task_desc": "Model used for Claude CLI background tasks like title generation, summary, etc. (Default: gemini-3.1-flash-lite)",
       "use_default": "Use System Default",
@@ -1710,7 +1735,7 @@
       "copy_base": "Copy Base"
     },
     "supported_models": {
-      "upstream_notice": "Models reported by upstream accounts. Availability depends on upstream access and remaining quota.",
+      "upstream_notice": "Manually added models are shown here for pricing. Only priced models with eligible accounts are exposed to users.",
       "title": "Supported Models & Integration",
       "model_name": "Model Name",
       "model_id": "Model ID",

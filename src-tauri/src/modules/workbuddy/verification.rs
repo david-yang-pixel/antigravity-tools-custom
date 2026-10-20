@@ -27,6 +27,7 @@ pub struct Progress {
     pub started_at: i64,
     pub finished_at: i64,
     pub errors: Vec<String>,
+    pub tested_models: HashMap<String, i64>,
 }
 fn update(path: &PathBuf, edit: impl FnOnce(&mut Progress)) {
     if let Ok(mut jobs) = JOBS.lock() {
@@ -45,6 +46,9 @@ pub fn status() -> Result<Progress, String> {
         .unwrap_or_default())
 }
 pub fn start() -> Result<Progress, String> {
+    start_selected(None)
+}
+pub fn start_selected(models: Option<Vec<String>>) -> Result<Progress, String> {
     let path = crate::modules::account::get_data_dir()?;
     let settings = super::load()?;
     let accounts: Vec<_> = accounts::all()?
@@ -75,7 +79,8 @@ pub fn start() -> Result<Progress, String> {
         jobs.insert(path.clone(), initial.clone());
     }
     tauri::async_runtime::spawn(async move {
-        let result = tokio::time::timeout(Duration::from_secs(1800), scan(&path, accounts)).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(1800), scan(&path, accounts, models)).await;
         update(&path, |job| {
             match result {
                 Ok(Ok(())) => {}
@@ -92,7 +97,11 @@ pub fn start() -> Result<Progress, String> {
     Ok(initial)
 }
 
-async fn scan(path: &PathBuf, accounts: Vec<accounts::Account>) -> Result<(), String> {
+async fn scan(
+    path: &PathBuf,
+    accounts: Vec<accounts::Account>,
+    selected: Option<Vec<String>>,
+) -> Result<(), String> {
     let mut prepared = Vec::new();
     let mut total = 0;
     // Catalog and credits reads do not generate tokens. Finish discovery before probing.
@@ -109,7 +118,11 @@ async fn scan(path: &PathBuf, accounts: Vec<accounts::Account>) -> Result<(), St
             update(path, |job| job.errors.push(error.clone()));
             continue;
         }
-        total += account.models.len();
+        total += account
+            .models
+            .iter()
+            .filter(|model| selected.as_ref().is_none_or(|ids| ids.contains(&model.id)))
+            .count();
         if total > MAX_CHECKS {
             return Err("Too many account/model pairs (maximum 500); select a fixed account and fetch again".into());
         }
@@ -119,7 +132,13 @@ async fn scan(path: &PathBuf, accounts: Vec<accounts::Account>) -> Result<(), St
     for account in prepared {
         let mut available = Vec::new();
         let mut unavailable = Vec::new();
-        for model in &account.models {
+        let mut checked = Vec::new();
+        for model in account
+            .models
+            .iter()
+            .filter(|model| selected.as_ref().is_none_or(|ids| ids.contains(&model.id)))
+        {
+            checked.push(model.id.clone());
             let current = accounts::get(&account.id)?;
             if !current.enabled || current.revision != account.revision {
                 return Err(
@@ -142,6 +161,7 @@ async fn scan(path: &PathBuf, accounts: Vec<accounts::Account>) -> Result<(), St
             }
             update(path, |job| {
                 job.completed += 1;
+                job.tested_models.insert(model.id.clone(), accounts::now());
                 match outcome {
                     Outcome::Available => job.available += 1,
                     Outcome::Unavailable => job.unavailable += 1,
@@ -149,7 +169,11 @@ async fn scan(path: &PathBuf, accounts: Vec<accounts::Account>) -> Result<(), St
                 }
             });
         }
-        accounts::save_verified_models(&account, &available, &unavailable)?;
+        if selected.is_some() {
+            accounts::save_verified_models_partial(&account, &available, &unavailable, &checked)?;
+        } else {
+            accounts::save_verified_models(&account, &available, &unavailable)?;
+        }
         super::register_models(&available)?;
     }
     Ok(())

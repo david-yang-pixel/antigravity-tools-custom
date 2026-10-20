@@ -426,6 +426,19 @@ pub struct AxumServer {
 }
 
 impl AxumServer {
+    pub fn start_catalog_test(
+        &self,
+        provider: crate::modules::model_catalog::Provider,
+        model_ids: Vec<String>,
+    ) -> Result<serde_json::Value, String> {
+        crate::modules::model_catalog::start_test(
+            provider,
+            model_ids,
+            self.token_manager.clone(),
+            self.upstream.clone(),
+        )
+    }
+
     pub async fn update_only_raw_quota_models(&self, only_raw: bool) {
         let mut r = self.only_raw_quota_models.write().await;
         *r = only_raw;
@@ -1064,6 +1077,18 @@ impl AxumServer {
                 "/workbuddy-models/verify",
                 get(admin_get_workbuddy_model_verification)
                     .post(admin_start_workbuddy_model_verification),
+            )
+            .route(
+                "/model-catalog/candidates",
+                post(admin_get_model_candidates),
+            )
+            .route(
+                "/model-catalog/selection",
+                post(admin_edit_published_models),
+            )
+            .route(
+                "/model-catalog/test",
+                get(admin_get_model_test_status).post(admin_start_model_tests),
             )
             .route(
                 "/portal-settings/test-email",
@@ -2497,16 +2522,23 @@ async fn admin_get_user_token_summary(
     Ok(Json(summary))
 }
 
-async fn admin_user_token_models(State(state): State<AppState>) -> Json<Vec<String>> {
+async fn admin_user_token_models(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<String>>, (StatusCode, Json<ErrorResponse>)> {
     let only_raw = *state.only_raw_quota_models.read().await;
-    Json(
+    if only_raw {
+        return crate::modules::model_catalog::managed_models()
+            .map(Json)
+            .map_err(portal_admin_error);
+    }
+    Ok(Json(
         crate::proxy::common::model_mapping::get_all_dynamic_models(
             &state.custom_mapping,
             Some(&state.token_manager),
             only_raw,
         )
         .await,
-    )
+    ))
 }
 
 async fn admin_create_user_token(
@@ -2686,6 +2718,44 @@ async fn admin_get_workbuddy_settings(
 async fn admin_start_workbuddy_model_verification(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::workbuddy::start_workbuddy_model_verification()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_start_model_tests(
+    State(state): State<AppState>,
+    Json(request): Json<crate::commands::model_catalog::TestRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::model_catalog::start_test(
+        request.provider,
+        request.model_ids,
+        state.token_manager,
+        state.upstream,
+    )
+    .map(Json)
+    .map_err(portal_admin_error)
+}
+async fn admin_get_model_test_status(
+    axum::extract::Query(request): axum::extract::Query<
+        crate::commands::model_catalog::StatusRequest,
+    >,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::model_catalog::test_status(request.provider)
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_get_model_candidates(
+    Json(request): Json<crate::commands::model_catalog::FetchRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::model_catalog::get_model_candidates(request)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_edit_published_models(
+    Json(request): Json<crate::commands::model_catalog::EditRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::model_catalog::edit_published_models(request)
         .await
         .map(Json)
         .map_err(portal_admin_error)

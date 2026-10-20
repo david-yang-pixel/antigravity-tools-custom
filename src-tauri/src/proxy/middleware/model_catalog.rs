@@ -1,4 +1,5 @@
 //! Admission against the same catalog exposed by the model APIs.
+use crate::modules::model_catalog::{self, Provider};
 use crate::proxy::common::model_mapping::ModelRoutingMode;
 use crate::proxy::server::AppState;
 use axum::{
@@ -19,24 +20,35 @@ pub fn unsupported_model_error(model: &str) -> serde_json::Value {
 }
 
 pub async fn is_supported(state: &AppState, model: &str) -> bool {
+    supported_provider(state, model).await.is_some()
+}
+
+async fn supported_provider(state: &AppState, model: &str) -> Option<Provider> {
+    let provider = model_catalog::selected_provider(model)?;
+    if provider == Provider::Antigravity {
+        state.token_manager.refresh_pending_accounts().await;
+        return state
+            .token_manager
+            .get_raw_collected_models()
+            .contains(model)
+            .then_some(provider);
+    }
     // Explicit provider routes retain their own disabled/configuration errors.
     let mapping = state.custom_mapping.read().await;
     let workbuddy_route = match crate::modules::workbuddy::load() {
         Ok(settings) => settings.target_model(model, &mapping).is_some(),
         Err(_) => crate::modules::workbuddy::known_model_on_configuration_error(model, &mapping),
     };
-    drop(mapping);
-    if workbuddy_route {
-        return true;
+    if !workbuddy_route {
+        return None;
     }
-    crate::proxy::common::model_mapping::get_all_dynamic_models(
-        &state.custom_mapping,
-        Some(&state.token_manager),
-        true,
-    )
-    .await
-    .iter()
-    .any(|id| id == model)
+    // Preserve useful errors for an already selected provider when disabled or broken.
+    if crate::modules::workbuddy::load().is_err()
+        || crate::modules::workbuddy::load().is_ok_and(|settings| !settings.enabled)
+    {
+        return Some(provider);
+    }
+    model_catalog::workbuddy_verified(model, &mapping).then_some(provider)
 }
 
 fn is_model_request(request: &Request) -> bool {
@@ -63,12 +75,25 @@ pub async fn validate_model(
     next: Next,
 ) -> Response {
     let routing = ModelRoutingMode::from_only_raw(*state.only_raw_quota_models.read().await);
+    let model_list = super::user_token_models::is_model_list(&request);
     match admit_request(request, routing, |model| async move {
-        is_supported(&state, &model).await
+        supported_provider(&state, &model).await
     })
     .await
     {
-        Ok(request) => next.run(request).await,
+        Ok(request) => {
+            let response = next.run(request).await;
+            if model_list {
+                match crate::modules::billing::load_prices() {
+                    Ok(prices) => super::user_token_models::filter_model_list(response, &[], &prices).await,
+                    Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+                        "error":{"code":"model_prices_unavailable","message":"Model pricing is unavailable."}
+                    }))).into_response(),
+                }
+            } else {
+                response
+            }
+        }
         Err(response) => response,
     }
 }
@@ -80,15 +105,17 @@ async fn admit_request<F, Fut>(
 ) -> Result<Request, Response>
 where
     F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = bool>,
+    Fut: std::future::Future<Output = Option<Provider>>,
 {
     request.extensions_mut().insert(routing);
     if !routing.is_exact() || !is_model_request(&request) {
         return Ok(request);
     }
-    let (request, model) = super::user_token_models::requested_model(request).await?;
+    let (mut request, model) = super::user_token_models::requested_model(request).await?;
     if let Some(model) = model {
-        if !supports(model.clone()).await {
+        if let Some(provider) = supports(model.clone()).await {
+            request.extensions_mut().insert(provider);
+        } else {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(unsupported_model_error(&model)),
@@ -125,7 +152,7 @@ mod tests {
             .unwrap();
         let request = admit_request(request, snapshot, |_| async {
             configured.store(false, Ordering::Relaxed);
-            true
+            Some(Provider::Antigravity)
         })
         .await
         .unwrap();
@@ -172,7 +199,9 @@ mod tests {
             )
             .layer(from_fn(|request: Request, next: Next| async {
                 match admit_request(request, ModelRoutingMode::Exact, |model| {
-                    std::future::ready(model == "gemini-2.5-flash")
+                    std::future::ready(
+                        (model == "gemini-2.5-flash").then_some(Provider::Antigravity),
+                    )
                 })
                 .await
                 {

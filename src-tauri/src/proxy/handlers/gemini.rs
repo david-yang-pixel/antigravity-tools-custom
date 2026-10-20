@@ -1253,9 +1253,14 @@ pub async fn handle_list_models(
     let models: Vec<_> = model_ids
         .into_iter()
         .filter(|id| {
-            !workbuddy
-                .as_ref()
-                .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+            if only_raw {
+                crate::modules::model_catalog::selected_provider(id)
+                    != Some(crate::modules::model_catalog::Provider::Workbuddy)
+            } else {
+                !workbuddy
+                    .as_ref()
+                    .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+            }
         })
         .map(|id| {
             json!({
@@ -1293,9 +1298,14 @@ pub async fn handle_get_model(
     )
     .await
     .filter(|id| {
-        !workbuddy
-            .as_ref()
-            .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+        if only_raw {
+            crate::modules::model_catalog::selected_provider(id)
+                != Some(crate::modules::model_catalog::Provider::Workbuddy)
+        } else {
+            !workbuddy
+                .as_ref()
+                .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
+        }
     }) {
         (
             StatusCode::OK,
