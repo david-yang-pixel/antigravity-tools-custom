@@ -103,6 +103,33 @@ pub fn write_atomic<P: AsRef<Path>>(target_path: P, content: &[u8]) -> Result<()
     Ok(())
 }
 
+/// Identifies one version of a file, so an in-memory copy can be reused until the
+/// file is rewritten. `write_atomic` replaces the file, which changes the inode on
+/// Unix; size and modification time cover other platforms and in-place edits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64),
+}
+
+/// `None` when the file cannot be inspected; callers then read it directly.
+pub fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        path: path.to_path_buf(),
+        len: meta.len(),
+        modified: meta.modified().ok(),
+        #[cfg(unix)]
+        inode: {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
