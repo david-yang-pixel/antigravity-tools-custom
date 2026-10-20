@@ -131,6 +131,7 @@
     "menu_balance": "Balance",
     "title": "Usage portal",
     "kicker": "My API usage",
+    "support_hint": "Need help? Add us on QQ: {{qq}}",
     "login_title": "Track your token usage",
     "login_description": "Sign in with your API token to view your balance, lifetime usage and per-model activity.",
     "login": "View usage",

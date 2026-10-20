@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, ArrowRight, LogOut, RefreshCw } from 'lucide-react';
+import { Activity, ArrowRight, LogOut, MessageCircle, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toQuotaMillions } from '../components/user-token/tokenQuota';
 import TokenConnectionDetails from '../components/user-token/TokenConnectionDetails';
@@ -209,6 +209,10 @@ export default function TokenPortal() {
                         <div className="text-right"><button onClick={() => reload()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm disabled:opacity-50"><RefreshCw size={16} className={busy ? 'animate-spin' : ''} />{t('common.refresh')}</button>
                             {updatedAt && <p className="mt-2 text-xs text-slate-400">{t('token_portal.updated')}: {updatedAt.toLocaleTimeString(i18n.language)}</p>}</div>
                     </section>
+                    <p className="flex items-start gap-2 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                        <MessageCircle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
+                        <span>{t('token_portal.support_hint', { qq: '3133450490' })}</span>
+                    </p>
                     {error && <p role="alert" className="text-sm text-red-600 rounded-lg bg-red-50 px-4 py-3">{error}</p>}
                     <div id="portal-panel-overview" hidden={menu !== 'overview'} className="space-y-8">
                     <section aria-label={t('token_portal.summary')} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
