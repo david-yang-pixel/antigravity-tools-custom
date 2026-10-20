@@ -950,58 +950,6 @@
         "thinking_retention_days_label": "思考ブロック保持日数（スライドウィンドウ）",
         "thinking_retention_days_desc": "デフォルト15日間のスライディングウィンドウ。"
       },
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "検出中...",
-          "installed": "インストール済み ({{version}})",
-          "not_installed": "未インストール",
-          "synced": "同期済み",
-          "not_synced": "未同期",
-          "current_base_url": "現在のベースURL"
-        },
-        "sync_accounts": "アカウント情報を antigravity-accounts.json に同期",
-        "btn_sync": "設定を同期",
-        "btn_view": "設定を表示",
-        "btn_restore": "復元",
-        "btn_restore_backup": "バックアップから復元",
-        "btn_clear": "設定をクリア",
-        "clear_confirm_title": "設定のクリアを確認",
-        "clear_confirm_message": "OpenCode の設定をクリアしてもよろしいですか？設定ファイルが削除されます。",
-        "toast": {
-          "config_missing": "APIキーを生成し、サービスを先に起動してください",
-          "sync_success": "OpenCode の設定を同期しました",
-          "sync_error": "OpenCode の同期に失敗しました: {{error}}",
-          "clear_success": "OpenCode の設定をクリアしました",
-          "clear_error": "OpenCode の設定クリアに失敗しました: {{error}}"
-        },
-        "modal": {
-          "view_title": "OpenCode 設定ビューアー",
-          "copy_success": "設定をコピーしました"
-        },
-        "sync_confirm_title": "同期の確認",
-        "sync_confirm_message": "現在のプロキシ設定に基づき、OpenCode の設定が上書きされます。続行しますか？",
-        "restore_confirm": "OpenCode をデフォルト設定に復元しますか？",
-        "restore_backup_confirm": "バックアップから OpenCode の設定を復元しますか？",
-        "modal_title": "Select OpenCode Models",
-        "select_models": "Select models to sync",
-        "auth_plugin_warning": "opencode-antigravity-auth プラグインを検出しました。同期では antigravity-manager provider のみ作成し、google provider/plugin は上書きしません。",
-        "btn_confirm_sync": "Confirm Sync",
-        "custom_base_url_label": "Custom Manager BaseURL",
-        "custom_base_url_desc": "For Docker Compose networking",
-        "custom_base_url_reset": "Reset"
-      },
-      "droid_sync": {
-        "modal_title": "Droid にモデルを追加",
-        "modal_desc": "選択したモデルは customModels として settings.json に書き込まれます",
-        "selected": "選択済み",
-        "btn_confirm_sync": "選択したモデルを追加",
-        "toast": {
-          "no_models_selected": "少なくとも1つのモデルを選択してください",
-          "sync_success_count": "{{count}} 個のモデルを Droid に追加しました",
-          "sync_error": "同期に失敗しました: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "思考予算制御 (Thinking Budget)",
         "description": "プロトコル間の推論パラメータを正規化し、GeminiおよびClaudeモデルの思考トークン予算と適応的動作を一元管理します。",
@@ -1326,36 +1274,6 @@
       "model_id": "モデルID",
       "description": "説明",
       "action": "操作"
-    },
-    "cli_sync": {
-      "title": "Agentツール一括設定",
-      "subtitle": "現在の API エンドポイントとキーをローカルの AI Agent ツールに素早く同期します。",
-      "card_title": "{{name}} 設定",
-      "status": {
-        "not_installed": "未インストール",
-        "installed": "v{{version}}",
-        "synced": "同期済み",
-        "not_synced": "未同期",
-        "detecting": "検出中...",
-        "current_base_url": "現在のベースURL"
-      },
-      "model_select": "Select Model",
-      "btn_sync": "今すぐ同期",
-      "btn_view": "設定を表示",
-      "btn_restore": "デフォルトに戻す",
-      "btn_restore_backup": "バックアップを復元",
-      "restore_confirm": "{{name}} の設定を公式のデフォルトURLに復元してもよろしいですか？",
-      "restore_backup_confirm": "バックアップ設定が見つかりました。復元してもよろしいですか？",
-      "modal": {
-        "view_title": "{{name}} 設定ファイルの内容",
-        "copy_success": "設定内容をコピーしました"
-      },
-      "toast": {
-        "sync_success": "同期に成功しました！{{name}} の準備が整いました。",
-        "sync_error": "同期に失敗しました：{{error}}"
-      },
-      "sync_confirm_title": "同期の確認",
-      "sync_confirm_message": "{{name}} の設定を同期する準備ができました。⚠️ 注意：これにより、既存のローカル設定ファイル（ログイントークン、APIキーなど）が上書きされます。続行してもよろしいですか？"
     }
   },
   "monitor": {
@@ -1716,13 +1634,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "APIキーを貼り付け...",
     "queryButton": "更新",
-    "cli": {
-      "quickConfig": "ワンクリック開発環境設定",
-      "syncDesc": "公式標準設定に同期",
-      "codexTooltip": "Codexに同期",
-      "claudeTooltip": "Claude Codeに同期",
-      "opencodeTooltip": "API Key、BaseURL、モデルを OpenCode に同期"
-    },
     "models": {
       "title": "利用可能なモデル",
       "empty": "モデルリストがありません"

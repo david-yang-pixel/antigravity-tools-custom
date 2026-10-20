@@ -68,7 +68,6 @@ Antigravity Gateway 是一个双重角色的服务器：
 *   **POST** `/stats/token/clear`: 重置统计数据
 
 ### 2.4 高级功能 (Advanced)
-*   **POST** `/proxy/cli/sync`: 执行 CLI (Claude/Codex) 配置文件同步
 *   **POST** `/accounts/import/db`: 从 v1 旧数据库导入账号
 *   **POST** `/accounts/oauth/start`: 发起 OAuth 授权流程 (Headless)
 *   **POST** `/proxy/cloudflared/start`: 启动 Cloudflare Tunnel

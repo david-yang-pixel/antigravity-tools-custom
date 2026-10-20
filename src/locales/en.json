@@ -24,7 +24,6 @@
     "error_order_not_found": "This order was not found. Refresh your top-up history.",
     "error_payment_timeout": "The payment request timed out; the order may already exist. Close this dialog and check pending orders to continue payment.",
     "error_payment_check_failed": "The payment status could not be confirmed. Please try again shortly.",
-
     "button": "Top up",
     "hint": "Pay online and the balance updates right away. Minimum {{min}}.",
     "orders": "Top-up history",
@@ -1337,58 +1336,6 @@
         "thinking_retention_days_label": "Thinking-store retention (sliding window, days)",
         "thinking_retention_days_desc": "Default is a 15-day sliding window. While the client session ID stays active, each request refreshes expiry; records are cleaned only after the window lapses with no requests."
       },
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "Detecting...",
-          "installed": "Installed ({{version}})",
-          "not_installed": "Not Installed",
-          "synced": "Synced",
-          "not_synced": "Not Synced",
-          "current_base_url": "Current Base URL"
-        },
-        "sync_accounts": "Sync accounts to antigravity-accounts.json",
-        "btn_sync": "Sync Config",
-        "btn_view": "View Config",
-        "btn_restore": "Restore",
-        "btn_restore_backup": "Restore Backup",
-        "btn_clear": "Clear Config",
-        "clear_confirm_title": "Confirm Clear Config",
-        "clear_confirm_message": "Are you sure you want to clear OpenCode configuration? This will remove the config file.",
-        "toast": {
-          "config_missing": "Please generate API Key and start service first",
-          "sync_success": "OpenCode config synced successfully",
-          "sync_error": "OpenCode sync failed: {{error}}",
-          "clear_success": "OpenCode config cleared successfully",
-          "clear_error": "Failed to clear OpenCode config: {{error}}"
-        },
-        "modal": {
-          "view_title": "OpenCode Config Viewer",
-          "copy_success": "Config copied"
-        },
-        "sync_confirm_title": "Confirm Sync",
-        "sync_confirm_message": "OpenCode config will be overwritten based on current proxy settings. Continue?",
-        "restore_confirm": "Are you sure you want to restore OpenCode to default settings?",
-        "restore_backup_confirm": "Are you sure you want to restore OpenCode config from backup?",
-        "modal_title": "Select OpenCode Models",
-        "select_models": "Select models to sync",
-        "auth_plugin_warning": "Detected opencode-antigravity-auth plugin. Sync only creates provider antigravity-manager and will not overwrite the google provider/plugin.",
-        "btn_confirm_sync": "Confirm Sync",
-        "custom_base_url_label": "Custom Manager BaseURL",
-        "custom_base_url_desc": "For Docker Compose networking",
-        "custom_base_url_reset": "Reset"
-      },
-      "droid_sync": {
-        "modal_title": "Add models to Droid",
-        "modal_desc": "Selected models will be added as customModels to settings.json",
-        "selected": "selected",
-        "btn_confirm_sync": "Add selected models",
-        "toast": {
-          "no_models_selected": "Please select at least one model",
-          "sync_success_count": "Added {{count}} model(s) to Droid",
-          "sync_error": "Sync failed: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "Thinking Budget Control",
         "description": "Normalize cross-protocol reasoning parameters and centrally manage thinking token budgets and adaptive behaviors for Gemini and Claude models.",
@@ -1716,112 +1663,6 @@
       "model_id": "Model ID",
       "description": "Description",
       "action": "Action"
-    },
-    "cli_sync": {
-      "title": "One-Click Agent Tools Configuration",
-      "subtitle": "Quickly sync current API endpoints and keys to your local AI Agent tools.",
-      "card_title": "{{name}} Config",
-      "jeikcode_recommended": "Recommended",
-      "jeikcode_badge": "Best Matched",
-      "jeikcode_author": "by Jeikl",
-      "jeikcode_tagline": "Built by Core Maintainer · Best Gateway Fit",
-      "jeikcode_tag_cache": "95%+ Insane Cache",
-      "jeikcode_tag_codegraph": "Code Graph",
-      "jeikcode_tag_surpass": "Beats CC & Codex",
-      "jeikcode_tag_custom": "Customizable",
-      "status": {
-        "not_installed": "Not detected",
-        "installed": "v{{version}}",
-        "synced": "Pointed to this app",
-        "not_synced": "Not synced",
-        "detecting": "Detecting...",
-        "current_base_url": "Current Base URL"
-      },
-      "model_select": "Select Model",
-      "btn_sync": "Sync Config Now",
-      "btn_view": "View Config",
-      "btn_restore": "Restore Defaults",
-      "btn_restore_backup": "Restore Backup",
-      "restore_confirm": "Are you sure you want to restore the configuration for {{name}} to the official default URL?",
-      "restore_backup_confirm": "Backup configuration found. Are you sure you want to restore it?",
-      "modal": {
-        "view_title": "{{name}} Config Content",
-        "copy_success": "Config content copied"
-      },
-      "toast": {
-        "sync_success": "Sync successful! {{name}} is ready.",
-        "sync_error": "Sync failed: {{error}}"
-      },
-      "sync_confirm_title": "Sync Confirmation",
-      "sync_confirm_message": "Ready to sync {{name}} configuration. ⚠️ Warning: This will overwrite your existing local configuration files (e.g. login tokens, API Keys). Are you sure you want to continue?"
-    },
-    "hermes_sync": {
-      "modal_title": "Configure Antigravity Manager in Hermes",
-      "endpoint_title": "Connection address",
-      "local_endpoint": "Local proxy",
-      "custom_endpoint": "Custom address",
-      "custom_endpoint_desc": "Docker, LAN or reverse proxy",
-      "url_required": "Enter the Hermes connection address",
-      "models_title": "Models available in Hermes",
-      "discover_models": "Discover automatically",
-      "discover_models_desc": "Hermes reads the live model list from /v1/models",
-      "selected_models": "Only selected models",
-      "models_required": "Select at least one model",
-      "activate_provider": "Make Antigravity Manager the default Hermes provider",
-      "activate_provider_desc": "Off by default so your current Hermes provider is not changed.",
-      "default_model": "Default model",
-      "select_default_model": "Select a model",
-      "default_model_required": "Select a default model",
-      "default_model_invalid": "Select a default model available through Antigravity Manager",
-      "currently_active": "Currently active in Hermes",
-      "btn_confirm_sync": "Save to Hermes",
-      "btn_view": "View Config",
-      "btn_restore": "Restore",
-      "btn_clear": "Clear",
-      "clear_confirm_title": "Clear Hermes Configuration",
-      "clear_confirm_message": "This will remove the Antigravity Manager provider from Hermes. Are you sure?",
-      "toast": {
-        "sync_success": "Hermes synced successfully",
-        "clear_success": "Hermes configuration cleared successfully",
-        "clear_error": "Failed to clear Hermes: {{error}}"
-      }
-    },
-    "openclaw_sync": {
-      "modal_title": "Configure Antigravity Manager in OpenClaw",
-      "version_title": "OpenClaw SDK Version Specification",
-      "detected_hint": "Detected environment: {{target}}",
-      "v2_label": "≥ 2026.8.1 (v2.0 Spec)",
-      "v2_desc": "Uses modelPolicy.allow allowlist spec and entries structure with native multimodal image & tool support",
-      "v1_label": "< 2026.8.1 (v1.0 Spec)",
-      "v1_desc": "Uses agents.defaults.models dictionary registration, fully compatible with 2026.7 and legacy SDKs",
-      "endpoint_title": "Connection Address (Base URL)",
-      "local_endpoint": "Local proxy",
-      "custom_endpoint": "Custom address",
-      "custom_endpoint_desc": "Docker, LAN, or reverse proxy",
-      "url_required": "Please enter the OpenClaw connection address",
-      "models_title": "Models available in OpenClaw",
-      "all_models": "Sync all models",
-      "all_models_desc": "Sync all {{count}} available models",
-      "selected_models": "Select models",
-      "models_required": "Select at least one model",
-      "activate_provider": "Set as OpenClaw primary model",
-      "activate_provider_desc": "Automatically updates agents.defaults.model.primary",
-      "default_model": "Default model",
-      "select_default_model": "Select a model",
-      "default_model_required": "Please select a default model",
-      "currently_active": "Currently active as primary model",
-      "btn_sync_v1": "Sync (< 2026.8.1 v1.0)",
-      "btn_sync_v2": "Sync (≥ 2026.8.1 v2.0)",
-      "btn_view": "View Config",
-      "btn_restore": "Restore",
-      "btn_clear": "Clear",
-      "clear_confirm_title": "Clear OpenClaw Configuration",
-      "clear_confirm_message": "This will remove the Antigravity Manager provider and model allowlists from OpenClaw. Are you sure?",
-      "toast": {
-        "sync_success": "OpenClaw ({{version}}) synced successfully",
-        "clear_success": "OpenClaw configuration cleared successfully",
-        "clear_error": "Failed to clear OpenClaw configuration: {{error}}"
-      }
     },
     "model_config": {
       "title": "Model Config"
@@ -2289,13 +2130,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "Paste your API Key...",
     "queryButton": "Refresh",
-    "cli": {
-      "quickConfig": "One-Click Local Dev Setup",
-      "syncDesc": "Sync to official standard configuration",
-      "codexTooltip": "Sync API Key & BaseURL to Codex / ChatGPT CLI",
-      "claudeTooltip": "Sync API Key & BaseURL to Claude Code",
-      "opencodeTooltip": "Sync API Key, BaseURL and models to OpenCode"
-    },
     "models": {
       "title": "Available Models",
       "empty": "Enter key and query to load available models.",
@@ -2305,22 +2139,7 @@
       "parseFormat": "Parse format error: {{err}}",
       "fetchFailed": "Fetch failed: {{err}}",
       "queryFailed": "Failed to get valid quota or models. Please check if the API Key and Base URL are correct."
-    },
-    "opencode": {
-      "modelsRequired": "Refresh this key to load available models before activating its OpenCode profile.",
-      "active": "Active",
-      "modified": "Modified",
-      "inactive": "Inactive",
-      "syncedToast": "Synced to OpenCode: {{name}}",
-      "removedToast": "Removed from OpenCode: {{name}}",
-      "clickToRemove": "OpenCode profile is active and synced. Click to deactivate/remove",
-      "clickToUpdate": "Settings or models differ. Click to update",
-      "clickToActivate": "Click to activate separate profile in OpenCode",
-      "syncedActiveTooltip": "OpenCode: profile is active and fully synced. Click to deactivate",
-      "partialTooltip": "OpenCode: settings or models differ. Click to sync"
-    },
-    "syncSuccess": "Successfully synced to {{app}}",
-    "syncError": "Failed to sync: {{error}}"
+    }
   },
   "suggestion_delete_thinking": {
     "title": "Update Recommendation",

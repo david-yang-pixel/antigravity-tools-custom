@@ -963,58 +963,6 @@
         "thinking_retention_days_label": "Thinking-store retention (sliding window, days)",
         "thinking_retention_days_desc": "Default is a 15-day sliding window. While the client session ID stays active, each request refreshes expiry; records are cleaned only after the window lapses with no requests."
       },
-      "opencode_sync": {
-        "card_title": "Sincronização OpenCode",
-        "status": {
-          "detecting": "Detectando...",
-          "installed": "Instalado ({{version}})",
-          "not_installed": "Não Instalado",
-          "synced": "Sincronizado",
-          "not_synced": "Não Sincronizado",
-          "current_base_url": "Base URL Atual"
-        },
-        "sync_accounts": "Sincronizar Contas",
-        "btn_sync": "Sincronizar com OpenCode",
-        "btn_view": "Visualizar Configuração",
-        "btn_restore": "Restaurar Padrão",
-        "btn_restore_backup": "Restaurar Backup",
-        "btn_clear": "Limpar Configuração",
-        "clear_confirm_title": "Confirmar Limpeza de Configuração",
-        "clear_confirm_message": "Tem certeza de que deseja limpar as configurações do provedor Antigravity no OpenCode?",
-        "toast": {
-          "config_missing": "Arquivo de configuração do OpenCode não encontrado",
-          "sync_success": "Configurações sincronizadas com sucesso no OpenCode!",
-          "sync_error": "Erro ao sincronizar com OpenCode: {{error}}",
-          "clear_success": "Configuração do OpenCode limpa com sucesso!",
-          "clear_error": "Erro ao limpar configuração do OpenCode: {{error}}"
-        },
-        "modal": {
-          "view_title": "Configuração Atual do OpenCode",
-          "copy_success": "Configuração copiada para a área de transferência!"
-        },
-        "sync_confirm_title": "Confirmar Sincronização",
-        "sync_confirm_message": "Isso atualizará a configuração do OpenCode para apontar para o proxy Antigravity local. Deseja continuar?",
-        "restore_confirm": "Deseja restaurar a configuração do OpenCode para os valores padrão?",
-        "restore_backup_confirm": "Deseja restaurar a configuração do OpenCode a partir do backup anterior?",
-        "modal_title": "Configurar Sincronização OpenCode",
-        "select_models": "Selecionar Modelos para Sincronizar",
-        "auth_plugin_warning": "Aviso: Se você estiver usando plugins de autenticação no OpenCode, desative-os para evitar conflitos.",
-        "btn_confirm_sync": "Confirmar e Sincronizar",
-        "custom_base_url_label": "Base URL Personalizada (Opcional)",
-        "custom_base_url_desc": "Especifique uma URL personalizada caso esteja executando o proxy em outra máquina ou contêiner",
-        "custom_base_url_reset": "Restaurar URL Local"
-      },
-      "droid_sync": {
-        "modal_title": "Sincronização com Factory Droid",
-        "modal_desc": "Selecione os modelos a serem exportados para o assistente Factory Droid",
-        "selected": "selecionado(s)",
-        "btn_confirm_sync": "Sincronizar com Droid",
-        "toast": {
-          "no_models_selected": "Por favor, selecione pelo menos um modelo para sincronizar",
-          "sync_success_count": "Sucesso! {{count}} modelo(s) sincronizados com o Droid",
-          "sync_error": "Erro ao sincronizar com Droid: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "Thinking Budget Control",
         "description": "Normalize cross-protocol reasoning parameters and centrally manage thinking token budgets and adaptive behaviors for Gemini and Claude models.",
@@ -1339,59 +1287,6 @@
       "model_id": "ID do Modelo",
       "description": "Descrição",
       "action": "Ação"
-    },
-    "cli_sync": {
-      "title": "Configuração Rápida de Ferramentas de Agent",
-      "subtitle": "Sincronize a URL e chave da API com suas ferramentas de AI Agent locais",
-      "card_title": "Config {{name}}",
-      "status": {
-        "not_installed": "Não instalado",
-        "installed": "v{{version}}",
-        "synced": "Apontado para este app",
-        "not_synced": "Não sincronizado",
-        "detecting": "Detectando...",
-        "current_base_url": "URL Base Atual"
-      },
-      "model_select": "Seleção de Modelos para Exportação",
-      "btn_sync": "Sincronizar Agora",
-      "btn_view": "Ver Config",
-      "btn_restore": "Restaurar Padrão",
-      "btn_restore_backup": "Restaurar Backup",
-      "restore_confirm": "Tem certeza que deseja restaurar a config de {{name}} para o padrão?",
-      "restore_backup_confirm": "Configuração de backup encontrada. Tem certeza de que deseja restaurá-la?",
-      "modal": {
-        "view_title": "Conteúdo do arquivo {{name}}",
-        "copy_success": "Copiado para a área de transferência"
-      },
-      "toast": {
-        "sync_success": "Sucesso! {{name}} está pronto.",
-        "sync_error": "Falha na sincronização: {{error}}",
-        "config_missing": "Gere uma Chave de API e inicie o serviço primeiro"
-      },
-      "sync_confirm_title": "Confirmação de Sincronização",
-      "sync_confirm_message": "Pronto para sincronizar a configuração do {{name}}. ⚠️ Aviso: Isso substituirá seus arquivos de configuração local existentes (como tokens de login, chaves de API). Tem certeza de que deseja continuar?"
-    },
-    "opencode_sync": {
-      "toast": {
-        "clear_success": "Configuração do OpenCode limpa com sucesso",
-        "clear_error": "Erro ao limpar configuração do OpenCode: {{error}}",
-        "sync_success": "Sincronizado com OpenCode com sucesso"
-      },
-      "sync_accounts": "Sincronizar contas para antigravity-accounts.json",
-      "btn_clear": "Limpar",
-      "clear_confirm_title": "Limpar Configuração do OpenCode",
-      "clear_confirm_message": "Isso removerá todas as configurações do OpenCode, incluindo definições legadas. Tem certeza?"
-    },
-    "droid_sync": {
-      "toast": {
-        "no_models_selected": "Por favor, selecione pelo menos um modelo",
-        "sync_success_count": "Adicionado(s) {{count}} modelo(s) ao Droid",
-        "sync_error": "Falha na sincronização: {{error}}"
-      },
-      "modal_title": "Adicionar Modelos ao Droid",
-      "select_models": "Selecione os modelos para adicionar",
-      "no_models": "Selecione os modelos na lista acima para adicionar",
-      "btn_confirm_sync": "Gravar Configuração"
     }
   },
   "monitor": {
@@ -1752,13 +1647,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "Paste your API Key...",
     "queryButton": "Refresh",
-    "cli": {
-      "quickConfig": "One-Click Local Dev Setup",
-      "syncDesc": "Sync to official standard configuration",
-      "codexTooltip": "Sync API Key & BaseURL to Antigravity Codex",
-      "claudeTooltip": "Sync API Key & BaseURL to Claude Code",
-      "opencodeTooltip": "Sincronizar API Key, BaseURL e modelos com o OpenCode"
-    },
     "models": {
       "title": "Available Models",
       "empty": "No models returned for current API Key.",
@@ -1768,9 +1656,7 @@
       "parseFormat": "Parse format error: {{err}}",
       "fetchFailed": "Fetch failed: {{err}}",
       "queryFailed": "Failed to get valid quota or models. Please check if the API Key and Base URL are correct."
-    },
-    "syncSuccess": "Sincronizado com sucesso para {{app}}",
-    "syncError": "Falha ao sincronizar: {{error}}"
+    }
   },
   "debug_console": {
     "pause_scroll": "Pausar rolagem",

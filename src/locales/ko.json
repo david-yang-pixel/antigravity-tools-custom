@@ -950,58 +950,6 @@
         "thinking_retention_days_label": "생각 블록 보존 일수 (슬라이딩 윈도우)",
         "thinking_retention_days_desc": "기본 15일 슬라이딩 윈도우."
       },
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "감지 중...",
-          "installed": "설치됨 ({{version}})",
-          "not_installed": "설치되지 않음",
-          "synced": "동기화됨",
-          "not_synced": "동기화되지 않음",
-          "current_base_url": "현재 기본 URL"
-        },
-        "sync_accounts": "계정을 antigravity-accounts.json에 동기화",
-        "btn_sync": "설정 동기화",
-        "btn_view": "설정 보기",
-        "btn_restore": "복원",
-        "btn_restore_backup": "백업 복원",
-        "btn_clear": "설정 지우기",
-        "clear_confirm_title": "설정 삭제 확인",
-        "clear_confirm_message": "OpenCode 설정을 지우시겠습니까? 설정 파일이 삭제됩니다.",
-        "toast": {
-          "config_missing": "먼저 API 키를 생성하고 서비스를 시작해 주세요",
-          "sync_success": "OpenCode 설정이 성공적으로 동기화되었습니다",
-          "sync_error": "OpenCode 동기화 실패: {{error}}",
-          "clear_success": "OpenCode 설정이 삭제되었습니다",
-          "clear_error": "OpenCode 설정 삭제 실패: {{error}}"
-        },
-        "modal": {
-          "view_title": "OpenCode 설정 보기",
-          "copy_success": "설정이 복사되었습니다"
-        },
-        "sync_confirm_title": "동기화 확인",
-        "sync_confirm_message": "현재 프록시 설정에 따라 OpenCode 설정이 덮어쓰기됩니다. 계속하시겠습니까?",
-        "restore_confirm": "OpenCode를 기본 설정으로 복원하시겠습니까?",
-        "restore_backup_confirm": "백업에서 OpenCode 설정을 복원하시겠습니까?",
-        "modal_title": "OpenCode 모델 선택",
-        "select_models": "동기화할 모델 선택",
-        "auth_plugin_warning": "opencode-antigravity-auth 플러그인이 감지되었습니다. 동기화는 antigravity-manager provider만 생성하며 google provider/플러그인은 덮어쓰지 않습니다.",
-        "btn_confirm_sync": "동기화 확인",
-        "custom_base_url_label": "사용자 지정 Manager BaseURL",
-        "custom_base_url_desc": "Docker Compose 네트워킹용",
-        "custom_base_url_reset": "초기화"
-      },
-      "droid_sync": {
-        "modal_title": "Droid에 모델 추가",
-        "modal_desc": "선택한 모델이 settings.json에 customModels로 추가됩니다",
-        "selected": "선택됨",
-        "btn_confirm_sync": "선택한 모델 추가",
-        "toast": {
-          "no_models_selected": "최소 하나 이상의 모델을 선택해 주세요",
-          "sync_success_count": "Droid에 {{count}}개 모델을 추가했습니다",
-          "sync_error": "동기화 실패: {{error}}"
-        }
-      },
       "thinking_budget": {
         "title": "추론 예산 제어 (Thinking Budget)",
         "description": "프로토콜 간 추론 매개변수를 정규화하고 Gemini 및 Claude 모델의 추론 토큰 예산 및 적응형 동작을 통합 관리합니다.",
@@ -1326,36 +1274,6 @@
       "model_id": "모델 ID",
       "description": "설명",
       "action": "작업"
-    },
-    "cli_sync": {
-      "title": "Agent 도구 원클릭 설정",
-      "subtitle": "현재 API 엔드포인트와 키를 로컬 AI Agent 도구에 빠르게 동기화합니다.",
-      "card_title": "{{name}} 구성",
-      "status": {
-        "not_installed": "감지되지 않음",
-        "installed": "v{{version}}",
-        "synced": "이 앱을 가리킴",
-        "not_synced": "동기화되지 않음",
-        "detecting": "감지 중...",
-        "current_base_url": "현재 기본 URL"
-      },
-      "model_select": "모델 선택",
-      "btn_sync": "지금 설정 동기화",
-      "btn_view": "구성 보기",
-      "btn_restore": "기본값 복원",
-      "btn_restore_backup": "백업 복원",
-      "restore_confirm": "{{name}}의 구성을 공식 기본 URL로 복원하시겠습니까?",
-      "restore_backup_confirm": "백업 구성을 찾았습니다. 복원하시겠습니까?",
-      "modal": {
-        "view_title": "{{name}} 구성 내용",
-        "copy_success": "구성 내용 복사됨"
-      },
-      "toast": {
-        "sync_success": "동기화 성공! {{name}}이(가) 준비되었습니다.",
-        "sync_error": "동기화 실패: {{error}}"
-      },
-      "sync_confirm_title": "동기화 확인",
-      "sync_confirm_message": "{{name}} 구성을 동기화할 준비가 되었습니다. ⚠️ 경고: 이 작업은 기존 로컬 구성 파일(예: 로그인 토큰, API 키)을 덮어씁니다. 계속하시겠습니까?"
     }
   },
   "monitor": {
@@ -1716,13 +1634,6 @@
     "apiKeyLabel": "API 키",
     "apiKeyPlaceholder": "API Key를 붙여넣으세요...",
     "queryButton": "새로고침",
-    "cli": {
-      "quickConfig": "원클릭 로컬 개발 설정",
-      "syncDesc": "공식 표준 설정으로 동기화",
-      "codexTooltip": "API Key와 BaseURL을 Antigravity Codex에 동기화",
-      "claudeTooltip": "API Key와 BaseURL을 Claude Code에 동기화",
-      "opencodeTooltip": "API Key, BaseURL, 모델을 OpenCode에 동기화"
-    },
     "models": {
       "title": "사용 가능한 모델",
       "empty": "현재 API Key로 반환된 모델이 없습니다."

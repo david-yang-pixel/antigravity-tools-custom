@@ -32,7 +32,6 @@ import { showToast } from '../components/common/ToastContainer';
 import { cn } from '../utils/cn';
 import { useProxyModels } from '../hooks/useProxyModels';
 import GroupedSelect, { SelectOption } from '../components/common/GroupedSelect';
-import { CliSyncCard } from '../components/proxy/CliSyncCard';
 import { listAccounts } from '../services/accountService';
 import CircuitBreaker from '../components/settings/CircuitBreaker';
 import GlobalSystemPrompt from '../components/settings/GlobalSystemPrompt';
@@ -164,7 +163,7 @@ export default function ApiProxy() {
     const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
     const [searchParams] = useSearchParams();
     const showWorkBuddy = searchParams.get('section') === 'workbuddy';
-    const [activeMenuTab, setActiveMenuTab] = useState<'settings' | 'models' | 'cli' | 'protocols'>(showWorkBuddy ? 'models' : 'settings');
+    const [activeMenuTab, setActiveMenuTab] = useState<'settings' | 'models' | 'protocols'>(showWorkBuddy ? 'models' : 'settings');
     const [configLoading, setConfigLoading] = useState(true);
     const [configError, setConfigError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -1564,18 +1563,6 @@ print(response.choices[0].message.content)`;
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={() => setActiveMenuTab('cli')}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
-                                        activeMenuTab === 'cli'
-                                            ? 'bg-white dark:bg-base-100 text-blue-600 dark:text-blue-400 shadow-xs'
-                                            : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
-                                    }`}
-                                >
-                                    <Terminal size={14} className={activeMenuTab === 'cli' ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400'} />
-                                    {t('proxy.cli_sync.title', { defaultValue: 'Agent工具一键配置' })}
-                                </button>
-                                <button
-                                    type="button"
                                     onClick={() => setActiveMenuTab('protocols')}
                                     className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all ${
                                         activeMenuTab === 'protocols'
@@ -2082,18 +2069,6 @@ print(response.choices[0].message.content)`;
                                     <WorkBuddySettings onSaved={refreshModels} />
                                 </CollapsibleCard>
                                 {renderModelRouterSection()}
-                            </div>
-                        )}
-
-                        {/* TAB 2: CLI 一键配置 (cli) */}
-                        {activeMenuTab === 'cli' && (
-                            <div className="p-4">
-                                <div className="bg-gray-50/60 dark:bg-base-200/50 rounded-xl p-3 border border-gray-200/60 dark:border-base-300">
-                                    <CliSyncCard
-                                        proxyUrl={status.running ? status.base_url : `http://127.0.0.1:${appConfig.proxy.port || 8045}`}
-                                        apiKey={appConfig.proxy.api_key}
-                                    />
-                                </div>
                             </div>
                         )}
 

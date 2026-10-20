@@ -1045,59 +1045,7 @@
       "log_retention_storage_gb": "Log storage limit (GB)",
       "log_retention_storage_gb_desc": "When reaching limit, sliding window evicts oldest 30% logs to accommodate new entries",
       "log_retention_current_usage": "Current database disk usage",
-      "log_retention_rows": "Maximum log rows",
-      "opencode_sync": {
-        "card_title": "OpenCode",
-        "status": {
-          "detecting": "Detecting...",
-          "installed": "Installed ({{version}})",
-          "not_installed": "Not Installed",
-          "synced": "Synced",
-          "not_synced": "Not Synced",
-          "current_base_url": "Current Base URL"
-        },
-        "sync_accounts": "Sync accounts to antigravity-accounts.json",
-        "btn_sync": "Sync Config",
-        "btn_view": "View Config",
-        "btn_restore": "Restore",
-        "btn_restore_backup": "Restore Backup",
-        "btn_clear": "Clear Config",
-        "clear_confirm_title": "Confirm Clear Config",
-        "clear_confirm_message": "Are you sure you want to clear OpenCode configuration? This will remove the config file.",
-        "toast": {
-          "config_missing": "Please generate API Key and start service first",
-          "sync_success": "OpenCode config synced successfully",
-          "sync_error": "OpenCode sync failed: {{error}}",
-          "clear_success": "OpenCode config cleared successfully",
-          "clear_error": "Failed to clear OpenCode config: {{error}}"
-        },
-        "modal": {
-          "view_title": "OpenCode Config Viewer",
-          "copy_success": "Config copied"
-        },
-        "sync_confirm_title": "Confirm Sync",
-        "sync_confirm_message": "OpenCode config will be overwritten based on current proxy settings. Continue?",
-        "restore_confirm": "Are you sure you want to restore OpenCode to default settings?",
-        "restore_backup_confirm": "Are you sure you want to restore OpenCode config from backup?",
-        "modal_title": "Select OpenCode Models",
-        "select_models": "Select models to sync",
-        "auth_plugin_warning": "Detected opencode-antigravity-auth plugin. Sync only creates provider antigravity-manager and will not overwrite the google provider/plugin.",
-        "btn_confirm_sync": "Confirm Sync",
-        "custom_base_url_label": "Custom Manager BaseURL",
-        "custom_base_url_desc": "For Docker Compose networking",
-        "custom_base_url_reset": "Reset"
-      },
-      "droid_sync": {
-        "modal_title": "Add models to Droid",
-        "modal_desc": "Selected models will be added as customModels to settings.json",
-        "selected": "selected",
-        "btn_confirm_sync": "Add selected models",
-        "toast": {
-          "no_models_selected": "Please select at least one model",
-          "sync_success_count": "Added {{count}} model(s) to Droid",
-          "sync_error": "Sync failed: {{error}}"
-        }
-      }
+      "log_retention_rows": "Maximum log rows"
     },
     "cloudflared": {
       "title": "Akses Awam (Cloudflared)",
@@ -1308,36 +1256,6 @@
       "model_id": "ID Model",
       "description": "Penerangan",
       "action": "Tindakan"
-    },
-    "cli_sync": {
-      "title": "Konfigurasi Alat Agent Satu-Klik",
-      "subtitle": "Segerakkan endpoint API semasa dan kunci ke alat AI Agent tempatan anda dengan cepat.",
-      "card_title": "Konfigurasi {{name}}",
-      "status": {
-        "not_installed": "Tidak dikesan",
-        "installed": "v{{version}}",
-        "synced": "Ditunjuk ke aplikasi ini",
-        "not_synced": "Tidak disegerakkan",
-        "detecting": "Mengesan...",
-        "current_base_url": "URL Asas Semasa"
-      },
-      "btn_sync": "Segerak Konfigurasi Sekarang",
-      "btn_view": "Lihat Konfigurasi",
-      "btn_restore": "Pulihkan Lalai",
-      "btn_restore_backup": "Pulihkan Sandaran",
-      "restore_confirm": "Adakah anda pasti mahu memulihkan konfigurasi untuk {{name}} ke URL lalai rasmi?",
-      "restore_backup_confirm": "Konfigurasi sandaran ditemui. Adakah anda pasti mahu memulihkannya?",
-      "modal": {
-        "view_title": "Kandungan Konfigurasi {{name}}",
-        "copy_success": "Kandungan konfigurasi disalin"
-      },
-      "toast": {
-        "sync_success": "Segerak berjaya! {{name}} sudah sedia.",
-        "sync_error": "Segerak gagal: {{error}}"
-      },
-      "sync_confirm_title": "Pengesahan Segerak",
-      "sync_confirm_message": "Bersedia untuk menyegerakkan konfigurasi {{name}}. ⚠️ Amaran: Ini akan menimpa fail konfigurasi tempatan sedia ada anda (cth. token log masuk, Kunci API). Adakah anda pasti mahu meneruskan?",
-      "model_select": "Select Model"
     },
     "models": {
       "flash": "Ultra-fast",
@@ -1584,13 +1502,6 @@
     "apiKeyLabel": "API Key",
     "apiKeyPlaceholder": "Paste your API Key...",
     "queryButton": "Refresh",
-    "cli": {
-      "quickConfig": "One-Click Local Dev Setup",
-      "syncDesc": "Sync to official standard configuration",
-      "codexTooltip": "Sync API Key & BaseURL to Antigravity Codex",
-      "claudeTooltip": "Sync API Key & BaseURL to Claude Code",
-      "opencodeTooltip": "Sync API Key, BaseURL and models to OpenCode"
-    },
     "models": {
       "title": "Available Models",
       "empty": "No models returned for current API Key."
