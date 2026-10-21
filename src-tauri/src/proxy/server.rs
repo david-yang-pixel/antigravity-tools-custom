@@ -423,6 +423,10 @@ pub struct AxumServer {
 }
 
 impl AxumServer {
+    pub(crate) fn upstream_client(&self) -> Arc<crate::proxy::upstream::client::UpstreamClient> {
+        self.upstream.clone()
+    }
+
     pub async fn update_only_raw_quota_models(&self, only_raw: bool) {
         let mut r = self.only_raw_quota_models.write().await;
         *r = only_raw;
@@ -517,6 +521,20 @@ impl AxumServer {
         image_scheduler_config: crate::proxy::config::ImageSchedulerConfig,
     ) -> Result<(Self, tokio::task::JoinHandle<()>), String> {
         let custom_mapping_state = Arc::new(tokio::sync::RwLock::new(custom_mapping));
+        // Single cutover: import the actual old catalog before any background discovery.
+        // Corruption never enables legacy dispatch; keep admin APIs available for recovery.
+        let legacy_models = crate::proxy::common::model_mapping::get_legacy_dynamic_models(
+            &custom_mapping_state,
+            Some(&token_manager),
+            only_raw_quota_models,
+        )
+        .await;
+        if let Err(error) = crate::modules::model_registry::view(
+            &legacy_models,
+            &*custom_mapping_state.read().await,
+        ) {
+            tracing::error!(error = %error, "Model registry initialization failed; public model admission remains closed");
+        }
         let proxy_state = Arc::new(tokio::sync::RwLock::new(upstream_proxy.clone()));
         let proxy_pool_state = Arc::new(tokio::sync::RwLock::new(proxy_pool_config));
         let proxy_pool_manager =
@@ -681,7 +699,6 @@ impl AxumServer {
                 "/v1/models/detect",
                 post(handlers::common::handle_detect_model),
             )
-            .route("/internal/warmup", post(handlers::warmup::handle_warmup)) // 内部预热端点
             .route("/v1/api/event_logging/batch", post(silent_ok_handler))
             .route("/v1/api/event_logging", post(silent_ok_handler))
             .route(
@@ -695,8 +712,8 @@ impl AxumServer {
             )
             // 应用 AI 服务特定的层
             // 注意：Axum layer 执行顺序是从下往上（洋葱模型）
-            // 请求: ip_filter -> auth -> user_token_limits -> monitor -> upstream routing -> handler
-            // 响应: handler -> monitor -> user_token_limits -> auth -> ip_filter
+            // 请求: ip_filter -> auth -> model_registry -> user_token_limits -> monitor -> routing -> handler
+            // 响应按相反顺序；未上架请求在任何计费许可之前终止。
             // monitor 需要在 auth 之后执行才能获取 UserTokenIdentity
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -708,6 +725,9 @@ impl AxumServer {
             ))
             .layer(axum::middleware::from_fn(
                 crate::proxy::middleware::user_token_limits::user_token_limits_middleware,
+            ))
+            .layer(axum::middleware::from_fn(
+                crate::proxy::middleware::model_registry::model_registry_middleware,
             ))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -981,6 +1001,18 @@ impl AxumServer {
                 get(admin_get_portal_settings).post(admin_save_portal_settings),
             )
             .route(
+                "/model-registry",
+                get(admin_get_model_registry).post(admin_save_model_registry),
+            )
+            .route(
+                "/model-registry/refresh",
+                post(admin_refresh_model_candidates),
+            )
+            .route(
+                "/model-registry/verify",
+                post(admin_verify_model_candidates),
+            )
+            .route(
                 "/workbuddy-settings",
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
             )
@@ -1019,6 +1051,20 @@ impl AxumServer {
                 admin_auth_middleware,
             ));
 
+        // Native probes/warmup are administrative operations, not public inference.
+        // This marker is injected only after strict auth; wire headers grant no bypass.
+        let internal_routes = Router::new()
+            .route("/internal/warmup", post(handlers::warmup::handle_warmup))
+            .layer(axum::Extension(handlers::warmup::InternalWarmup))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                ip_filter_middleware,
+            ));
+
         // 3. 整合并应用全局层
         // 从环境变量读取 body 大小限制，默认 50MB
         let max_body_size: usize = std::env::var("ABV_MAX_BODY_SIZE")
@@ -1032,6 +1078,7 @@ impl AxumServer {
             .merge(handlers::token_portal::routes())
             .merge(handlers::payment::routes())
             .merge(proxy_routes)
+            .merge(internal_routes)
             // 公开路由 (无需鉴权)
             .route("/auth/callback", get(handle_oauth_callback))
             // 应用全局监控与状态层 (外层)
@@ -2596,6 +2643,72 @@ async fn admin_get_portal_settings() -> Result<impl IntoResponse, (StatusCode, J
             )
         })?;
     Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryMutation<T> {
+    request: T,
+}
+
+fn registry_admin_error(error: String) -> (StatusCode, Json<ErrorResponse>) {
+    let status = if error.contains("conflict") {
+        StatusCode::CONFLICT
+    } else if error.contains("already running") {
+        StatusCode::TOO_MANY_REQUESTS
+    } else if error.contains("model_registry.json")
+        || error.contains("Cannot read")
+        || error.contains("unavailable")
+    {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, Json(ErrorResponse { error }))
+}
+
+async fn admin_get_model_registry(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::model_registry_service::view(&state.token_manager)
+        .await
+        .map(Json)
+        .map_err(registry_admin_error)
+}
+async fn admin_save_model_registry(
+    State(state): State<AppState>,
+    Json(payload): Json<RegistryMutation<crate::modules::model_registry::SaveModelRegistryRequest>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::model_registry_service::save(&state.token_manager, payload.request)
+        .await
+        .map(Json)
+        .map_err(registry_admin_error)
+}
+async fn admin_refresh_model_candidates(
+    State(state): State<AppState>,
+    Json(payload): Json<
+        RegistryMutation<crate::modules::model_registry::RefreshModelCandidatesRequest>,
+    >,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::model_registry_service::refresh(&state.token_manager, payload.request)
+        .await
+        .map(Json)
+        .map_err(registry_admin_error)
+}
+async fn admin_verify_model_candidates(
+    State(state): State<AppState>,
+    Json(payload): Json<
+        RegistryMutation<crate::modules::model_registry::VerifyModelCandidatesRequest>,
+    >,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::model_registry_service::verify(
+        &state.token_manager,
+        &state.upstream,
+        payload.request,
+    )
+    .await
+    .map(Json)
+    .map_err(registry_admin_error)
 }
 
 async fn admin_get_workbuddy_settings(
@@ -4386,5 +4499,31 @@ mod image_scheduler_tests {
         let listener_v6 = super::bind_tcp_listener("::", port)
             .expect("wildcard v6 dual-stack bind should succeed");
         drop(listener_v6);
+    }
+}
+
+#[cfg(test)]
+mod model_registry_admin_tests {
+    use super::*;
+
+    #[test]
+    fn model_registry_admin_wire_envelope_and_conflict_status() {
+        type Request = RegistryMutation<crate::modules::model_registry::SaveModelRegistryRequest>;
+        assert!(serde_json::from_value::<Request>(serde_json::json!({
+            "request": {"revision": 1, "published_models": [], "ignored_candidate_ids": []}
+        }))
+        .is_ok());
+        assert!(serde_json::from_value::<Request>(serde_json::json!({
+            "revision": 1, "published_models": [], "ignored_candidate_ids": []
+        }))
+        .is_err());
+        assert_eq!(
+            registry_admin_error("Model registry revision conflict: reload".into()).0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            registry_admin_error("Corrupt model_registry.json; access denied".into()).0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

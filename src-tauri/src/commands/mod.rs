@@ -12,6 +12,8 @@ pub mod autostart;
 pub mod security;
 // 导出 proxy_pool 命令
 pub mod proxy_pool;
+// 导出 model_registry 命令
+pub mod model_registry;
 // 导出 user_token 命令
 pub mod user_token;
 pub mod workbuddy;

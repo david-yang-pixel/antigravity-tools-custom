@@ -501,8 +501,31 @@ pub fn get_supported_models() -> Vec<String> {
     .collect()
 }
 
-/// 动态获取所有可用模型列表 (包含内置与用户自定义与官方端点动态下发)
+/// Public catalogs are authoritative registry snapshots, never fresh discoveries.
 pub async fn get_all_dynamic_models(
+    custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    token_manager: Option<&crate::proxy::token_manager::TokenManager>,
+    only_raw_quota_models: bool,
+) -> Vec<String> {
+    let legacy =
+        get_legacy_dynamic_models(custom_mapping, token_manager, only_raw_quota_models).await;
+    let mapping = custom_mapping.read().await;
+    match crate::modules::model_registry::view(&legacy, &mapping) {
+        Ok(view) => view
+            .published_models
+            .into_iter()
+            .filter(|model| model.enabled)
+            .map(|model| model.public_id)
+            .collect(),
+        Err(error) => {
+            tracing::error!(error = %error, "Model registry unavailable; public catalog denied");
+            Vec::new()
+        }
+    }
+}
+
+/// Legacy discovery is retained only as input to the one-time registry migration.
+pub async fn get_legacy_dynamic_models(
     custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
     token_manager: Option<&crate::proxy::token_manager::TokenManager>,
     only_raw_quota_models: bool,
@@ -574,7 +597,7 @@ pub async fn get_all_dynamic_models(
 }
 
 /// 动态查找指定的模型。
-/// 支持处理 "models/" 前缀，优先精确匹配，兜底大小写不敏感匹配。
+/// Only a leading `models/` is removed; publication IDs are exact and case-sensitive.
 pub async fn find_dynamic_model(
     custom_mapping: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
     token_manager: Option<&crate::proxy::token_manager::TokenManager>,
@@ -583,24 +606,12 @@ pub async fn find_dynamic_model(
 ) -> Option<String> {
     let clean_model = requested_model
         .strip_prefix("models/")
-        .unwrap_or(requested_model)
-        .trim();
+        .unwrap_or(requested_model);
 
     let all_models =
         get_all_dynamic_models(custom_mapping, token_manager, only_raw_quota_models).await;
 
-    // 1. 精确匹配
-    if let Some(m) = all_models.iter().find(|&m| m == clean_model) {
-        return Some(m.clone());
-    }
-    // 2. 忽略大小写匹配
-    if let Some(m) = all_models
-        .iter()
-        .find(|&m| m.eq_ignore_ascii_case(clean_model))
-    {
-        return Some(m.clone());
-    }
-    None
+    all_models.into_iter().find(|model| model == clean_model)
 }
 
 /// Wildcard matching - supports multiple wildcards
@@ -663,6 +674,15 @@ pub fn resolve_model_route(
     custom_mapping: &std::collections::HashMap<String, String>,
 ) -> String {
     resolve_model_route_with_effort(original_model, custom_mapping, None)
+}
+
+/// Resolve the old routing rules without consulting publication state.
+/// Used only while migrating existing identities and by native verification.
+pub fn resolve_legacy_model_route(
+    original_model: &str,
+    custom_mapping: &std::collections::HashMap<String, String>,
+) -> String {
+    resolve_legacy_model_route_with_effort(original_model, custom_mapping, None)
 }
 
 /// 核心模型路由解析引擎（支持客户端思考档位感知）
@@ -767,6 +787,49 @@ pub fn resolve_custom_model_route(
 /// # 返回
 /// 映射后的目标模型名称
 pub fn resolve_model_route_with_effort(
+    original_model: &str,
+    custom_mapping: &std::collections::HashMap<String, String>,
+    client_effort: Option<&str>,
+) -> String {
+    if let Ok(Some(published)) = crate::modules::model_registry::resolve_existing(original_model) {
+        if published.enabled
+            && published.source_id == crate::modules::model_registry::ANTIGRAVITY_SOURCE
+        {
+            return published_antigravity_target(&published, custom_mapping, client_effort);
+        }
+    }
+    // Internal native calls still use the legacy transformer. Public calls are
+    // independently admitted before billing and cannot use this as a fallback.
+    resolve_legacy_model_route_with_effort(original_model, custom_mapping, client_effort)
+}
+
+/// Resolve the already-admitted binding, before adapter variant normalization.
+/// Only unchanged legacy bindings retain their original bare-model effort rules.
+pub fn published_antigravity_target(
+    published: &crate::modules::model_registry::PublishedModel,
+    custom_mapping: &HashMap<String, String>,
+    client_effort: Option<&str>,
+) -> String {
+    if published.legacy
+        && resolve_legacy_model_route(&published.public_id, custom_mapping)
+            == published.native_model
+    {
+        return resolve_legacy_model_route_with_effort(
+            &published.public_id,
+            custom_mapping,
+            client_effort,
+        );
+    }
+    published.native_model.clone()
+}
+
+/// Adapter-internal physical/variant normalization. Never consult publication
+/// names or user aliases again after crossing the explicit source/native boundary.
+pub fn resolve_native_model_route_with_effort(model: &str, effort: Option<&str>) -> String {
+    resolve_legacy_model_route_with_effort(model, &HashMap::new(), effort)
+}
+
+fn resolve_legacy_model_route_with_effort(
     original_model: &str,
     custom_mapping: &std::collections::HashMap<String, String>,
     client_effort: Option<&str>,
@@ -943,7 +1006,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_all_dynamic_models_only_raw_quota_models() {
+    async fn test_get_legacy_dynamic_models_only_raw_quota_models() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
         let custom_mapping = tokio::sync::RwLock::new(
             [(
                 "my-custom-model".to_string(),
@@ -954,16 +1018,17 @@ mod tests {
         );
 
         // When only_raw_quota_models is TRUE, custom_mapping should be filtered out
-        let models_raw = get_all_dynamic_models(&custom_mapping, None, true).await;
+        let models_raw = get_legacy_dynamic_models(&custom_mapping, None, true).await;
         assert!(!models_raw.contains(&"my-custom-model".to_string()));
 
         // When only_raw_quota_models is FALSE, custom_mapping should be included
-        let models_all = get_all_dynamic_models(&custom_mapping, None, false).await;
+        let models_all = get_legacy_dynamic_models(&custom_mapping, None, false).await;
         assert!(models_all.contains(&"my-custom-model".to_string()));
     }
 
     #[tokio::test]
     async fn test_find_dynamic_model() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
         let custom_mapping = tokio::sync::RwLock::new(
             [(
                 "custom-gpt4".to_string(),
@@ -986,10 +1051,10 @@ mod tests {
         let found_custom = find_dynamic_model(&custom_mapping, None, false, "custom-gpt4").await;
         assert_eq!(found_custom, Some("custom-gpt4".to_string()));
 
-        // 4. 大小写宽容匹配
+        // 4. Publication IDs are case-sensitive.
         let found_case =
             find_dynamic_model(&custom_mapping, None, false, "GEMINI-3.1-FLASH-LITE").await;
-        assert_eq!(found_case, Some("gemini-3.1-flash-lite".to_string()));
+        assert_eq!(found_case, None);
 
         // 5. 不存在的模型
         let not_found =
@@ -1424,5 +1489,41 @@ mod tests {
             normalize_to_standard_id("claude"),
             Some("claude".to_string())
         );
+    }
+
+    #[test]
+    fn published_bindings_preserve_flash_effort_and_ignore_changed_aliases() {
+        for id in [
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-tiered",
+            "gemini-3.8-flash-medium",
+        ] {
+            let mut published = crate::modules::model_registry::PublishedModel {
+                id: id.into(),
+                public_id: id.into(),
+                display_name: id.into(),
+                source_id: crate::modules::model_registry::ANTIGRAVITY_SOURCE.into(),
+                native_model: resolve_legacy_model_route(id, &HashMap::new()),
+                enabled: true,
+                legacy: true,
+            };
+            for effort in [None, Some("low"), Some("medium"), Some("high")] {
+                assert_eq!(
+                    published_antigravity_target(&published, &HashMap::new(), effort),
+                    resolve_legacy_model_route_with_effort(id, &HashMap::new(), effort)
+                );
+            }
+            let changed = HashMap::from([(id.into(), "different-native".into())]);
+            assert_eq!(
+                published_antigravity_target(&published, &changed, Some("low")),
+                published.native_model
+            );
+            published.legacy = false;
+            published.native_model = "CaseSensitiveNative".into();
+            assert_eq!(
+                published_antigravity_target(&published, &changed, Some("high")),
+                "CaseSensitiveNative"
+            );
+        }
     }
 }

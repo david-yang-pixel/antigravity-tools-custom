@@ -28,13 +28,24 @@ class PortalVerificationTests(unittest.TestCase):
             'logs': {'total': 0}, 'daily': [], 'weekly': [], 'available_models': [],
             'model_prices': [], 'max_concurrency': 2, 'balance_micros': 0, 'free_models': [],
         }
+        self.registry = {'published_models': [{'public_id': 'catalog', 'enabled': True}]}
+        self.prices = []
+        self.free = None
 
-    def verify(self, enabled=True):
+    def verify(self, enabled=True, first_registry=False):
         with sqlite3.connect(self.root / 'data/user_tokens.db') as db:
             db.execute('DROP TABLE IF EXISTS user_tokens')
+            db.execute('DROP TABLE IF EXISTS model_prices')
             columns = ', '.join(sorted(self.columns))
             db.execute(f'CREATE TABLE user_tokens (token TEXT, enabled INTEGER, {columns})')
-            db.execute('INSERT INTO user_tokens (token, enabled) VALUES (?, ?)', ('test-user', enabled))
+            values = {'token': 'test-user', 'enabled': enabled}
+            if 'free_models' in self.columns:
+                values['free_models'] = self.free
+            db.execute(f'INSERT INTO user_tokens ({", ".join(values)}) VALUES ({", ".join("?" * len(values))})',
+                       tuple(values.values()))
+            if self.prices:
+                db.execute('CREATE TABLE model_prices (pattern TEXT PRIMARY KEY)')
+                db.executemany('INSERT INTO model_prices VALUES (?)', [(p,) for p in self.prices])
 
         def request(base, path, expected=200, key=None):
             if expected == 401:
@@ -47,6 +58,9 @@ class PortalVerificationTests(unittest.TestCase):
             if path == '/api/user-tokens':
                 self.assertEqual(key, 'test-admin')
                 return []
+            if path == '/api/model-registry':
+                self.assertEqual(key, 'test-admin')
+                return self.registry
             self.assertEqual(path, '/api/token-portal/me')
             self.assertEqual(key, 'test-user')
             return self.overview
@@ -55,7 +69,7 @@ class PortalVerificationTests(unittest.TestCase):
                 patch.object(deploy, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='[{"Image": "id", "State": {"Health": {"Status": "healthy"}}}]')), \
                 patch.object(deploy, 'inspect_image', return_value={'Id': 'id'}), \
                 patch.object(deploy, 'request', side_effect=request) as requests:
-            deploy.verify(deploy.IMAGE + '@sha256:' + 'a' * 64, '4.10.0-beta.1')
+            deploy.verify(deploy.IMAGE + '@sha256:' + 'a' * 64, '4.10.0-beta.1', first_registry)
             return requests.call_args_list
 
     def test_current_schema_and_portal_need_no_legacy_fields(self):
@@ -96,6 +110,40 @@ class PortalVerificationTests(unittest.TestCase):
         self.overview['balance_micros'] = -1
         self.verify()
 
+    def test_model_registry_must_load_with_enabled_publications(self):
+        for registry in [None, {}, {'published_models': []},
+                         {'published_models': [{'public_id': 'catalog', 'enabled': False}]}]:
+            with self.subTest(registry=registry):
+                self.registry = registry
+                with self.assertRaisesRegex(RuntimeError, 'Model registry'):
+                    self.verify()
+
+    def test_images_without_a_registry_skip_the_registry_check(self):
+        self.prices = ['priced']
+        self.registry = b'<html>spa</html>'
+        self.verify(first_registry=True)
+
+        def missing(*args, **kwargs):
+            raise deploy.HTTPStatusError('/api/model-registry', 200, 404)
+
+        with patch.object(deploy, 'request', side_effect=missing):
+            self.assertIs(deploy.fetch_model_registry('test-admin'), deploy.NO_REGISTRY)
+        for code in (401, 500, 503):
+            with self.subTest(code=code), patch.object(
+                    deploy, 'request', side_effect=deploy.HTTPStatusError('/api/model-registry', 200, code)), \
+                    self.assertRaises(deploy.HTTPStatusError):
+                deploy.fetch_model_registry('test-admin')
+
+    def test_first_cutover_must_keep_exact_priced_and_free_models(self):
+        self.prices = ['catalog', 'models/priced', 'wild-*', 'bad id']
+        self.free = json.dumps(['free'])
+        self.verify()  # Later deployments respect deliberate unpublication.
+        with self.assertRaisesRegex(RuntimeError, r'dropped 2 billable model\(s\): free, priced'):
+            self.verify(first_registry=True)
+        self.registry['published_models'] += [{'public_id': 'priced', 'enabled': True},
+                                              {'public_id': 'free', 'enabled': True}]
+        self.verify(first_registry=True)
+
     def test_no_enabled_user_does_not_skip_schema_or_require_a_test_user(self):
         calls = self.verify(enabled=False)
         self.assertFalse(any(c.args[1] == '/api/token-portal/me' and c.kwargs.get('key') for c in calls))
@@ -133,6 +181,35 @@ class DeploymentTests(unittest.TestCase):
                 self.assertFalse((root / 'last-deployment.json').exists())
                 self.assertEqual(compose.call_count, 3)  # stop, new image, previous image
                 self.assertTrue(any(call.args[0][0] == 'tar' for call in run.call_args_list))
+
+    def test_failed_cutover_sets_aside_only_the_registry_it_created(self):
+        for existed in (False, True):
+            with self.subTest(existed=existed), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / 'app'
+                root.mkdir()
+                (root / 'compose.yaml').write_text(
+                    'services:\n  antigravity-manager:\n    image: old@sha256:abc\n    volumes:\n      - ./data:/root/.antigravity_tools\n')
+                (root / '.env').write_text('API_KEY=test')
+                (root / 'machine-id').write_text('retained identity')
+                (root / 'data').mkdir()
+                registry = root / deploy.REGISTRY
+                if existed:
+                    registry.write_text('{"kept": true}')
+
+                def failed_verify(*args):
+                    registry.write_text('{"created": true}')
+                    raise RuntimeError('dropped billable models')
+
+                with patch.object(deploy, 'ROOT', root), patch.object(deploy, 'BACKUPS', Path(tmp) / 'backups'), \
+                        patch.object(deploy, 'run'), patch.object(deploy, 'compose'), \
+                        patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \
+                        patch.object(deploy, 'inspect_image', return_value={'Config': {'Labels': LABELS}}), \
+                        patch.object(deploy, 'verify', side_effect=failed_verify):
+                    with self.assertRaisesRegex(RuntimeError, 'dropped'):
+                        deploy.deploy(deploy.IMAGE + '@sha256:' + 'a' * 64, 'b' * 40, 'temporary-token')
+                backups = list((Path(tmp) / 'backups').glob('*/model_registry.json'))
+                self.assertEqual(registry.exists(), existed)
+                self.assertEqual(len(backups), 0 if existed else 1)
 
     def test_image_version_label_is_required_and_checked_against_health(self):
         self.assertEqual(deploy.image_version(LABELS), '4.10.0-beta.1')

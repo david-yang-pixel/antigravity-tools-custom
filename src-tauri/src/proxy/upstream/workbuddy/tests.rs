@@ -110,15 +110,30 @@ fn request(path: &str, model: &str, stream: bool) -> Request {
         .unwrap()
 }
 async fn middleware(State(settings): State<Settings>, request: Request, next: Next) -> Response {
-    dispatch(
-        settings,
-        Default::default(),
-        5,
-        Policy::default(),
-        request,
-        next,
-    )
-    .await
+    let (request, model) = crate::proxy::middleware::user_token_models::requested_model(request)
+        .await
+        .unwrap();
+    let public_id = model.unwrap();
+    // Fixture for a binding already admitted by the global registry layer.
+    let published = request
+        .extensions()
+        .get::<crate::modules::model_registry::PublishedModel>()
+        .cloned()
+        .unwrap_or_else(|| crate::modules::model_registry::PublishedModel {
+            id: "fixture".into(),
+            public_id: public_id.clone(),
+            display_name: public_id.clone(),
+            source_id: if public_id == "wb-sonnet" {
+                crate::modules::model_registry::WORKBUDDY_SOURCE
+            } else {
+                crate::modules::model_registry::ANTIGRAVITY_SOURCE
+            }
+            .into(),
+            native_model: "claude-sonnet-4-6".into(),
+            enabled: true,
+            legacy: false,
+        });
+    dispatch(settings, published, 5, Policy::default(), request, next).await
 }
 fn app(settings: Settings) -> Router {
     Router::new()
@@ -815,8 +830,8 @@ async fn assert_zero_balance_admin_policy(client: &reqwest::Client, base: &str) 
         (model, StatusCode::PAYMENT_REQUIRED, "insufficient_balance"),
         (
             "unpriced-workbuddy-model",
-            StatusCode::FORBIDDEN,
-            "model_not_priced",
+            StatusCode::NOT_FOUND,
+            "model_not_published",
         ),
     ] {
         let denied = client
@@ -1061,4 +1076,43 @@ async fn workbuddy_all_accounts_failing_returns_last_status_within_attempt_cap()
     };
     assert_eq!(send(false, policy).await.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(hits(&script).len(), 1);
+}
+
+#[tokio::test]
+async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alias() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let _mock = mock().await;
+    seed();
+    let mut binding = crate::modules::model_registry::PublishedModel {
+        id: "explicit".into(),
+        public_id: "wb-sonnet".into(),
+        display_name: "Explicit".into(),
+        source_id: crate::modules::model_registry::ANTIGRAVITY_SOURCE.into(),
+        native_model: "claude-sonnet-4-6".into(),
+        enabled: true,
+        legacy: false,
+    };
+    let mut ag = request("/v1/chat/completions", "wb-sonnet", false);
+    ag.extensions_mut().insert(binding.clone());
+    let response = app(settings()).oneshot(ag).await.unwrap();
+    assert_eq!(
+        to_bytes(response.into_body(), 100).await.unwrap(),
+        "google path"
+    );
+
+    binding.source_id = crate::modules::model_registry::WORKBUDDY_SOURCE.into();
+    for models in [
+        BTreeMap::new(),
+        BTreeMap::from([("wb-sonnet".into(), "wrong-native".into())]),
+    ] {
+        let mut config = settings();
+        config.models = models;
+        let mut wb = request("/v1/chat/completions", "wb-sonnet", false);
+        wb.extensions_mut().insert(binding.clone());
+        let response = app(config).oneshot(wb).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-mapped-model"], "claude-sonnet-4-6");
+        let data = to_bytes(response.into_body(), 100_000).await.unwrap();
+        assert!(String::from_utf8_lossy(&data).contains("wb-sonnet"));
+    }
 }

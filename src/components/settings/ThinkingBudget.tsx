@@ -296,6 +296,10 @@ export default function ThinkingBudget({
                 await onSave();
                 setIsSaved(true);
                 setTimeout(() => setIsSaved(false), 2000);
+            } catch {
+                // The parent presents the error and retains its draft. Do not show
+                // success or leave the async click handler with a rejected promise.
+                setIsSaved(false);
             } finally {
                 setIsSaving(false);
             }

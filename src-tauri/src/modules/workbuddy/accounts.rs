@@ -618,6 +618,36 @@ pub(super) fn save_verified_models(
         .collect();
     write(&accounts)
 }
+
+/// Update one explicit probe without refreshing or replacing other evidence.
+pub(crate) fn record_model_verification(
+    account: &Account,
+    model: &str,
+    available: bool,
+) -> Result<(), String> {
+    let _lock = STORE_LOCK
+        .lock()
+        .map_err(|_| "WorkBuddy account store unavailable")?;
+    let mut accounts = read()?;
+    let current = accounts
+        .iter_mut()
+        .find(|a| a.id == account.id && a.revision == account.revision && a.enabled)
+        .ok_or("WorkBuddy account changed during verification")?;
+    if !current.models.iter().any(|candidate| candidate.id == model) {
+        return Err("WorkBuddy model changed during verification".into());
+    }
+    current.models_verified_at = now();
+    if available {
+        current
+            .verified_models
+            .insert(model.to_string(), current.models_verified_at);
+        current.unavailable_models.remove(model);
+    } else {
+        current.verified_models.remove(model);
+        current.unavailable_models.insert(model.to_string());
+    }
+    write(&accounts)
+}
 pub fn parse_import(value: Value) -> Result<Account, String> {
     let identity = value.get("account").unwrap_or(&value);
     let auth = value.get("auth").unwrap_or(&value);

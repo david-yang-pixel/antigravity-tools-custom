@@ -137,6 +137,8 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
     .await;
     let a = accounts::upsert(account("a")).unwrap().id;
     let b = accounts::upsert(account("b")).unwrap().id;
+    // Initialize before new metadata/settings arrive: verification can never publish.
+    crate::modules::model_registry::view(&[], &std::collections::HashMap::new()).unwrap();
     // Existing installations may already advertise a now-rejected native ID.
     super::super::save(
         serde_json::from_value(json!({
@@ -145,90 +147,50 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
         .unwrap(),
     )
     .unwrap();
-    let first = start().unwrap();
-    assert!(first.running);
-    assert_eq!(start().unwrap().started_at, first.started_at);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while status().unwrap().running {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let result = status().unwrap();
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(
-        (
-            result.total,
-            result.completed,
-            result.available,
-            result.unavailable
-        ),
-        (4, 4, 1, 3)
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
-    assert_eq!(
-        accounts::get(&a).unwrap().available_models()[0].id,
-        "shared"
-    );
-    assert!(accounts::get(&b).unwrap().available_models().is_empty());
-    for _ in 0..4 {
-        let lease = accounts::acquire("shared").unwrap();
-        assert_eq!(lease.account.id, a);
-    }
-    assert!(accounts::acquire("denied").is_err());
-    let observed = accounts::list().unwrap();
-    assert!(observed
-        .iter()
-        .all(|a| a.health.successes == 0 && a.health.failures == 0 && a.in_flight == 0));
-    let mapping = HashMap::from([
-        ("blocked-alias".into(), "denied".into()),
-        ("blocked-*".into(), "denied".into()),
-        ("allowed-alias".into(), "shared".into()),
-        ("other-provider".into(), "unrelated".into()),
-    ]);
-    let mut catalog = vec![
-        "denied".into(),
-        "blocked-alias".into(),
-        "blocked-wildcard".into(),
-    ];
-    super::super::extend_catalog(&mut catalog, &mapping);
-    assert_eq!(catalog, ["shared"]);
-    let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
-        &tokio::sync::RwLock::new(mapping.clone()),
-        None,
-        false,
-    )
-    .await;
-    assert!(catalog.contains(&"allowed-alias".into()));
-    assert!(catalog.contains(&"other-provider".into()));
-    assert!(!catalog
-        .iter()
-        .any(|id| id == "denied" || id.starts_with("blocked-")));
-    // A fresh catalog is not a new entitlement, and maintenance never generates tokens.
+    assert!(start().unwrap_err().contains("Select 1–5"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     accounts::sync(&a, false).await.unwrap();
     accounts::sync(&b, false).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
-    assert!(!accounts::get(&a).unwrap().supports_model("denied"));
-    assert!(accounts::get(&b).unwrap().available_models().is_empty());
-    let settings =
-        super::super::save(serde_json::from_value(json!({"preferred_account_id":b})).unwrap())
+    let select = |id: &str| {
+        super::super::save(serde_json::from_value(json!({"preferred_account_id": id})).unwrap())
             .unwrap();
-    assert!(settings.available_models.is_empty());
-    let mut catalog = vec!["shared".into(), "other-provider".into()];
-    super::super::extend_catalog(&mut catalog, &mapping);
-    assert_eq!(catalog, ["other-provider"]);
-    assert!(start().unwrap().running);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while status().unwrap().running {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(status().unwrap().total, 2);
-    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    };
+    select(&a);
+    assert_eq!(
+        verify_selected_model("shared").await.unwrap(),
+        (a.clone(), Outcome::Available)
+    );
+    assert_eq!(
+        verify_selected_model("denied").await.unwrap(),
+        (a.clone(), Outcome::Unavailable)
+    );
+    // A single-target denial never erases another target's successful evidence.
+    assert!(accounts::get(&a)
+        .unwrap()
+        .verified_models
+        .contains_key("shared"));
+    select(&b);
+    assert_eq!(
+        verify_selected_model("shared").await.unwrap(),
+        (b.clone(), Outcome::Unavailable)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(accounts::get(&a).unwrap().supports_model("shared"));
+    assert!(!accounts::get(&b).unwrap().supports_model("shared"));
+    for _ in 0..2 {
+        accounts::sync(&a, false).await.unwrap();
+        accounts::sync(&b, false).await.unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(!accounts::get(&a).unwrap().supports_model("denied"));
+    assert!(!accounts::get(&b).unwrap().supports_model("shared"));
+    let registry =
+        crate::modules::model_registry::view(&[], &std::collections::HashMap::new()).unwrap();
+    assert!(registry.published_models.is_empty());
+    assert!(accounts::list()
+        .unwrap()
+        .iter()
+        .all(|a| a.health.successes == 0 && a.health.failures == 0 && a.in_flight == 0));
 }
 
 #[test]
@@ -283,4 +245,51 @@ fn workbuddy_verification_preserves_legacy_calls_reauthorization_and_rejects_sta
     assert!(accounts::save_verified_models(&current, &current.models, &[]).is_err());
     accounts::remove(&view.id).unwrap();
     assert!(accounts::save_verified_models(&current, &current.models, &[]).is_err());
+}
+
+#[test]
+fn model_registry_withdrawn_wb_catalog_does_not_reactivate_historical_probe() {
+    use crate::modules::model_registry as registry;
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let mut seeded = account("catalog-withdrawal");
+    seeded.models.push(accounts::Model {
+        id: "native".into(),
+        name: "Native".into(),
+    });
+    let id = accounts::upsert(seeded).unwrap().id;
+    let candidate_id = registry::candidate_id(registry::WORKBUDDY_SOURCE, "native");
+    registry::view(&[], &Default::default()).unwrap();
+    let mut current = accounts::get(&id).unwrap();
+    accounts::record_model_verification(&current, "native", true).unwrap();
+    registry::record_verification(registry::ModelVerificationResult {
+        candidate_id: candidate_id.clone(),
+        status: "verified".into(),
+        message: String::new(),
+        checked_at: accounts::now(),
+        account_id: Some(id.clone()),
+    })
+    .unwrap();
+    let before = registry::view(&[], &Default::default()).unwrap();
+    assert_eq!(
+        before
+            .candidates
+            .iter()
+            .find(|c| c.id == candidate_id)
+            .unwrap()
+            .verified_account_count,
+        1
+    );
+    current.models.clear();
+    accounts::save_observation(&mut current).unwrap();
+    assert!(accounts::get(&id).unwrap().verified_models.is_empty());
+    let after = registry::view(&[], &Default::default()).unwrap();
+    let candidate = after
+        .candidates
+        .iter()
+        .find(|c| c.id == candidate_id)
+        .unwrap();
+    assert_eq!(candidate.verified_account_count, 0);
+    assert_eq!(candidate.account_count, 0);
+    assert_eq!(candidate.verification_status, "unverified");
+    assert!(after.published_models.is_empty());
 }

@@ -4,18 +4,9 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{LazyLock, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
-const MAX_CHECKS: usize = 500;
-static JOBS: LazyLock<Mutex<HashMap<PathBuf, Progress>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[derive(Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Progress {
     pub running: bool,
     pub total: usize,
@@ -28,135 +19,44 @@ pub struct Progress {
     pub finished_at: i64,
     pub errors: Vec<String>,
 }
-fn update(path: &PathBuf, edit: impl FnOnce(&mut Progress)) {
-    if let Ok(mut jobs) = JOBS.lock() {
-        if let Some(job) = jobs.get_mut(path) {
-            edit(job);
-        }
-    }
-}
+/// Retained for older clients; broad implicit inference scans are no longer allowed.
 pub fn status() -> Result<Progress, String> {
-    let path = crate::modules::account::get_data_dir()?;
-    Ok(JOBS
-        .lock()
-        .map_err(|_| "WorkBuddy verification unavailable")?
-        .get(&path)
-        .cloned()
-        .unwrap_or_default())
+    Ok(Progress::default())
 }
 pub fn start() -> Result<Progress, String> {
-    let path = crate::modules::account::get_data_dir()?;
+    Err("Bulk verification was retired. Select 1–5 candidates in model management and explicitly confirm upstream usage.".into())
+}
+
+/// A single explicit basic-text probe. The caller enforces consent and action limits.
+/// Shares the runtime pool's capacity and never registers or publishes an alias.
+pub(crate) async fn verify_selected_model(model: &str) -> Result<(String, Outcome), String> {
     let settings = super::load()?;
-    let accounts: Vec<_> = accounts::all()?
+    if !settings.enabled || !super::valid_model_id(model) {
+        return Err("Enable the source and select a valid native model".into());
+    }
+    let account = accounts::all()?
         .into_iter()
-        .filter(|a| {
-            a.enabled
+        .find(|account| {
+            account.enabled
                 && settings
                     .preferred_account_id
                     .as_ref()
-                    .is_none_or(|id| id == &a.id)
+                    .is_none_or(|id| id == &account.id)
+                && account.models.iter().any(|candidate| candidate.id == model)
         })
-        .collect();
-    if accounts.is_empty() {
-        return Err("Enable a WorkBuddy account before fetching models".into());
+        .ok_or("No eligible account declares the selected model")?;
+    let lease = accounts::scheduling::acquire_probe(&account, model).await?;
+    let outcome = probe(&lease.account, model).await;
+    match outcome {
+        Outcome::Available => accounts::record_model_verification(&lease.account, model, true)?,
+        Outcome::Unavailable => accounts::record_model_verification(&lease.account, model, false)?,
+        Outcome::Failed => {} // Transient failures never revoke other successful evidence.
     }
-    let initial = Progress {
-        running: true,
-        started_at: accounts::now(),
-        ..Progress::default()
-    };
-    {
-        let mut jobs = JOBS
-            .lock()
-            .map_err(|_| "WorkBuddy verification unavailable")?;
-        if let Some(job) = jobs.get(&path).filter(|job| job.running) {
-            return Ok(job.clone());
-        }
-        jobs.insert(path.clone(), initial.clone());
-    }
-    tauri::async_runtime::spawn(async move {
-        let result = tokio::time::timeout(Duration::from_secs(1800), scan(&path, accounts)).await;
-        update(&path, |job| {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => job.errors.push(error),
-                Err(_) => job
-                    .errors
-                    .push("Model verification timed out; completed accounts were saved".into()),
-            }
-            job.running = false;
-            job.current_model = None;
-            job.finished_at = accounts::now();
-        });
-    });
-    Ok(initial)
-}
-
-async fn scan(path: &PathBuf, accounts: Vec<accounts::Account>) -> Result<(), String> {
-    let mut prepared = Vec::new();
-    let mut total = 0;
-    // Catalog and credits reads do not generate tokens. Finish discovery before probing.
-    for original in accounts {
-        if let Err(error) = accounts::sync(&original.id, false).await {
-            update(path, |job| job.errors.push(error));
-            continue;
-        }
-        let account = accounts::get(&original.id)?;
-        if !account.enabled {
-            continue;
-        }
-        if let Some(error) = &account.last_error {
-            update(path, |job| job.errors.push(error.clone()));
-            continue;
-        }
-        total += account.models.len();
-        if total > MAX_CHECKS {
-            return Err("Too many account/model pairs (maximum 500); select a fixed account and fetch again".into());
-        }
-        prepared.push(account);
-    }
-    update(path, |job| job.total = total);
-    for account in prepared {
-        let mut available = Vec::new();
-        let mut unavailable = Vec::new();
-        for model in &account.models {
-            let current = accounts::get(&account.id)?;
-            if !current.enabled || current.revision != account.revision {
-                return Err(
-                    "WorkBuddy account changed during verification; fetch models again".into(),
-                );
-            }
-            update(path, |job| job.current_model = Some(model.id.clone()));
-            let outcome = match accounts::scheduling::acquire_probe(&account, &model.id).await {
-                Ok(lease) => {
-                    // The lease reserves real pool capacity; model permission failures
-                    // must not trip an account-wide circuit breaker or skew call health.
-                    probe(&lease.account, &model.id).await
-                }
-                Err(_) => Outcome::Failed,
-            };
-            if matches!(outcome, Outcome::Available) {
-                available.push(model.clone());
-            } else if matches!(outcome, Outcome::Unavailable) {
-                unavailable.push(model.id.clone());
-            }
-            update(path, |job| {
-                job.completed += 1;
-                match outcome {
-                    Outcome::Available => job.available += 1,
-                    Outcome::Unavailable => job.unavailable += 1,
-                    Outcome::Failed => job.failed += 1,
-                }
-            });
-        }
-        accounts::save_verified_models(&account, &available, &unavailable)?;
-        super::register_models(&available)?;
-    }
-    Ok(())
+    Ok((lease.account.id.clone(), outcome))
 }
 
 #[derive(Debug, PartialEq)]
-enum Outcome {
+pub(crate) enum Outcome {
     Available,
     Unavailable,
     Failed,

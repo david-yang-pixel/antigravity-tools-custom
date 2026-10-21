@@ -1651,6 +1651,61 @@ mod variant_tests {
 
         assert_eq!(request_thinking.budget_tokens, Some(1_024));
     }
+
+    #[test]
+    fn websocket_inherited_and_switched_models_require_fresh_publication_admission() {
+        use crate::modules::model_registry;
+        use crate::proxy::middleware::model_registry::antigravity_model;
+        use serde_json::{json, Value};
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let legacy = vec!["ws-public".into()];
+        let mut view = model_registry::view(&legacy, &Default::default()).unwrap();
+        let mut session = super::WebsocketSessionState {
+            last_request: None,
+            last_response_output: json!([]),
+            last_response_id: String::new(),
+            last_response_pending_tool_call_ids: vec![],
+            tool_call_cache: Default::default(),
+        };
+        let first = super::normalize_responses_websocket_request(
+            json!({"type":"response.create", "model":"ws-public", "input":[]}),
+            &mut session,
+        )
+        .unwrap();
+        assert!(antigravity_model(first.get("model").and_then(Value::as_str).unwrap()).is_ok());
+        let inherited = super::normalize_responses_websocket_request(
+            json!({"type":"response.append", "input":[]}),
+            &mut session,
+        )
+        .unwrap();
+        assert_eq!(inherited["model"], "ws-public");
+        assert!(antigravity_model(inherited["model"].as_str().unwrap()).is_ok());
+
+        view.published_models[0].enabled = false;
+        model_registry::save(
+            model_registry::SaveModelRegistryRequest {
+                revision: view.revision,
+                published_models: view.published_models,
+                ignored_candidate_ids: vec![],
+                allow_unverified: false,
+            },
+            &legacy,
+            &Default::default(),
+        )
+        .unwrap();
+        let revoked = super::normalize_responses_websocket_request(
+            json!({"type":"response.append", "input":[]}),
+            &mut session,
+        )
+        .unwrap();
+        assert!(antigravity_model(revoked["model"].as_str().unwrap()).is_err());
+        let switched = super::normalize_responses_websocket_request(
+            json!({"type":"response.create", "model":"not-published", "input":[]}),
+            &mut session,
+        )
+        .unwrap();
+        assert!(antigravity_model(switched["model"].as_str().unwrap()).is_err());
+    }
 }
 
 fn codex_ledger_from_body(
@@ -1740,12 +1795,11 @@ pub async fn handle_chat_completions(
     Json(mut body): Json<Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let clean_start = std::time::Instant::now();
-    // [NEW] Check for Image Model Redirection
-    let model_name = body
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let published = crate::proxy::middleware::model_registry::antigravity_model(
+        body.get("model").and_then(Value::as_str).unwrap_or(""),
+    )?;
+    // Classify the bound target, not an arbitrary public alias.
+    let model_name = published.native_model.to_lowercase();
     // [FIX] Only redirect non-native image aliases (dall-e / midjourney) to the
     // images-generations shim. Native Gemini image models (gemini-3-pro-image*) must
     // flow through the normal pipeline (transform_openai_request -> resolve_request_config),
@@ -1767,7 +1821,7 @@ pub async fn handle_chat_completions(
             headers,
             user_identity.map(|identity| identity.token_id.clone()),
             body,
-            &model_name,
+            &published.public_id,
         )
         .await;
     }
@@ -1842,6 +1896,26 @@ pub async fn handle_chat_completions(
     });
     let mut openai_req: OpenAIRequest = serde_json::from_value(body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid request: {}", e)))?;
+    let initial_effort = openai_req
+        .reasoning_effort
+        .as_deref()
+        .or_else(|| {
+            openai_req
+                .reasoning
+                .as_ref()
+                .and_then(|r| r.effort.as_deref())
+        })
+        .or_else(|| {
+            openai_req
+                .thinking
+                .as_ref()
+                .and_then(|t| t.effort.as_deref())
+        });
+    openai_req.model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
+        &*state.custom_mapping.read().await,
+        initial_effort,
+    );
 
     // Safety: Ensure messages is not empty
     if openai_req.messages.is_empty() {
@@ -2087,9 +2161,8 @@ pub async fn handle_chat_completions(
     let mut retried_without_thinking = false;
 
     // 2. 模型路由解析 (移到循环外以支持在所有路径返回 X-Mapped-Model)
-    let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
+    let mapped_model = crate::proxy::common::model_mapping::resolve_native_model_route_with_effort(
         &openai_req.model,
-        &*state.custom_mapping.read().await,
         effort_hint.as_deref(),
     );
     let anchor = SessionManager::openai_content_anchor(&openai_req);
@@ -3116,7 +3189,24 @@ pub async fn handle_completions(
     let original_body = debug_logger::is_enabled(&debug_cfg).then(|| {
         crate::proxy::payload_audit::reorder_payload_fields(&debug_value_without_inline_data(&body))
     });
-    let is_responses_api = uri.path() == "/v1/responses";
+    // The outer registry middleware already injects an inherited public model
+    // before billing. Direct callers must cross the same fail-closed boundary.
+    if let Err(response) =
+        crate::proxy::middleware::user_token_models::effective_json_model(uri.path(), &mut body)
+            .await
+    {
+        return response;
+    }
+    let published = match crate::proxy::middleware::model_registry::antigravity_model(
+        body.get("model").and_then(Value::as_str).unwrap_or(""),
+    ) {
+        Ok(model) => model,
+        Err(error) => return error.into_response(),
+    };
+    let is_responses_api = matches!(
+        uri.path(),
+        "/v1/responses" | "/responses" | "/responses/compact"
+    );
     let is_codex_style = body.get("input").is_some() || body.get("instructions").is_some();
     let store_response = responses_store_enabled(&body);
 
@@ -3860,8 +3950,8 @@ pub async fn handle_completions(
                 .and_then(|t| t.effort.as_deref())
         });
 
-    let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
-        &openai_req.model,
+    let mapped_model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
         &*state.custom_mapping.read().await,
         effort_hint,
     );
@@ -4896,13 +4986,16 @@ pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoRespo
 
     let data: Vec<_> = model_ids
         .into_iter()
-        .map(|id| {
-            json!({
+        .filter_map(|id| {
+            let published = crate::modules::model_registry::resolve_existing(&id).ok().flatten()
+                .filter(|model| model.enabled)?;
+            Some(json!({
                 "id": id,
                 "object": "model",
                 "created": 1706745600,
-                "owned_by": "antigravity"
-            })
+                "owned_by": if published.source_id == crate::modules::model_registry::WORKBUDDY_SOURCE { "workbuddy" } else { "antigravity" },
+                "source_id": published.source_id
+            }))
         })
         .collect();
 
@@ -4929,13 +5022,19 @@ pub async fn handle_retrieve_model(
     )
     .await
     {
+        let published =
+            match crate::proxy::middleware::model_registry::resolve_public_model(&matched_id) {
+                Ok(model) => model,
+                Err(error) => return error.into_response(),
+            };
         (
             StatusCode::OK,
             Json(json!({
                 "id": matched_id,
                 "object": "model",
                 "created": 1706745600,
-                "owned_by": "antigravity"
+                "owned_by": if published.source_id == crate::modules::model_registry::WORKBUDDY_SOURCE { "workbuddy" } else { "antigravity" },
+                "source_id": published.source_id
             })),
         )
             .into_response()
@@ -5155,10 +5254,18 @@ pub async fn handle_images_generations_internal(
     )
     .affinity_key;
 
-    let model = body
+    let public_model = body
         .get("model")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("gemini-3.1-flash-image");
+    let published = crate::proxy::middleware::model_registry::antigravity_model(public_model)
+        .map_err(|(status, message)| (status, message, None))?;
+    let native_model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
+        &*state.custom_mapping.read().await,
+        None,
+    );
+    let model = native_model.as_str();
 
     let n = body.get("n").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
 
@@ -5706,6 +5813,13 @@ pub async fn handle_images_edits(
         }
     }
 
+    let published = crate::proxy::middleware::model_registry::antigravity_model(&model)?;
+    model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
+        &*state.custom_mapping.read().await,
+        None,
+    );
+
     // Validation: Require either 'image' (standard edit) OR 'prompt' (generation)
     // If reference images are present, we treat it as generation with image context
     if prompt.is_empty() {
@@ -6217,6 +6331,17 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
         }
 
         if should_handle_prewarm_locally(&payload, &session_state) {
+            if let Err((status, message)) =
+                crate::proxy::middleware::model_registry::antigravity_model(
+                    payload.get("model").and_then(Value::as_str).unwrap_or(""),
+                )
+            {
+                let event = json!({"type":"error","error":{
+                    "type":"invalid_request_error", "code":status.as_u16().to_string(), "message":message
+                }});
+                let _ = socket.send(Message::Text(event.to_string())).await;
+                continue;
+            }
             let (created, completed) = handle_prewarm_locally(&payload, &mut session_state);
             let _ = socket.send(Message::Text(created.to_string())).await;
             let _ = socket.send(Message::Text(completed.to_string())).await;
@@ -6253,35 +6378,16 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             }
         };
 
-        // WorkBuddy's HTTP adapter is outside this legacy WebSocket path. Never
-        // silently send one of its aliases to the Google account scheduler.
-        let workbuddy_error = if let Some(model) = normalized.get("model").and_then(Value::as_str) {
-            let mapping = state.custom_mapping.read().await;
-            match crate::modules::workbuddy::load() {
-                Ok(settings) if settings.target_model(model, &mapping).is_some() => Some((
-                    "invalid_request_error",
-                    "workbuddy_requires_http",
-                    "WorkBuddy models require HTTP/SSE Responses, not WebSocket.",
-                )),
-                Err(_)
-                    if crate::modules::workbuddy::known_model_on_configuration_error(
-                        model, &mapping,
-                    ) =>
-                {
-                    Some((
-                        "server_error",
-                        "workbuddy_configuration_invalid",
-                        "Repair the WorkBuddy upstream configuration in admin settings.",
-                    ))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if let Some((kind, code, message)) = workbuddy_error {
+        // Frames may inherit or switch a public model. Check after normalization
+        // on every turn, before direct handler dispatch; no settings alias lookup.
+        if let Err((status, message)) = crate::proxy::middleware::model_registry::antigravity_model(
+            normalized
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ) {
             let event = json!({"type":"error","error":{
-                "type":kind,"code":code,"message":message
+                "type":"invalid_request_error", "code":status.as_u16().to_string(), "message":message
             }});
             let _ = socket.send(Message::Text(event.to_string())).await;
             continue;

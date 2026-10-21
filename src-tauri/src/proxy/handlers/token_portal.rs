@@ -284,7 +284,7 @@ fn session_account(
 // --- Usage overview ---
 
 async fn overview(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<PortalQuery>,
 ) -> Response {
@@ -292,13 +292,10 @@ async fn overview(
         Ok(data) => data,
         Err(status) => return render(Err(status)),
     };
-    let only_raw = *state.only_raw_quota_models.read().await;
-    let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
-        &state.custom_mapping,
-        Some(&state.token_manager),
-        only_raw,
-    )
-    .await;
+    let catalog = match crate::modules::model_registry::published_ids() {
+        Ok(models) => models,
+        Err(_) => return render(Err(StatusCode::SERVICE_UNAVAILABLE)),
+    };
     // Use one pricing snapshot for visibility and displayed prices.
     let rules = match billing::load_prices() {
         Ok(rules) => rules,

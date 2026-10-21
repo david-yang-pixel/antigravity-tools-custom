@@ -375,10 +375,53 @@ impl UpstreamClient {
         &self,
         method: &str,
         access_token: &str,
-        mut body: Value,
+        body: Value,
         query_string: Option<&str>,
         extra_headers: std::collections::HashMap<String, String>,
         account_id: Option<&str>, // [NEW] Account ID
+    ) -> Result<UpstreamCallResult, String> {
+        self.call_v1_internal_with_policy(
+            method,
+            access_token,
+            body,
+            query_string,
+            extra_headers,
+            account_id,
+            true,
+        )
+        .await
+    }
+
+    /// Explicit admin probes must never multiply upstream usage through retries.
+    /// Reuses the normal sanitizer, envelope, headers and account proxy selection.
+    pub(crate) async fn call_v1_internal_once(
+        &self,
+        method: &str,
+        access_token: &str,
+        body: Value,
+        account_id: Option<&str>,
+    ) -> Result<UpstreamCallResult, String> {
+        self.call_v1_internal_with_policy(
+            method,
+            access_token,
+            body,
+            None,
+            Default::default(),
+            account_id,
+            false,
+        )
+        .await
+    }
+
+    async fn call_v1_internal_with_policy(
+        &self,
+        method: &str,
+        access_token: &str,
+        mut body: Value,
+        query_string: Option<&str>,
+        extra_headers: std::collections::HashMap<String, String>,
+        account_id: Option<&str>,
+        allow_retries: bool,
     ) -> Result<UpstreamCallResult, String> {
         // [DEFENSE] 全局终极防御拦截：净化所有发往上游报文中的损坏/空 inlineData 以及触发 Google WAF 拦截的违规计费元数据，并最终统一对齐官方信封与前缀拓扑
         if let Some(inner) = body.get_mut("request") {
@@ -498,20 +541,48 @@ impl UpstreamClient {
             let mut fallback_attempts: Vec<FallbackAttemptLog> = Vec::new();
             let mut should_retry_without_header = false;
 
-            // 遍历所有端点，失败时自动切换
-            for (idx, base_url) in V1_INTERNAL_BASE_URL_FALLBACKS.iter().enumerate() {
+            let endpoint_count = if allow_retries {
+                V1_INTERNAL_BASE_URL_FALLBACKS.len()
+            } else {
+                1
+            };
+            for (idx, base_url) in V1_INTERNAL_BASE_URL_FALLBACKS
+                .iter()
+                .take(endpoint_count)
+                .enumerate()
+            {
                 let url = Self::build_url(base_url, method, query_string);
-                let has_next = idx + 1 < V1_INTERNAL_BASE_URL_FALLBACKS.len();
+                #[cfg(test)]
+                let url = if !allow_retries {
+                    std::env::var("STELLAR_TEST_REGISTRY_AG_BASE")
+                        .ok()
+                        .filter(|base| base.starts_with("http://127.0.0.1:"))
+                        .map(|base| Self::build_url(&base, method, query_string))
+                        .unwrap_or(url)
+                } else {
+                    url
+                };
+                let has_next = idx + 1 < endpoint_count;
 
-                let response = send_with_penalty_compat(
-                    &client,
-                    &url,
-                    &headers,
-                    &mut body,
-                    method == "streamGenerateContent",
-                    &mut retried_penalty,
-                )
-                .await;
+                let response = if allow_retries {
+                    send_with_penalty_compat(
+                        &client,
+                        &url,
+                        &headers,
+                        &mut body,
+                        method == "streamGenerateContent",
+                        &mut retried_penalty,
+                    )
+                    .await
+                } else {
+                    client
+                        .post(&url)
+                        .headers(headers.clone())
+                        .json(&body)
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())
+                };
 
                 match response {
                     Ok(resp) => {
@@ -540,6 +611,7 @@ impl UpstreamClient {
                         // [NEW] 检测 403 错误 (Issue #3074)
                         // 只要带有项目 Header 且返回 403，我们就尝试降级重试一次
                         if status == StatusCode::FORBIDDEN
+                            && allow_retries
                             && !has_triggered_downgrade
                             && headers.contains_key("x-goog-user-project")
                         {
