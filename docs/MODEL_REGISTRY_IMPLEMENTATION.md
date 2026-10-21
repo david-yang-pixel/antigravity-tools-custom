@@ -224,7 +224,11 @@ real production probes require a separate explicit action.
 - `/internal/warmup` now has a separate strict-admin boundary. The local scheduler
   authenticates with the configured admin password (or master key if absent).
   Request headers cannot opt out of publication admission on public endpoints.
-- The model tab has Published / Candidates / Advanced sections. Publication and
+- The model tab has Published / Advanced sections. "Fetch upstream models" on the
+  Published tab syncs metadata (no inference) and lists unpublished upstream
+  models inline; each has Test (one explicit basic-text check of that model) and
+  Add (the publication dialog). There is no separate candidates tab or ignore
+  list; previously ignored IDs are preserved unchanged. Publication and
   provider connection changes are awaited independently; advanced settings have
   their own save feedback. Web keeps server-side Cowork compression controls but
   hides local Desktop patch operations. Capability declarations, gateway support
