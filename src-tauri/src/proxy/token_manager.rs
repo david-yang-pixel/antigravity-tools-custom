@@ -5284,7 +5284,8 @@ mod tests {
             .into_iter()
             .collect(),
         );
-        let catalog = crate::proxy::common::model_mapping::get_all_dynamic_models(
+        // The raw catalog is the registry migration input; the public catalog is the registry.
+        let catalog = crate::proxy::common::model_mapping::get_legacy_dynamic_models(
             &mapping,
             Some(&manager),
             true,
@@ -5299,7 +5300,7 @@ mod tests {
             ]
         );
         assert!(
-            crate::proxy::common::model_mapping::get_all_dynamic_models(&mapping, None, true,)
+            crate::proxy::common::model_mapping::get_legacy_dynamic_models(&mapping, None, true)
                 .await
                 .is_empty()
         );
