@@ -41,10 +41,16 @@ pub async fn route(
     if request.method() != Method::POST || !is_inference_path(request.uri().path()) {
         return next.run(request).await;
     }
-    let mapping = state.custom_mapping.read().await.clone();
+    let (request, published) = match published_request(request).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if published.source_id != crate::modules::model_registry::WORKBUDDY_SOURCE {
+        return next.run(request).await;
+    }
     let settings = match workbuddy::load() {
         Ok(settings) => settings,
-        Err(_) => return configuration_error(request, next, &mapping).await,
+        Err(_) => return configuration_error(),
     };
     let policy = Policy {
         sticky: state.token_manager.get_sticky_config().await,
@@ -53,7 +59,7 @@ pub async fn route(
     };
     dispatch(
         settings,
-        mapping,
+        published,
         state.request_timeout,
         policy,
         request,
@@ -62,70 +68,55 @@ pub async fn route(
     .await
 }
 
-async fn configuration_error(
-    request: Request,
-    next: Next,
-    mapping: &std::collections::HashMap<String, String>,
-) -> Response {
-    let (request, model) =
-        match crate::proxy::middleware::user_token_models::requested_model(request).await {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
-    if model.is_some_and(|model| workbuddy::known_model_on_configuration_error(&model, mapping)) {
-        error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "workbuddy_configuration_invalid",
-            "Repair the WorkBuddy upstream configuration in admin settings.",
-        )
-    } else {
-        next.run(request).await
-    }
+fn configuration_error() -> Response {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "workbuddy_configuration_invalid",
+        "Repair the WorkBuddy upstream configuration in admin settings.",
+    )
 }
 
 fn is_inference_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/v1/chat/completions"
-            | "/v1/responses"
-            | "/responses"
-            | "/responses/compact"
-            | "/v1/messages"
-            | "/v1/messages/count_tokens"
-            | "/v1/completions"
-            | "/v1/images/generations"
-            | "/v1/images/edits"
-            | "/v1/audio/transcriptions"
-    ) || path.starts_with("/v1beta/models/")
+    crate::proxy::middleware::model_registry::is_inference_path(path)
+}
+
+async fn published_request(
+    mut request: Request,
+) -> Result<(Request, crate::modules::model_registry::PublishedModel), Response> {
+    if let Some(published) = request
+        .extensions()
+        .get::<crate::modules::model_registry::PublishedModel>()
+        .cloned()
+    {
+        return Ok((request, published));
+    }
+    let (resolved, model) =
+        crate::proxy::middleware::user_token_models::requested_model(request).await?;
+    request = resolved;
+    let published = crate::proxy::middleware::model_registry::resolve_public_model(
+        model.as_deref().unwrap_or(""),
+    )
+    .map_err(|(status, message)| error(status, "model_not_published", &message))?;
+    request.extensions_mut().insert(published.clone());
+    Ok((request, published))
 }
 
 async fn dispatch(
     settings: Settings,
-    mapping: std::collections::HashMap<String, String>,
+    published: crate::modules::model_registry::PublishedModel,
     timeout: u64,
     policy: Policy,
     request: Request,
     next: Next,
 ) -> Response {
-    if settings.models.is_empty() || request.method() != Method::POST {
+    // The registry binding is authoritative. Legacy settings.models aliases must
+    // never steal an AG name or rewrite an explicitly published WB native ID.
+    if published.source_id != crate::modules::model_registry::WORKBUDDY_SOURCE {
         return next.run(request).await;
     }
     let path = request.uri().path().to_owned();
-    // Inspect only inference routes. Telemetry/health requests keep their existing behavior.
-    if !is_inference_path(&path) {
-        return next.run(request).await;
-    }
-    let (request, requested_model) =
-        match crate::proxy::middleware::user_token_models::requested_model(request).await {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
-    let Some(alias) = requested_model else {
-        return next.run(request).await;
-    };
-    let Some(target) = settings.target_model(&alias, &mapping) else {
-        return next.run(request).await;
-    };
+    let alias = published.public_id;
+    let target = published.native_model;
     if !settings.enabled {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -193,7 +184,7 @@ async fn dispatch(
         payload,
         streaming,
         &alias,
-        target,
+        &target,
         protocol,
         &namespaced,
         scope,
@@ -532,7 +523,15 @@ mod configuration_tests {
 
     async fn broken_config(request: Request, next: Next) -> Response {
         assert!(workbuddy::load().is_err());
-        configuration_error(request, next, &Default::default()).await
+        let (request, published) = match published_request(request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        if published.source_id == crate::modules::model_registry::WORKBUDDY_SOURCE {
+            configuration_error()
+        } else {
+            next.run(request).await
+        }
     }
 
     #[tokio::test]
@@ -544,6 +543,11 @@ mod configuration_tests {
         )
         .unwrap();
         workbuddy::load().unwrap();
+        crate::modules::model_registry::view(
+            &["custom-wb".into(), "gemini-2.5-flash".into()],
+            &Default::default(),
+        )
+        .unwrap();
         std::fs::write(
             crate::modules::account::get_data_dir()
                 .unwrap()

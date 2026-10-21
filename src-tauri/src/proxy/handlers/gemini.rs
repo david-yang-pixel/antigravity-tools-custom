@@ -89,6 +89,7 @@ pub async fn handle_generate(
         (model_action, "generateContent".to_string())
     };
 
+    let published = crate::proxy::middleware::model_registry::antigravity_model(&model_name)?;
     crate::modules::logger::log_info(&format!(
         "Received Gemini request: {}/{}",
         model_name, method
@@ -189,8 +190,8 @@ pub async fn handle_generate(
         .and_then(|tc| tc.get("thinkingLevel").or_else(|| tc.get("effort")))
         .and_then(|v| v.as_str());
 
-    let initial_mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
-        &model_name,
+    let initial_mapped_model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
         &*state.custom_mapping.read().await,
         client_effort,
     );
@@ -1238,17 +1239,11 @@ pub async fn handle_list_models(
     let model_ids =
         get_all_dynamic_models(&state.custom_mapping, Some(&state.token_manager), only_raw).await;
 
-    // WorkBuddy does not expose a native Gemini endpoint.
-    let workbuddy = crate::modules::workbuddy::load().ok();
-    let mapping = state.custom_mapping.read().await.clone();
+    // Native Gemini is available only for explicit Antigravity bindings.
     // 转换为 Gemini API 格式
     let models: Vec<_> = model_ids
         .into_iter()
-        .filter(|id| {
-            !workbuddy
-                .as_ref()
-                .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
-        })
+        .filter(|id| crate::proxy::middleware::model_registry::antigravity_model(id).is_ok())
         .map(|id| {
             json!({
                 "name": format!("models/{}", id),
@@ -1274,8 +1269,6 @@ pub async fn handle_get_model(
 ) -> impl IntoResponse {
     use crate::proxy::common::model_mapping::find_dynamic_model;
 
-    let workbuddy = crate::modules::workbuddy::load().ok();
-    let mapping = state.custom_mapping.read().await.clone();
     let only_raw = *state.only_raw_quota_models.read().await;
     if let Some(matched_id) = find_dynamic_model(
         &state.custom_mapping,
@@ -1284,11 +1277,8 @@ pub async fn handle_get_model(
         &model_name,
     )
     .await
-    .filter(|id| {
-        !workbuddy
-            .as_ref()
-            .is_some_and(|settings| settings.target_model(id, &mapping).is_some())
-    }) {
+    .filter(|id| crate::proxy::middleware::model_registry::antigravity_model(id).is_ok())
+    {
         (
             StatusCode::OK,
             Json(json!({
@@ -1366,8 +1356,12 @@ pub async fn execute_count_tokens(
         .and_then(|tc| tc.get("thinkingLevel").or_else(|| tc.get("effort")))
         .and_then(|v| v.as_str());
 
-    let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
-        &model_name,
+    let published = match crate::proxy::middleware::model_registry::antigravity_model(&model_name) {
+        Ok(model) => model,
+        Err(error) => return error.into_response(),
+    };
+    let mapped_model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
         &*state.custom_mapping.read().await,
         client_effort,
     );

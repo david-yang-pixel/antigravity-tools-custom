@@ -93,6 +93,40 @@ pub async fn requested_model(request: Request) -> Result<(Request, Option<String
     Ok((request, model))
 }
 
+pub(crate) fn implicit_model(path: &str) -> Option<&'static str> {
+    match path {
+        "/v1/audio/transcriptions" => Some("gemini-2.0-flash-exp"),
+        "/v1/images/generations" | "/v1/images/edits" => Some("gemini-3.1-flash-image"),
+        _ => None,
+    }
+}
+
+/// Resolve a Responses follow-up before publication and price admission. Write
+/// the effective public ID into the body so a later session lookup cannot change
+/// the admitted/billed model (for example if the session expires meanwhile).
+pub(crate) async fn effective_json_model(path: &str, body: &mut Value) -> Result<String, Response> {
+    let object = body.as_object_mut().ok_or_else(invalid_model)?;
+    if let Some(model) = object.get("model") {
+        return model
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(invalid_model);
+    }
+    let mut model = implicit_model(path).map(str::to_owned);
+    if matches!(path, "/v1/responses" | "/responses" | "/responses/compact") {
+        if let Some(previous) = object.get("previous_response_id").and_then(Value::as_str) {
+            model = crate::proxy::http_session_store::get_session_with_parent(previous)
+                .await
+                .map(|(session, _)| session.model)
+                .filter(|id| !id.is_empty());
+        }
+    }
+    let model = model.ok_or_else(invalid_model)?;
+    object.insert("model".into(), Value::String(model.clone()));
+    Ok(model)
+}
+
 async fn resolve_requested_model(
     mut request: Request,
 ) -> Result<(Request, Option<String>), Response> {
@@ -164,12 +198,22 @@ async fn resolve_requested_model(
                     model = Some(field.text().await.map_err(|_| invalid_model())?);
                 }
             }
-            model.ok_or_else(invalid_model)?
-        } else {
-            json_model(&bytes)
-                .map_err(|_| invalid_model())?
-                .filter(|v| !v.is_empty())
+            model
+                .or_else(|| implicit_model(&path).map(str::to_owned))
+                .filter(|id| !id.is_empty())
                 .ok_or_else(invalid_model)?
+        } else {
+            let explicit = json_model(&bytes).map_err(|_| invalid_model())?;
+            if let Some(model) = explicit.filter(|id| !id.is_empty()) {
+                request = Request::from_parts(parts, Body::from(bytes));
+                return Ok((request, Some(model)));
+            }
+            let mut body: Value = serde_json::from_slice(&bytes).map_err(|_| invalid_model())?;
+            let model = effective_json_model(&path, &mut body).await?;
+            let mut parts = parts;
+            parts.headers.remove(header::CONTENT_LENGTH);
+            request = Request::from_parts(parts, Body::from(body.to_string()));
+            return Ok((request, Some(model)));
         };
         request = Request::from_parts(parts, Body::from(bytes));
         model

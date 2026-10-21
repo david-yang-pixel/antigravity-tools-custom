@@ -1,66 +1,52 @@
 import { useMemo, useEffect, useState, useCallback } from 'react';
 import { MODEL_CONFIG, compareModelsDesc, inferModelGroup } from '../config/modelConfig';
-import { useAccountStore } from '../stores/useAccountStore';
-import { useConfigStore } from '../stores/useConfigStore';
 import { Bot, Sparkles } from 'lucide-react';
 import { request } from '../utils/request';
-
-export interface CanonicalFamilyDto {
-    canonical_id: string;
-    display_name: string;
-    match_ids: string[];
-}
+import type { ModelRegistryView } from '../types/modelRegistry';
+import { registryCatalog } from '../components/proxy/models/registryLogic';
 
 export const useProxyModels = () => {
-    const { accounts, fetchAccounts } = useAccountStore();
-    const onlyRaw = useConfigStore(state => state.config?.proxy.only_raw_quota_models);
-    const [canonicalFamilies, setCanonicalFamilies] = useState<CanonicalFamilyDto[]>([]);
-    const [modelIds, setModelIds] = useState<string[]>([]);
+    const [registry, setRegistry] = useState<ModelRegistryView | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(false);
     const [revision, setRevision] = useState(0);
     const refresh = useCallback(() => setRevision(value => value + 1), []);
 
     useEffect(() => {
-        if (useAccountStore.getState().accounts.length === 0) {
-            void fetchAccounts().catch(() => {});
-        }
-        let cancelled = false;
-        request<CanonicalFamilyDto[]>('get_canonical_families')
-            .then(data => { if (!cancelled && data) setCanonicalFamilies(data); })
-            .catch(err => console.error('Failed to fetch canonical families:', err));
-        return () => { cancelled = true; };
-    }, [fetchAccounts]);
+        window.addEventListener('model-registry-changed', refresh);
+        return () => window.removeEventListener('model-registry-changed', refresh);
+    }, [refresh]);
 
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
         setError(false);
-        // The API and user portal use this same catalog. MODEL_CONFIG provides
-        // presentation metadata only; it must never add or rename model IDs.
-        request<string[]>('get_user_token_models')
-            .then(ids => { if (!cancelled) setModelIds(ids); })
-            .catch(() => {
-                if (!cancelled) { setModelIds([]); setError(true); }
-            })
+        // Fail closed while reloading: never retain an unpublished/stale fallback.
+        setRegistry(null);
+        request<ModelRegistryView>('get_model_registry')
+            .then(view => { if (!cancelled) setRegistry(view); })
+            .catch(() => { if (!cancelled) { setRegistry(null); setError(true); } })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
-    }, [accounts, onlyRaw, revision]);
+    }, [revision]);
 
-    const models = useMemo(() => Array.from(new Set(modelIds)).map(id => {
-        const cfg = MODEL_CONFIG[id];
-        const group = cfg?.group || inferModelGroup(id);
+    const models = useMemo(() => (registry ? registryCatalog(registry) : []).map(model => {
+        // Hardcoded catalog supplies icons/order only, never publication or routing.
+        const cfg = MODEL_CONFIG[model.native_model];
+        const group = cfg?.group || inferModelGroup(model.native_model);
         const Icon = cfg?.Icon;
         return {
-            id,
-            name: id,
-            desc: id,
+            ...model,
+            registry_id: model.id,
+            id: model.public_id,
+            name: model.display_name || model.public_id,
+            desc: `${model.source_name} → ${model.native_model}`,
             group,
             icon: Icon ? <Icon size={16} /> : group === 'Claude'
                 ? <Sparkles size={16} className="text-purple-400" />
                 : <Bot size={16} className="text-blue-400" />,
         };
-    }).sort(compareModelsDesc), [modelIds]);
+    }).sort(compareModelsDesc), [registry]);
 
-    return { models, canonicalFamilies, loading, error, refresh };
+    return { models, loading, error, refresh };
 };

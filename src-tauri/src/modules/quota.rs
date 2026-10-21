@@ -678,10 +678,21 @@ pub async fn warmup_model_directly(
     percentage: i32,
     _account_id: Option<&str>,
 ) -> bool {
-    // Get currently configured proxy port
-    let port = config::load_app_config()
-        .map(|c| c.proxy.port)
-        .unwrap_or(8045);
+    // Internal warmup now requires the same strict administrator identity as probes.
+    let config = match config::load_app_config() {
+        Ok(config) => config,
+        Err(_) => return false,
+    };
+    let port = config.proxy.port;
+    let credential = config
+        .proxy
+        .admin_password
+        .as_deref()
+        .filter(|password| !password.is_empty())
+        .unwrap_or(&config.proxy.api_key);
+    if credential.is_empty() {
+        return false;
+    }
 
     let warmup_url = format!("http://127.0.0.1:{}/internal/warmup", port);
     let body = json!({
@@ -700,6 +711,7 @@ pub async fn warmup_model_directly(
         .unwrap_or_else(|_| rquest::Client::new());
     let resp = client
         .post(&warmup_url)
+        .bearer_auth(credential)
         .header("Content-Type", "application/json")
         .json(&body)
         .send()

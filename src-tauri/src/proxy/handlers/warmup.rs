@@ -44,11 +44,27 @@ pub struct WarmupResponse {
     pub error_type: Option<String>,
 }
 
+/// In-process boundary installed only on a strictly authenticated internal/admin
+/// router. Never derive this marker from a request header or forwarded address.
+#[derive(Clone)]
+pub(crate) struct InternalWarmup;
+
 /// 处理预热请求
-pub async fn handle_warmup(
+pub(crate) async fn handle_warmup(
     State(state): State<AppState>,
+    boundary: Option<axum::extract::Extension<InternalWarmup>>,
+    user_identity: Option<
+        axum::extract::Extension<crate::proxy::middleware::auth::UserTokenIdentity>,
+    >,
     Json(req): Json<WarmupRequest>,
 ) -> Response {
+    if boundary.is_none() || user_identity.is_some() {
+        return (
+            StatusCode::FORBIDDEN,
+            "Warmup requires the internal administrator boundary.",
+        )
+            .into_response();
+    }
     let start_time = std::time::Instant::now();
 
     info!(

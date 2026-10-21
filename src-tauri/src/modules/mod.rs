@@ -14,6 +14,8 @@ pub mod lightweight;
 pub mod log_bridge;
 pub mod logger;
 pub mod migration;
+pub mod model_registry;
+pub mod model_registry_service;
 pub mod oauth;
 pub mod oauth_server;
 pub mod payment;

@@ -15,6 +15,7 @@ pub mod proxy_pool;
 // 导出 user_token 命令
 pub mod user_token;
 pub mod workbuddy;
+pub mod model_registry;
 // 导出 patch 命令
 pub mod patch;
 pub use patch::*;

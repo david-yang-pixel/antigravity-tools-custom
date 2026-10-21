@@ -776,6 +776,12 @@ pub async fn handle_messages(
     >,
     Json(body): Json<Value>,
 ) -> Response {
+    let published = match crate::proxy::middleware::model_registry::antigravity_model(
+        body.get("model").and_then(Value::as_str).unwrap_or(""),
+    ) {
+        Ok(model) => model,
+        Err(error) => return error.into_response(),
+    };
     // [FIX] 保存原始请求体的完整副本，用于日志记录
     // 这确保了即使结构体定义遗漏字段，日志也能完整记录所有参数
     let original_body = body.clone();
@@ -826,23 +832,28 @@ pub async fn handle_messages(
             }
         };
 
-    // 0. 自定义映射优先拦截 (用户自定义路由与热更新规则拥有最高优先级，避免被后续变体推断抹平原模型意图)
-    let custom_target = {
-        let custom_mapping = state.custom_mapping.read().await;
-        crate::proxy::common::model_mapping::resolve_custom_model_route(
-            &request.model,
-            &*custom_mapping,
-        )
+    // Cross the registry source/native boundary once, before variant selection.
+    // Custom mapping changes cannot redirect an explicitly published binding.
+    let binding_hint = extract_thinking_hint(&original_body);
+    let disabled = request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.type_ == "disabled" || t.budget_tokens == Some(0));
+    let binding_effort = if disabled {
+        Some("low")
+    } else {
+        request
+            .output_config
+            .as_ref()
+            .and_then(|c| c.effort.as_deref())
+            .or_else(|| request.thinking.as_ref().and_then(|t| t.effort.as_deref()))
+            .or(binding_hint.level.as_deref())
     };
-    if let Some(target) = custom_target {
-        tracing::info!(
-            "[{}] [CustomMapping] 命中用户自定义映射规则: {} -> {}",
-            trace_id,
-            request.model,
-            target
-        );
-        request.model = target;
-    }
+    request.model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
+        &*state.custom_mapping.read().await,
+        binding_effort,
+    );
 
     // [Variant] Resolve canonical model + variant → real model + real params.
     let model_lower = request.model.to_lowercase();
@@ -1613,11 +1624,11 @@ pub async fn handle_messages(
         let norm_start = std::time::Instant::now();
 
         // 2. 模型路由解析
-        let mapped_model = crate::proxy::common::model_mapping::resolve_model_route_with_effort(
-            &request_for_body.model,
-            &*state.custom_mapping.read().await,
-            effort_hint.as_deref(),
-        );
+        let mapped_model =
+            crate::proxy::common::model_mapping::resolve_native_model_route_with_effort(
+                &request_for_body.model,
+                effort_hint.as_deref(),
+            );
         last_mapped_model = Some(mapped_model.clone());
 
         // 将 Claude 工具转为 Value 数组以便探测联网
@@ -2680,13 +2691,16 @@ pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoRespo
 
     let data: Vec<_> = model_ids
         .into_iter()
-        .map(|id| {
-            json!({
+        .filter_map(|id| {
+            let published = crate::modules::model_registry::resolve_existing(&id).ok().flatten()
+                .filter(|model| model.enabled)?;
+            Some(json!({
                 "id": id,
                 "object": "model",
                 "created": 1706745600,
-                "owned_by": "antigravity"
-            })
+                "owned_by": if published.source_id == crate::modules::model_registry::WORKBUDDY_SOURCE { "workbuddy" } else { "antigravity" },
+                "source_id": published.source_id
+            }))
         })
         .collect();
 
@@ -2713,13 +2727,19 @@ pub async fn handle_retrieve_model(
     )
     .await
     {
+        let published =
+            match crate::proxy::middleware::model_registry::resolve_public_model(&matched_id) {
+                Ok(model) => model,
+                Err(error) => return error.into_response(),
+            };
         (
             StatusCode::OK,
             Json(json!({
                 "type": "model",
                 "id": matched_id.clone(),
                 "display_name": matched_id,
-                "created_at": "2024-10-22T00:00:00Z"
+                "created_at": "2024-10-22T00:00:00Z",
+                "source_id": published.source_id
             })),
         )
             .into_response()

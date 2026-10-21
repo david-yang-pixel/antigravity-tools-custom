@@ -1,5 +1,5 @@
 import { useSearchParams } from 'react-router-dom';
-import { useState, useEffect, useMemo, startTransition } from 'react';
+import { useState, useEffect, useId, useRef, startTransition } from 'react';
 import { useTranslation } from 'react-i18next';
 import { request as invoke } from '../utils/request';
 import { copyToClipboard } from '../utils/clipboard';
@@ -9,15 +9,11 @@ import {
     RefreshCw,
     CheckCircle,
     Settings,
-    Target,
-    Plus,
     Terminal,
     Trash2,
     BrainCircuit,
-    ArrowRight,
     Sparkles,
     Code,
-    Check,
     X,
     Edit2,
     Save,
@@ -30,7 +26,8 @@ import ModalDialog from '../components/common/ModalDialog';
 import { showToast } from '../components/common/ToastContainer';
 import { cn } from '../utils/cn';
 import { useProxyModels } from '../hooks/useProxyModels';
-import GroupedSelect, { SelectOption } from '../components/common/GroupedSelect';
+import ModelRegistryPanel from '../components/proxy/models/ModelRegistryPanel';
+import { isTauri } from '../utils/env';
 import { listAccounts } from '../services/accountService';
 import CircuitBreaker from '../components/settings/CircuitBreaker';
 import GlobalSystemPrompt from '../components/settings/GlobalSystemPrompt';
@@ -38,8 +35,8 @@ import ImageThinkingMode from '../components/settings/ImageThinkingMode';
 import ThinkingBudget from '../components/settings/ThinkingBudget';
 import MultimodalSettings from '../components/settings/MultimodalSettings';
 import AgentSettings from '../components/settings/AgentSettings';
-import WorkBuddySettings from '../components/proxy/WorkBuddySettings';
-import WorkBuddyScheduling from '../components/proxy/WorkBuddyScheduling';
+import SourceSettings from '../components/proxy/models/SourceSettings';
+import ServerAgentSettings from '../components/proxy/models/ServerAgentSettings';
 import { CircuitBreakerConfig } from '../types/config';
 
 interface ProxyStatus {
@@ -47,13 +44,6 @@ interface ProxyStatus {
     port: number;
     base_url: string;
     active_accounts: number;
-}
-
-interface CustomPreset {
-    id: string;
-    name: string;
-    description: string;
-    mappings: Record<string, string>;
 }
 
 
@@ -79,69 +69,41 @@ function CollapsibleCard({
     allowInteractionWhenDisabled = false,
 }: CollapsibleCardProps) {
     const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+    useEffect(() => { if (defaultExpanded) setIsExpanded(true); }, [defaultExpanded]);
+    const contentId = useId();
     const { t } = useTranslation();
+    const toggle = () => setIsExpanded(value => !value);
+    const disclosureProps = { 'aria-expanded': isExpanded, 'aria-controls': contentId };
+    const onDisclosureKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+        if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+            event.preventDefault(); setIsExpanded(event.key === 'ArrowRight');
+        }
+    };
 
     return (
-        <div className="bg-white dark:bg-base-100 rounded-xl shadow-xs border border-gray-200/80 dark:border-base-200 overflow-hidden transition-all duration-200 hover:shadow-sm">
-            <div
-                className="px-5 py-3.5 flex items-center justify-between cursor-pointer bg-gray-50/70 dark:bg-base-200 hover:bg-gray-100/70 dark:hover:bg-base-300/70 transition-colors"
-                onClick={(e) => {
-                    // Prevent toggle when clicking the switch or right element
-                    if ((e.target as HTMLElement).closest('.no-expand')) return;
-                    setIsExpanded(!isExpanded);
-                }}
-            >
-                <div className="flex items-center gap-3">
-                    <div className="text-gray-500 dark:text-gray-400">
-                        {icon}
-                    </div>
-                    <span className="font-semibold text-sm text-gray-900 dark:text-white">
-                        {title}
-                    </span>
-                    {enabled !== undefined && (
-                        <div className={cn('text-xs px-2.5 py-0.5 rounded-full font-medium border', enabled ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-400 dark:border-emerald-800/60' : 'bg-gray-100 text-gray-600 border-gray-200 dark:bg-base-200 dark:text-gray-400 dark:border-base-300')}>
-                            {enabled ? t('common.enabled') : t('common.disabled')}
-                        </div>
-                    )}
-                </div>
-
-                <div className="flex items-center gap-4 no-expand">
+        <div className="proxy-collapsible bg-white dark:bg-base-100 rounded-xl shadow-xs border border-gray-200/80 dark:border-base-200">
+            <div className="px-4 py-3 flex flex-wrap items-center gap-2 bg-gray-50/70 dark:bg-base-200 rounded-t-xl">
+                <button type="button" {...disclosureProps} onClick={toggle} onKeyDown={onDisclosureKeyDown}
+                    className="flex flex-1 min-w-0 items-center gap-3 text-left rounded-lg py-1 text-sm font-semibold text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-blue-500">
+                    <span className="text-gray-500 dark:text-gray-400 shrink-0" aria-hidden>{icon}</span>
+                    <span className="break-words">{title}</span>
+                    {enabled !== undefined && <span className={cn('text-xs px-2 py-0.5 rounded-full border', enabled ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-400 dark:border-emerald-800' : 'bg-gray-100 text-gray-600 border-gray-200 dark:bg-base-200 dark:text-gray-400 dark:border-base-300')}>
+                        {enabled ? t('common.enabled') : t('common.disabled')}
+                    </span>}
+                </button>
+                <div className="flex flex-wrap items-center gap-3">
                     {rightElement}
-
-                    {enabled !== undefined && onToggle && (
-                        <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-                            <input
-                                type="checkbox"
-                                className="toggle toggle-sm bg-gray-200 dark:bg-base-300 border-gray-300 dark:border-base-300 checked:bg-blue-600 checked:border-blue-600"
-                                checked={enabled}
-                                onChange={(e) => onToggle(e.target.checked)}
-                            />
-                        </div>
-                    )}
-
-                    <button
-                        className={cn('p-1.5 rounded-lg text-gray-500 hover:text-gray-800 hover:bg-gray-200/70 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-base-200 transition-all duration-200', isExpanded ? 'rotate-180' : '')}
-                    >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="m6 9 6 6 6-6" />
-                        </svg>
+                    {enabled !== undefined && onToggle && <input type="checkbox" aria-label={`${title}：${t('common.enabled')}`}
+                        className="toggle toggle-sm bg-gray-200 dark:bg-base-300 border-gray-300 dark:border-base-300 checked:bg-blue-600 checked:border-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-blue-500"
+                        checked={enabled} onChange={event => onToggle(event.target.checked)} />}
+                    <button type="button" {...disclosureProps} aria-label={`${isExpanded ? '收起 / Collapse ' : '展开 / Expand '}${title}`} onClick={toggle} onKeyDown={onDisclosureKeyDown}
+                        className="p-2 rounded-lg text-gray-500 hover:bg-gray-200/70 dark:text-gray-400 dark:hover:bg-base-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500">
+                        <svg className={cn('motion-safe:transition-transform motion-safe:duration-150', isExpanded && 'rotate-180')} aria-hidden width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
                     </button>
                 </div>
             </div>
-
-            <div
-                className={`transition-all duration-300 ease-in-out border-t border-gray-200/80 dark:border-base-200 ${isExpanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden'
-                    }`}
-            >
-                <div className="p-5 relative">
-                    {/* Overlay when disabled */}
-                    {enabled === false && !allowInteractionWhenDisabled && (
-                        <div className="absolute inset-0 bg-gray-900/10 dark:bg-black/40 backdrop-blur-[0.5px] z-10 cursor-not-allowed" />
-                    )}
-                    <div className={enabled === false && !allowInteractionWhenDisabled ? 'opacity-50 pointer-events-none select-none' : ''}>
-                        {children}
-                    </div>
-                </div>
+            <div id={contentId} hidden={!isExpanded} className="border-t border-gray-200/80 dark:border-base-200 p-4">
+                <div inert={enabled === false && !allowInteractionWhenDisabled} className={enabled === false && !allowInteractionWhenDisabled ? 'opacity-50' : ''}>{children}</div>
             </div>
         </div>
     );
@@ -163,22 +125,27 @@ export default function ApiProxy() {
     const [searchParams] = useSearchParams();
     const showWorkBuddy = searchParams.get('section') === 'workbuddy';
     const [activeMenuTab, setActiveMenuTab] = useState<'settings' | 'models' | 'protocols'>(showWorkBuddy ? 'models' : 'settings');
+    useEffect(() => { if (showWorkBuddy) setActiveMenuTab('models'); }, [showWorkBuddy]);
     const [configLoading, setConfigLoading] = useState(true);
     const [configError, setConfigError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
+    const [advancedDirty, setAdvancedDirty] = useState(false);
+    const [advancedSaving, setAdvancedSaving] = useState(false);
+    const [advancedFeedback, setAdvancedFeedback] = useState<{ error?: boolean; message: string } | null>(null);
+    const advancedDraftVersion = useRef(0);
+    const advancedSaveInFlight = useRef<Promise<void> | null>(null);
+    const latestConfig = useRef(appConfig);
+    latestConfig.current = appConfig;
     const [copied, setCopied] = useState<string | null>(null);
     const [selectedProtocol, setSelectedProtocol] = useState<'openai' | 'anthropic' | 'gemini'>('openai');
     const [selectedModelId, setSelectedModelId] = useState('');
 
     useEffect(() => {
-        const selectable = models.filter(model => selectedProtocol !== 'anthropic' || !model.id.includes('image'));
+        const selectable = models.filter(model => model.protocols.includes(selectedProtocol));
         if (!selectable.some(model => model.id === selectedModelId)) {
             setSelectedModelId(selectable[0]?.id ?? '');
         }
     }, [models, selectedProtocol, selectedModelId]);
-    const [customMappingValue, setCustomMappingValue] = useState(''); // 自定义映射表单的选中值
-    const [editingKey, setEditingKey] = useState<string | null>(null);
-    const [editingValue, setEditingValue] = useState<string>('');
 
     // API Key editing states
     const [isEditingApiKey, setIsEditingApiKey] = useState(false);
@@ -187,16 +154,6 @@ export default function ApiProxy() {
     const [isEditingAdminPassword, setIsEditingAdminPassword] = useState(false);
     const [tempAdminPassword, setTempAdminPassword] = useState('');
 
-    // Preset selection state
-    const [selectedPreset, setSelectedPreset] = useState<string>('default');
-    const [customPresets, setCustomPresets] = useState<CustomPreset[]>([]);
-    const [isPresetManagerOpen, setIsPresetManagerOpen] = useState(false);
-    const [newPresetName, setNewPresetName] = useState('');
-
-    // Modal states
-
-    // Modal states
-    const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
     const [isRegenerateKeyConfirmOpen, setIsRegenerateKeyConfirmOpen] = useState(false);
     const [isClearBindingsConfirmOpen, setIsClearBindingsConfirmOpen] = useState(false);
     const [isClearRateLimitsConfirmOpen, setIsClearRateLimitsConfirmOpen] = useState(false);
@@ -205,14 +162,6 @@ export default function ApiProxy() {
     const [preferredAccountId, setPreferredAccountId] = useState<string | null>(null);
     const [availableAccounts, setAvailableAccounts] = useState<Array<{ id: string; email: string }>>([]);
 
-    // 生成自定义映射表单的选项 (从 models 动态生成，统一纯正 Model ID 风格)
-    const customMappingOptions: SelectOption[] = useMemo(() => {
-        return models.map(model => ({
-            value: model.id,
-            label: model.id,
-            group: model.group || 'Other'
-        }));
-    }, [models]);
 
     // 初始化加载
     useEffect(() => {
@@ -220,7 +169,6 @@ export default function ApiProxy() {
         loadStatus();
         loadAccounts();
         loadPreferredAccount();
-        loadCustomPresets();
         const interval = setInterval(loadStatus, 3000);
         return () => clearInterval(interval);
     }, []);
@@ -334,234 +282,33 @@ export default function ApiProxy() {
         }
     };
 
-    // 专门处理模型映射的热更新 (全量)
-    const handleMappingUpdate = async (type: 'custom', key: string, value: string) => {
-        if (!appConfig) return;
-
-        const trimmedKey = key.trim();
-        console.log('[DEBUG] handleMappingUpdate called:', { type, key: trimmedKey, value });
-
-        const newConfig = { ...appConfig.proxy };
-        newConfig.custom_mapping = { ...(newConfig.custom_mapping || {}), [trimmedKey]: value };
-
-        try {
-            await invoke('update_model_mapping', { config: newConfig });
-            setAppConfig({ ...appConfig, proxy: newConfig });
-            console.log('[DEBUG] Mapping updated successfully');
-            showToast(t('common.saved'), 'success');
-        } catch (error) {
-            console.error('Failed to update mapping:', error);
-            showToast(`${t('common.error')}: ${error}`, 'error');
-        }
+    // Advanced controls are an explicit draft, not a stream of per-keystroke writes.
+    const updateAdvancedProxyConfig = (updates: Partial<ProxyConfig>) => {
+        const current = latestConfig.current;
+        if (!current) return;
+        const next = { ...current, proxy: { ...current.proxy, ...updates } };
+        latestConfig.current = next; // ThinkingBudget can normalize then save in one event.
+        advancedDraftVersion.current += 1;
+        setAdvancedDirty(true); setAdvancedFeedback(null); setAppConfig(next);
     };
 
-    const handleResetMapping = () => {
-        if (!appConfig) return;
-        setIsResetConfirmOpen(true);
+    const handleSaveAdvancedSettings = (): Promise<void> => {
+        if (advancedSaveInFlight.current) return advancedSaveInFlight.current;
+        const draft = latestConfig.current;
+        if (!draft) return Promise.reject(new Error('配置未加载 / Configuration not loaded'));
+        const draftVersion = advancedDraftVersion.current;
+        setAdvancedSaving(true); setAdvancedFeedback(null);
+        const pending = invoke('save_config', { config: draft }).then(() => {
+            if (draftVersion === advancedDraftVersion.current) setAdvancedDirty(false);
+            setAdvancedFeedback({ message: '高级设置已保存。仅作用于标注的请求链路，不作为能力验证证据。 / Advanced settings saved; applicability labels still apply, not capability evidence.' });
+        }).catch(error => {
+            setAdvancedFeedback({ error: true, message: `保存失败，草稿保留，可重试。 / Save failed; draft retained. ${String(error)}` });
+            throw error; // Child controls must not display a false success.
+        }).finally(() => { setAdvancedSaving(false); advancedSaveInFlight.current = null; });
+        advancedSaveInFlight.current = pending;
+        return pending;
     };
 
-    const executeResetMapping = async () => {
-        if (!appConfig) return;
-        setIsResetConfirmOpen(false);
-
-        // 恢复到默认预设映射值
-        const newConfig = {
-            ...appConfig.proxy,
-            custom_mapping: {}
-        };
-
-        try {
-            await invoke('update_model_mapping', { config: newConfig });
-            setAppConfig({ ...appConfig, proxy: newConfig });
-            showToast(t('common.success'), 'success');
-        } catch (error) {
-            console.error('Failed to reset mapping:', error);
-            showToast(`${t('common.error')}: ${error}`, 'error');
-        }
-    };
-
-
-    // 定义多个预设方案
-    const defaultPresets = useMemo(() => [
-        {
-            id: 'default',
-            name: t('proxy.router.preset_default'),
-            description: t('proxy.router.preset_default_desc'),
-            mappings: {
-                "gpt-4*": "gemini-3.1-pro-high",
-                "gpt-4o*": "gemini-3.8-flash-high",
-                "gpt-3.5*": "gemini-3.6-flash-medium",
-                "o1-*": "gemini-3.1-pro-high",
-                "o3-*": "gemini-3.1-pro-high",
-                "claude-3-5-sonnet-*": "claude-sonnet-4-6",
-                "claude-3-opus-*": "claude-opus-4-6-thinking",
-                "claude-opus-4-6*": "claude-opus-4-6-thinking",
-                "claude-haiku-*": "gemini-3.6-flash-medium",
-                "claude-3-haiku-*": "gemini-3.6-flash-medium",
-            }
-        },
-        {
-            id: 'performance',
-            name: t('proxy.router.preset_performance'),
-            description: t('proxy.router.preset_performance_desc'),
-            mappings: {
-                "gpt-4*": "claude-opus-4-6-thinking",
-                "gpt-4o*": "claude-sonnet-4-6",
-                "gpt-3.5*": "gemini-3.8-flash-tiered",
-                "o1-*": "claude-opus-4-6-thinking",
-                "o3-*": "claude-opus-4-6-thinking",
-                "claude-3-5-sonnet-*": "claude-sonnet-4-6",
-                "claude-3-opus-*": "claude-opus-4-6-thinking",
-                "claude-opus-4-6*": "claude-opus-4-6-thinking",
-                "claude-haiku-*": "claude-sonnet-4-6",
-                "claude-3-haiku-*": "claude-sonnet-4-6",
-            }
-        },
-        {
-            id: 'cost-effective',
-            name: t('proxy.router.preset_cost'),
-            description: t('proxy.router.preset_cost_desc'),
-            mappings: {
-                "gpt-4*": "gemini-3.8-flash-high",
-                "gpt-4o*": "gemini-3.6-flash-medium",
-                "gpt-3.5*": "gemini-3.1-flash-lite",
-                "o1-*": "gemini-3.8-flash-high",
-                "o3-*": "gemini-3.8-flash-high",
-                "claude-3-5-sonnet-*": "gemini-3.8-flash-high",
-                "claude-3-opus-*": "gemini-3.8-flash-high",
-                "claude-opus-4-*": "gemini-3.8-flash-high",
-                "claude-haiku-*": "gemini-3.1-flash-lite",
-                "claude-3-haiku-*": "gemini-3.1-flash-lite",
-            }
-        },
-        {
-            id: 'balanced',
-            name: t('proxy.router.preset_balanced'),
-            description: t('proxy.router.preset_balanced_desc'),
-            mappings: {
-                "gpt-4*": "gemini-3.1-pro-high",
-                "gpt-4o*": "gemini-3.8-flash-high",
-                "gpt-3.5*": "gemini-3.6-flash-medium",
-                "o1-*": "claude-sonnet-4-6",
-                "o3-*": "claude-sonnet-4-6",
-                "claude-3-5-sonnet-*": "claude-sonnet-4-6",
-                "claude-3-opus-*": "gemini-3.1-pro-high",
-                "claude-opus-4-5*": "gemini-3.1-pro-high",
-                "claude-opus-4-6*": "claude-opus-4-6-thinking",
-                "claude-haiku-*": "gemini-3.6-flash-medium",
-                "claude-3-haiku-*": "gemini-3.6-flash-medium",
-            }
-        },
-    ], [t]);
-
-    const presetOptions = useMemo(() => {
-        return [...defaultPresets, ...customPresets];
-    }, [defaultPresets, customPresets]);
-
-    // Custom Presets Logic
-    const loadCustomPresets = () => {
-        try {
-            const saved = localStorage.getItem('antigravity_custom_presets');
-            if (saved) {
-                setCustomPresets(JSON.parse(saved));
-            }
-        } catch (error) {
-            console.error('Failed to load custom presets:', error);
-        }
-    };
-
-    const saveCustomPresetsToStorage = (presets: CustomPreset[]) => {
-        try {
-            localStorage.setItem('antigravity_custom_presets', JSON.stringify(presets));
-            setCustomPresets(presets);
-        } catch (error) {
-            console.error('Failed to save custom presets:', error);
-            showToast('Failed to save preset', 'error');
-        }
-    };
-
-    const handleSaveCurrentAsPreset = () => {
-        if (!appConfig?.proxy.custom_mapping || Object.keys(appConfig.proxy.custom_mapping).length === 0) {
-            showToast(t('proxy.router.no_mapping_to_save'), 'warning');
-            return;
-        }
-        if (!newPresetName.trim()) {
-            showToast(t('proxy.router.preset_name_required'), 'warning');
-            return;
-        }
-
-        const newPreset: CustomPreset = {
-            id: `custom_${Date.now()}`,
-            name: newPresetName,
-            description: t('proxy.router.custom_preset_desc'),
-            mappings: { ...appConfig.proxy.custom_mapping }
-        };
-
-        const updatedPresets = [...customPresets, newPreset];
-        saveCustomPresetsToStorage(updatedPresets);
-        setNewPresetName('');
-        setIsPresetManagerOpen(false);
-        showToast(t('proxy.router.preset_saved', { defaultValue: 'Preset saved successfully' }), 'success');
-        // Auto select the new preset
-        setSelectedPreset(newPreset.id);
-    };
-
-    const handleDeletePreset = (id: string) => {
-        const updatedPresets = customPresets.filter(p => p.id !== id);
-        saveCustomPresetsToStorage(updatedPresets);
-        if (selectedPreset === id) {
-            setSelectedPreset('default');
-        }
-    };
-
-    // 应用预设映射 (通配符)
-    const handleApplyPresets = async () => {
-        if (!appConfig) return;
-
-        const selectedPresetData = presetOptions.find(p => p.id === selectedPreset);
-        if (!selectedPresetData) return;
-
-        // 构造新配置
-        const newConfig = {
-            ...appConfig.proxy,
-            // 策略:覆盖同名 key,保留其他自定义 key
-            // [FIX #1738] Type assertion to ensure Record<string, string> compatibility
-            custom_mapping: { ...appConfig.proxy.custom_mapping, ...selectedPresetData.mappings } as Record<string, string>
-        };
-
-        // 备份旧配置用于回滚
-        const oldConfig = { ...appConfig };
-
-        try {
-            // 1. 乐观更新：立即更新 UI
-            setAppConfig({ ...appConfig, proxy: newConfig });
-            showToast(t('proxy.router.presets_applied') + ` (${selectedPresetData.name})`, 'success');
-
-            // 2. 后台异步保存
-            await invoke('update_model_mapping', { config: newConfig });
-
-            // 3. 重新加载配置以确保一致性
-            await loadConfig();
-        } catch (error) {
-            console.error('Failed to apply presets:', error);
-            // 3. 失败回滚
-            setAppConfig(oldConfig);
-            showToast(`${t('common.error')}: ${error}`, 'error');
-        }
-    };
-
-    const handleRemoveCustomMapping = async (key: string) => {
-        if (!appConfig || !appConfig.proxy.custom_mapping) return;
-        const newCustom = { ...appConfig.proxy.custom_mapping };
-        delete newCustom[key];
-        const newConfig = { ...appConfig.proxy, custom_mapping: newCustom };
-        try {
-            await invoke('update_model_mapping', { config: newConfig });
-            setAppConfig({ ...appConfig, proxy: newConfig });
-        } catch (error) {
-            console.error('Failed to remove custom mapping:', error);
-        }
-    };
 
     const updateProxyConfig = (updates: Partial<ProxyConfig>) => {
         if (!appConfig) return;
@@ -591,20 +338,12 @@ export default function ApiProxy() {
     };
 
     const updateExperimentalConfig = (updates: Partial<ExperimentalConfig>) => {
-        if (!appConfig) return;
-        const newConfig = {
-            ...appConfig,
-            proxy: {
-                ...appConfig.proxy,
-                experimental: {
-                    ...(appConfig.proxy.experimental || {
-                        enable_usage_scaling: false,
-                    }),
-                    ...updates
-                }
-            }
-        };
-        saveConfig(newConfig);
+        const current = latestConfig.current;
+        if (!current) return;
+        const next = { ...current, proxy: { ...current.proxy, experimental: { enable_usage_scaling: false, ...current.proxy.experimental, ...updates } } };
+        latestConfig.current = next;
+        advancedDraftVersion.current += 1;
+        setAdvancedDirty(true); setAdvancedFeedback(null); setAppConfig(next);
     };
 
     const updateCircuitBreakerConfig = (newBreakerConfig: CircuitBreakerConfig) => {
@@ -772,7 +511,7 @@ client = Anthropic(
     api_key="${apiKey}"
 )
 
-# Note: Antigravity lets you call any model via the Anthropic SDK
+# Only published models compatible with this gateway protocol are listed.
 response = client.messages.create(
     model="${modelId}",
     max_tokens=1024,
@@ -801,7 +540,7 @@ print(response.text)`;
         }
 
         // 3. OpenAI Protocol — image generation models (any *-image model)
-        if (modelId.toLowerCase().includes('-image')) {
+        if (models.find(model => model.id === modelId)?.image_generation) {
             return `from openai import OpenAI
 
 client = OpenAI(
@@ -809,13 +548,8 @@ client = OpenAI(
     api_key="${apiKey}"
 )
 
-# IMPORTANT — model availability:
-#   "${modelId}" must be an image model your selected account actually has.
-#   Check the model list on the left: not every account exposes every image model
-#   (e.g. some accounts only have gemini-3.1-flash-image, not gemini-3-pro-image).
-#   Requesting a model the account lacks fails with:
-#     404 "Requested entity was not found"
-#   To keep using a different name, add an explicit mapping in the Model Routing Center.
+# This public ID is bound to an Antigravity image target in the registry.
+# Image capability and per-account quota are not proven by basic text checks.
 
 response = client.chat.completions.create(
     model="${modelId}",
@@ -825,8 +559,7 @@ response = client.chat.completions.create(
     #   "720x1280"  = 9:16  |   "1216x896" = 4:3
     extra_body={ "size": "1024x1024" },
 
-    # Aspect ratio — Option 2: a model-name suffix instead of size
-    #   model="${modelId}-16-9"   (also: -9-16, -4-3, -3-4)
+    # Use the exact published public ID; unpublished suffix aliases are rejected.
     messages=[{
         "role": "user",
         "content": "Draw a futuristic city"
@@ -854,298 +587,8 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)`;
     };
 
-    // 在 filter 逻辑中，当选择 openai 协议时，允许显示所有模型
-    const filteredModels = models.filter(model => {
-        if (selectedProtocol === 'openai') {
-            return true;
-        }
-        // Anthropic 协议下隐藏不支持的图片模型
-        if (selectedProtocol === 'anthropic') {
-            return !model.id.includes('image');
-        }
-        return true;
-    });
-
-    const renderModelRouterSection = () => {
-        if (!appConfig) return null;
-        return (
-            <div className="bg-white dark:bg-base-100 rounded-xl shadow-xs border border-gray-200/80 dark:border-base-200 overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-700/50 bg-gray-50/50 dark:bg-gray-800/50">
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div className="flex-1">
-                            <h2 className="text-base font-bold flex items-center gap-2 text-gray-900 dark:text-base-content">
-                                <BrainCircuit size={18} className="text-blue-500" />
-                                {t('proxy.router.title')}
-                            </h2>
-                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 max-w-xl leading-relaxed">
-                                {t('proxy.router.subtitle_simple')}
-                            </p>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2.5 bg-white dark:bg-base-100 p-1.5 rounded-xl border border-gray-100 dark:border-gray-700/50 shadow-sm">
-                            {/* 仅暴露真实配额模型开关 */}
-                            <label
-                                className="flex items-center gap-2 px-3 py-1 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50/80 dark:bg-base-200 cursor-pointer hover:bg-gray-100 dark:hover:bg-base-300 transition-colors h-9 select-none"
-                                title={t('proxy.router.only_raw_quota_models_tooltip')}
-                            >
-                                <span className="text-xs font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
-                                    {t('proxy.router.only_raw_quota_models')}
-                                </span>
-                                <input
-                                    type="checkbox"
-                                    className="toggle toggle-sm bg-gray-300 dark:bg-gray-700 border-gray-400 dark:border-gray-600 checked:bg-blue-600 checked:border-blue-600 cursor-pointer"
-                                    checked={appConfig.proxy.only_raw_quota_models ?? true}
-                                    onChange={(e) => updateProxyConfig({ only_raw_quota_models: e.target.checked })}
-                                />
-                            </label>
-
-                            {/* 预设选择下拉框 */}
-                            <div className="relative min-w-[140px]">
-                                <select
-                                    value={selectedPreset}
-                                    onChange={(e) => setSelectedPreset(e.target.value)}
-                                    className="select select-sm w-full bg-gray-50 dark:bg-base-200 border-gray-200 dark:border-gray-700 text-xs font-medium focus:ring-1 focus:ring-blue-500 h-9 min-h-0 rounded-lg"
-                                >
-                                    <optgroup label={t('proxy.router.built_in_presets')}>
-                                        {defaultPresets.map(preset => (
-                                            <option key={preset.id} value={preset.id}>
-                                                {preset.name}
-                                            </option>
-                                        ))}
-                                    </optgroup>
-                                    {customPresets.length > 0 && (
-                                        <optgroup label={t('proxy.router.custom_presets')}>
-                                            {customPresets.map(preset => (
-                                                <option key={preset.id} value={preset.id}>
-                                                    {preset.name}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                    )}
-                                </select>
-                            </div>
-
-                            <button
-                                onClick={handleApplyPresets}
-                                className="btn btn-sm btn-primary h-9 min-h-0 gap-1.5 shadow-sm text-xs"
-                            >
-                                <Check size={14} />
-                                {t('proxy.router.apply_selected')}
-                            </button>
-
-                            <button
-                                onClick={() => {
-                                    setNewPresetName('');
-                                    setIsPresetManagerOpen(true);
-                                }}
-                                className="btn btn-sm btn-outline border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 h-9 min-h-0 text-xs gap-1.5"
-                                title={t('proxy.router.add_preset')}
-                            >
-                                <Plus size={14} />
-                            </button>
-
-                            {selectedPreset && !['default', 'performance', 'cost-effective', 'balanced'].includes(selectedPreset) ? (
-                                <button
-                                    onClick={() => handleDeletePreset(selectedPreset)}
-                                    className="btn btn-sm btn-ghost text-error hover:bg-red-50 dark:hover:bg-red-900/20 h-9 min-h-0 p-2 text-xs"
-                                    title={t('proxy.router.delete_preset')}
-                                >
-                                    <Trash2 size={14} />
-                                </button>
-                            ) : null}
-
-                            <button
-                                onClick={handleResetMapping}
-                                className="btn btn-sm btn-ghost text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 h-9 min-h-0 p-2 text-xs"
-                                title={t('proxy.router.reset_mapping')}
-                            >
-                                <RefreshCw size={14} />
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="p-4 space-y-4">
-                    {/* Background Task Model Mapping */}
-                    <div className="bg-gray-50/50 dark:bg-white/5 p-3 rounded-xl border border-gray-100 dark:border-white/5">
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                            <div>
-                                <h3 className="text-xs font-bold text-gray-900 dark:text-white flex items-center gap-1.5">
-                                    <Sparkles size={14} className="text-blue-500" />
-                                    {t('proxy.router.background_task_title')}
-                                </h3>
-                                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-                                    {t('proxy.router.background_task_desc')}
-                                </p>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <div className="w-48 sm:w-60">
-                                    <GroupedSelect
-                                        value={appConfig.proxy.custom_mapping?.['internal-background-task'] || ''}
-                                        onChange={(val) => handleMappingUpdate('custom', 'internal-background-task', val)}
-                                        options={customMappingOptions}
-                                        placeholder={t('proxy.router.select_target_model') || 'Select Target Model'}
-                                        className="font-mono text-xs h-8 dark:bg-gray-800"
-                                        allowCustomInput={true}
-                                    />
-                                </div>
-                                {appConfig.proxy.custom_mapping && appConfig.proxy.custom_mapping['internal-background-task'] && (
-                                    <button
-                                        onClick={() => handleRemoveCustomMapping('internal-background-task')}
-                                        className="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"
-                                        title={t('proxy.router.use_default')}
-                                    >
-                                        <RefreshCw size={12} />
-                                    </button>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="flex items-center justify-between mb-3">
-                        <div className="flex flex-col gap-1">
-                            <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
-                                <ArrowRight size={14} /> {t('proxy.router.custom_mappings')}
-                            </h3>
-                            <p className="text-[9px] text-gray-500 dark:text-gray-400 leading-relaxed">
-                                {t('proxy.router.custom_mapping_tip')}
-                                <span className="text-amber-600 dark:text-amber-400">{t('proxy.router.custom_mapping_warning')}</span>
-                            </p>
-                        </div>
-                    </div>
-                    <div className="flex flex-col gap-4">
-                        {/* 当前映射列表 (置顶 2 列) */}
-                        <div className="w-full flex flex-col">
-                            <div className="flex items-center justify-between mb-2">
-                                <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                                    {t('proxy.router.current_list')}
-                                </span>
-                            </div>
-                            <div className="overflow-y-auto max-h-[180px] border border-gray-100 dark:border-white/5 rounded-lg bg-gray-50/10 dark:bg-white/5 p-3" data-custom-mapping-list>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
-                                    {appConfig.proxy.custom_mapping && Object.entries(appConfig.proxy.custom_mapping).length > 0 ? (
-                                        Object.entries(appConfig.proxy.custom_mapping).map(([key, val]) => (
-                                            <div key={key} className={`flex items-center justify-between p-1.5 rounded-md transition-all border group ${editingKey === key ? 'bg-blue-50/80 dark:bg-blue-900/15 border-blue-300/50 dark:border-blue-500/30 shadow-sm' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/5 hover:border-gray-200 dark:hover:border-white/10'}`}>
-                                                <div className="flex items-center gap-2 overflow-hidden flex-1">
-                                                    <div className="flex items-center gap-1.5 min-w-0">
-                                                        <span className="font-mono text-[10px] font-bold text-blue-600 dark:text-blue-400 truncate max-w-[140px]" title={key}>{key}</span>
-                                                    </div>
-                                                    <ArrowRight size={10} className="text-gray-300 dark:text-gray-600 shrink-0" />
-
-                                                    {editingKey === key ? (
-                                                        <div className="flex-1 mr-2">
-                                                            <GroupedSelect
-                                                                value={editingValue}
-                                                                onChange={setEditingValue}
-                                                                options={customMappingOptions}
-                                                                placeholder="Select..."
-                                                                className="font-mono text-[10px] h-7 dark:bg-gray-800 border-blue-200 dark:border-blue-800"
-                                                                allowCustomInput={true}
-                                                            />
-                                                        </div>
-                                                    ) : (
-                                                        <span className="font-mono text-[10px] text-gray-500 dark:text-gray-400 truncate cursor-pointer hover:text-blue-500"
-                                                            onClick={() => { setEditingKey(key); setEditingValue(val); }}
-                                                            title={val}>{val}</span>
-                                                    )}
-                                                </div>
-
-                                                <div className="flex items-center gap-1.5 shrink-0">
-                                                    {editingKey === key ? (
-                                                        <div className="flex items-center gap-1 bg-white dark:bg-gray-800 rounded-md border border-blue-200 dark:border-blue-800 p-0.5 shadow-sm">
-                                                            <button
-                                                                className="btn btn-ghost btn-xs text-primary hover:bg-blue-50 dark:hover:bg-blue-900/30 p-0 h-6 w-6 min-h-0"
-                                                                onClick={() => {
-                                                                    handleMappingUpdate('custom', key, editingValue);
-                                                                    setEditingKey(null);
-                                                                }}
-                                                                title={t('common.save') || 'Save'}
-                                                            >
-                                                                <Check size={14} strokeWidth={3} />
-                                                            </button>
-                                                            <div className="w-[1px] h-3 bg-gray-200 dark:bg-gray-700" />
-                                                            <button
-                                                                className="btn btn-ghost btn-xs text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 p-0 h-6 w-6 min-h-0"
-                                                                onClick={() => setEditingKey(null)}
-                                                                title={t('common.cancel') || 'Cancel'}
-                                                            >
-                                                                <X size={14} strokeWidth={3} />
-                                                            </button>
-                                                        </div>
-                                                    ) : (
-                                                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                            <button
-                                                                className="btn btn-ghost btn-xs text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-white/10 p-0 h-6 w-6 min-h-0"
-                                                                onClick={() => { setEditingKey(key); setEditingValue(val); }}
-                                                                title={t('common.edit') || 'Edit'}
-                                                            >
-                                                                <Edit2 size={12} />
-                                                            </button>
-                                                            <button
-                                                                className="btn btn-ghost btn-xs text-error hover:bg-red-50 dark:hover:bg-red-900/20 p-0 h-6 w-6 min-h-0"
-                                                                onClick={() => handleRemoveCustomMapping(key)}
-                                                                title={t('common.delete') || 'Delete'}
-                                                            >
-                                                                <Trash2 size={12} />
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        ))
-                                    ) : (
-                                        <div className="col-span-full text-center py-4 text-gray-400 dark:text-gray-600 italic text-[11px]">{t('proxy.router.no_custom_mapping')}</div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* 添加映射表单 (置底单行) */}
-                        <div className="w-full bg-gray-50/50 dark:bg-white/5 p-2.5 rounded-xl border border-gray-100 dark:border-white/5 shadow-inner">
-                            <div className="flex flex-col sm:flex-row items-center gap-3">
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                    <Target size={14} className="text-gray-400 dark:text-gray-500" />
-                                    <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">{t('proxy.router.add_mapping')}</span>
-                                </div>
-                                <div className="flex-1 flex flex-col sm:flex-row gap-2 w-full">
-                                    <input
-                                        id="custom-key"
-                                        type="text"
-                                        placeholder={t('proxy.router.original_placeholder') || "Original (e.g. gpt-4 or gpt-4*)"}
-                                        className="input input-xs input-bordered flex-1 font-mono text-[11px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all placeholder:text-gray-400 dark:placeholder:text-gray-600 h-8"
-                                    />
-                                    <div className="w-full sm:w-48">
-                                        <GroupedSelect
-                                            value={customMappingValue}
-                                            onChange={setCustomMappingValue}
-                                            options={customMappingOptions}
-                                            placeholder={t('proxy.router.select_target_model') || 'Select Target Model'}
-                                            className="font-mono text-[11px] h-8 dark:bg-gray-800"
-                                            allowCustomInput={true}
-                                        />
-                                    </div>
-                                </div>
-                                <button
-                                    className="btn btn-xs sm:w-20 gap-1.5 shadow-md hover:shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white border-none h-8"
-                                    onClick={() => {
-                                        const k = (document.getElementById('custom-key') as HTMLInputElement).value;
-                                        const v = customMappingValue;
-                                        if (k && v) {
-                                            handleMappingUpdate('custom', k, v);
-                                            (document.getElementById('custom-key') as HTMLInputElement).value = '';
-                                            setCustomMappingValue(''); // 清空选择
-                                        }
-                                    }}
-                                >
-                                    <Plus size={14} />
-                                    {t('common.add')}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        );
-    };
+    // Compatibility follows the registered source/native target, never an alias.
+    const filteredModels = models.filter(model => model.protocols.includes(selectedProtocol));
 
     const renderMultiProtocolSection = () => {
         if (!appConfig) return null;
@@ -1270,7 +713,7 @@ print(response.choices[0].message.content)`;
                         <Terminal size={18} />
                         {t('proxy.supported_models.title')}
                     </h2>
-                    {(appConfig.proxy.only_raw_quota_models ?? true) && <p className="text-xs text-gray-500 mt-1">{t('proxy.supported_models.upstream_notice')}</p>}
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">仅已上架且启用的来源绑定；按当前协议筛选。WB 不提供 Gemini 协议。 / Published bindings compatible with the selected protocol only; WB has no Gemini endpoint.</p>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-0 lg:divide-x dark:divide-gray-700">
@@ -1283,7 +726,7 @@ print(response.choices[0].message.content)`;
                                         <th className="w-10 pl-3"></th>
                                         <th className="text-[11px] font-medium">{t('proxy.supported_models.model_name')}</th>
                                         <th className="text-[11px] font-medium">{t('proxy.supported_models.model_id')}</th>
-                                        <th className="text-[11px] hidden sm:table-cell font-medium">{t('proxy.supported_models.description')}</th>
+                                        <th className="text-[11px] hidden sm:table-cell font-medium">来源 / 原生目标 · Source / Target</th>
                                         <th className="text-[11px] w-20 text-center font-medium">{t('proxy.supported_models.action')}</th>
                                     </tr>
                                 </thead>
@@ -1296,11 +739,12 @@ print(response.choices[0].message.content)`;
                                             onClick={() => setSelectedModelId(m.id)}
                                         >
                                             <td className="pl-4 text-blue-500">{m.icon}</td>
-                                            <td className="font-bold text-xs">{m.name}</td>
+                                            <td className="font-bold text-xs"><button type="button" className="rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500" aria-pressed={selectedModelId === m.id} onClick={() => setSelectedModelId(m.id)}>{m.name}</button><span className="block mt-1 font-normal text-[10px] text-gray-500 dark:text-gray-400 sm:hidden">{m.source_name} → {m.native_model}</span></td>
                                             <td className="font-mono text-[10px] text-gray-500">{m.id}</td>
                                             <td className="text-[10px] text-gray-400 hidden sm:table-cell">{m.desc}</td>
                                             <td className="text-center">
                                                 <button
+                                                    type="button" aria-label={`${t('common.copy')} ${m.id}`}
                                                     className="btn btn-ghost btn-xs text-blue-500"
                                                     onClick={(e) => {
                                                         e.stopPropagation();
@@ -1436,28 +880,17 @@ print(response.choices[0].message.content)`;
                                 </button>
                             </div>
 
-                            {/* 控制按钮 */}
-                            <div className="flex items-center gap-2.5 ml-auto">
-                                <button
-                                    onClick={handleSaveProxySettings}
-                                    disabled={!appConfig}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white shadow-xs active:scale-95 ${!appConfig ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                >
-                                    <Save size={14} />
-                                    {t('settings.save')}
+                            {/* 服务操作不与模型目录的即时保存混用 */}
+                            {activeMenuTab === 'settings' && <div className="flex items-center gap-2.5 ml-auto">
+                                <button onClick={handleSaveProxySettings} disabled={!appConfig}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white shadow-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500">
+                                    <Save size={14} />{t('settings.save')}
                                 </button>
-                                <button
-                                    onClick={handleToggle}
-                                    disabled={loading || !appConfig}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 shadow-xs active:scale-95 ${status.running
-                                        ? 'bg-rose-600 hover:bg-rose-700 text-white border border-rose-600'
-                                        : 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-600'
-                                        } ${(loading || !appConfig) ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                >
-                                    <Power size={14} />
-                                    {loading ? t('proxy.status.processing') : (status.running ? t('proxy.action.stop') : t('proxy.action.start'))}
+                                <button onClick={handleToggle} disabled={loading || !appConfig}
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 ${status.running ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'} ${(loading || !appConfig) ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                                    <Power size={14} />{loading ? t('proxy.status.processing') : (status.running ? t('proxy.action.stop') : t('proxy.action.start'))}
                                 </button>
-                            </div>
+                            </div>}
                         </div>
 
                         {/* TAB 1: 服务配置 (settings) */}
@@ -1873,63 +1306,41 @@ print(response.choices[0].message.content)`;
 
                         {/* TAB: 模型配置 (models) */}
                         {activeMenuTab === 'models' && (
-                            <div className="p-4 space-y-4">
-                                {/* 思考设置 (Thinking & Reasoning Settings) - 默认收起 */}
-                                <CollapsibleCard
-                                    title={t('proxy.config.thinking_settings.title', { defaultValue: '思考设置 (Thinking Settings)' })}
-                                    icon={<BrainCircuit size={18} className="text-purple-500" />}
-                                    defaultExpanded={false}
-                                >
-                                    <ThinkingBudget
-                                        config={appConfig.proxy.thinking_budget}
-                                        onChange={(tbConfig) => updateProxyConfig({ thinking_budget: tbConfig })}
-                                        onSave={handleSaveProxySettings}
-                                        thinkingStoreEnabled={appConfig.proxy.experimental?.thinking_store_enabled !== false}
-                                        onThinkingStoreChange={(enabled) =>
-                                            updateExperimentalConfig({ thinking_store_enabled: enabled })
-                                        }
-                                        thinkingMaxMemoryTurns={appConfig.proxy.experimental?.thinking_max_memory_turns ?? 600}
-                                        onThinkingMaxMemoryTurnsChange={(turns: number) =>
-                                            updateExperimentalConfig({ thinking_max_memory_turns: turns })
-                                        }
-                                        thinkingRetentionDays={appConfig.proxy.experimental?.thinking_retention_days ?? 15}
-                                        onThinkingRetentionDaysChange={(days: number) =>
-                                            updateExperimentalConfig({ thinking_retention_days: days })
-                                        }
-                                    />
-                                </CollapsibleCard>
-
-                                {/* 多模态交互设置 (Multimodal Settings) - 默认收起 */}
-                                <CollapsibleCard
-                                    title={t('proxy.config.multimodal_settings.title', { defaultValue: '多模态交互设置 (Multimodal Settings)' })}
-                                    icon={<Sparkles size={18} className="text-pink-500" />}
-                                    defaultExpanded={false}
-                                >
-                                    <MultimodalSettings
-                                        config={appConfig.proxy.multimodal}
-                                        onChange={(mConfig) => updateProxyConfig({ multimodal: mConfig })}
-                                        onSave={handleSaveProxySettings}
-                                    />
-                                </CollapsibleCard>
-
-                                {/* 特定 Agent 特性配置 (Specific Agent Settings) - 默认收起 */}
-                                <CollapsibleCard
-                                    title={t('proxy.config.agent_settings.title', { defaultValue: '特定 Agent 配置 (Specific Agent Settings)' })}
-                                    icon={<Bot size={18} className="text-cyan-500" />}
-                                    defaultExpanded={false}
-                                >
-                                    <AgentSettings
-                                        experimentalConfig={appConfig.proxy.experimental}
-                                        onChange={updateExperimentalConfig}
-                                        onSave={handleSaveProxySettings}
-                                    />
-                                </CollapsibleCard>
-
-                                {/* 模型路由中心 紧随其后 */}
-                                <CollapsibleCard defaultExpanded={showWorkBuddy} title={t('workbuddy.title')} icon={<Share2 size={18} className="text-blue-500" />}>
-                                    <WorkBuddySettings onSaved={refreshModels} />
-                                </CollapsibleCard>
-                                {renderModelRouterSection()}
+                            <div className="p-4 min-w-0">
+                                <ModelRegistryPanel initialTab={showWorkBuddy ? 'advanced' : undefined} advancedContent={<div className="space-y-3">
+                                    <CollapsibleCard title="来源配置 / Source configuration" defaultExpanded={showWorkBuddy} icon={<Settings size={18} className="text-blue-500" />}>
+                                        <SourceSettings />
+                                    </CollapsibleCard>
+                                    <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
+                                        <div><h3 className="text-sm font-semibold">AG 高级设置 / Advanced settings</h3><p className="text-xs text-gray-500 dark:text-gray-400">{advancedDirty ? '草稿尚未保存 / Unsaved draft' : '修改后请保存；与来源配置独立保存 / Save changes separately from source settings'}</p></div>
+                                        <button type="button" className="registry-btn registry-primary" disabled={advancedSaving || !advancedDirty} onClick={() => void handleSaveAdvancedSettings().catch(() => {})}><Save size={14} aria-hidden />{advancedSaving ? '保存中 / Saving…' : '保存高级设置 / Save advanced'}</button>
+                                    </div>
+                                    {advancedFeedback && <p role={advancedFeedback.error ? 'alert' : 'status'} className={`registry-notice ${advancedFeedback.error ? 'registry-notice-error' : ''}`}>{advancedFeedback.message}</p>}
+                                    <fieldset disabled={advancedSaving} className="min-w-0 space-y-3" aria-busy={advancedSaving}>
+                                        <CollapsibleCard title="Antigravity · 思考预算与缓存 / Thinking budget & cache" icon={<BrainCircuit size={18} className="text-purple-500" />}>
+                                            <p className="registry-muted mb-4">仅 AG 思考参数和缓存；实际推理能力取决于模型与请求。WB 尚未接入，不能重放 AG 思考签名。 / AG thinking pipeline only; model support required. Not integrated with WB; never replay AG signatures to WB.</p>
+                                            <ThinkingBudget config={appConfig.proxy.thinking_budget} onChange={config => updateAdvancedProxyConfig({ thinking_budget: config })} onSave={handleSaveAdvancedSettings}
+                                                thinkingStoreEnabled={appConfig.proxy.experimental?.thinking_store_enabled !== false} onThinkingStoreChange={enabled => updateExperimentalConfig({ thinking_store_enabled: enabled })}
+                                                thinkingMaxMemoryTurns={appConfig.proxy.experimental?.thinking_max_memory_turns ?? 600} onThinkingMaxMemoryTurnsChange={turns => updateExperimentalConfig({ thinking_max_memory_turns: turns })}
+                                                thinkingRetentionDays={appConfig.proxy.experimental?.thinking_retention_days ?? 15} onThinkingRetentionDaysChange={days => updateExperimentalConfig({ thinking_retention_days: days })} />
+                                        </CollapsibleCard>
+                                        <CollapsibleCard title="Antigravity · 多模态交互 / Multimodal" icon={<Sparkles size={18} className="text-pink-500" />}>
+                                            <p className="registry-muted mb-4">AG 多模态处理链路；图片、音频或视频依赖目标模型和请求类型。WB 对应网关处理尚未接入，不代表原生不支持。 / AG pipeline only; modalities depend on the target. Equivalent WB gateway processing is not integrated, not proof of native absence.</p>
+                                            <MultimodalSettings config={appConfig.proxy.multimodal} onChange={config => updateAdvancedProxyConfig({ multimodal: config })} onSave={handleSaveAdvancedSettings} />
+                                        </CollapsibleCard>
+                                        <CollapsibleCard title="Antigravity · Agent 与客户端 / Agent & client" icon={<Bot size={18} className="text-cyan-500" />}>
+                                            <p className="registry-muted mb-4">压缩仅针对服务端识别的 Cowork 会话与 AG 请求路径；WB 尚未接入。 / Compression applies to recognized Cowork traffic on the AG path; WB not integrated.</p>
+                                            {isTauri() ? <AgentSettings experimentalConfig={appConfig.proxy.experimental} onChange={updateExperimentalConfig} onSave={handleSaveAdvancedSettings} /> : <ServerAgentSettings config={appConfig.proxy.experimental} onChange={updateExperimentalConfig} />}
+                                        </CollapsibleCard>
+                                        <CollapsibleCard title="Antigravity · 图像思考与全局提示词 / Image thinking & global prompt" icon={<Sparkles size={18} className="text-pink-500" />}>
+                                            <p className="registry-muted mb-4">「全局」指 AG 链路适用请求，不会自动作用于 WB。图像思考需目标图像模型和请求路径支持，不证明原生能力。 / Global within applicable AG requests, not WB. Image thinking requires a compatible image target and request path; not capability evidence.</p>
+                                            <div className="space-y-4">
+                                                <ImageThinkingMode value={appConfig.proxy.image_thinking_mode || 'enabled'} onChange={value => updateAdvancedProxyConfig({ image_thinking_mode: value })} />
+                                                <div className="pt-4 border-t border-gray-100 dark:border-base-300"><GlobalSystemPrompt config={appConfig.proxy.global_system_prompt || { enabled: false, content: '' }} onChange={config => updateAdvancedProxyConfig({ global_system_prompt: config })} /></div>
+                                            </div>
+                                        </CollapsibleCard>
+                                    </fieldset>
+                                </div>} />
                             </div>
                         )}
 
@@ -2084,7 +1495,6 @@ print(response.choices[0].message.content)`;
                                                         {t('proxy.config.scheduling.start_proxy_first', { defaultValue: 'Start the proxy service to configure fixed account mode.' })}
                                                     </p>
                                                 )}
-                                                <WorkBuddyScheduling />
                                             </div>
                                         </div>
                                     </div>
@@ -2117,42 +1527,12 @@ print(response.choices[0].message.content)`;
                                 </div>
                             </CollapsibleCard>
 
-                            {/* 全局提示词与多模态设置 (Global Prompt & Multimodal Config) */}
-                            <CollapsibleCard
-                                title={t('proxy.config.prompt_multimodal.title', { defaultValue: '全局提示词与多模态设置 (Prompt & Multimodal)' })}
-                                icon={<Sparkles size={18} className="text-pink-500" />}
-                            >
-                                <div className="space-y-4">
-                                    {/* 图像思维模式 */}
-                                    <ImageThinkingMode
-                                        value={appConfig.proxy.image_thinking_mode || 'enabled'}
-                                        onChange={(newValue) => updateProxyConfig({ image_thinking_mode: newValue })}
-                                    />
-                                    {/* 全局系统提示词 */}
-                                    <div className="pt-4 border-t border-gray-100 dark:border-base-300">
-                                        <GlobalSystemPrompt
-                                            config={appConfig.proxy.global_system_prompt || { enabled: false, content: '' }}
-                                            onChange={(newConfig) => updateProxyConfig({ global_system_prompt: newConfig })}
-                                        />
-                                    </div>
-                                </div>
-                            </CollapsibleCard>
-
                         </div>
                     )
                 }
 
 
                 {/* 各种对话框 */}
-                <ModalDialog
-                    isOpen={isResetConfirmOpen}
-                    title={t('proxy.dialog.reset_mapping_title') || '重置映射'}
-                    message={t('proxy.dialog.reset_mapping_msg') || '确定要重置所有模型映射为系统默认吗？'}
-                    type="confirm"
-                    isDestructive={true}
-                    onConfirm={executeResetMapping}
-                    onCancel={() => setIsResetConfirmOpen(false)}
-                />
 
                 <ModalDialog
                     isOpen={isRegenerateKeyConfirmOpen}
@@ -2184,76 +1564,6 @@ print(response.choices[0].message.content)`;
                     onCancel={() => setIsClearRateLimitsConfirmOpen(false)}
                 />
 
-                <ModalDialog
-                    isOpen={isPresetManagerOpen}
-                    title={t('proxy.router.manage_presets_title')}
-                    onConfirm={() => setIsPresetManagerOpen(false)}
-                    confirmText={t('common.close')}
-                    type="info"
-                >
-                    <div className="space-y-6">
-                        {/* Save Current Section */}
-                        <div className="space-y-3 p-4 bg-blue-50/50 dark:bg-blue-900/10 rounded-xl border border-blue-100 dark:border-blue-900/20">
-                            <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200 flex items-center gap-2">
-                                <Save size={16} className="text-blue-500" />
-                                {t('proxy.router.save_current_as_preset')}
-                            </h3>
-                            <div className="flex gap-2">
-                                <input
-                                    type="text"
-                                    value={newPresetName}
-                                    onChange={(e) => setNewPresetName(e.target.value)}
-                                    placeholder={t('proxy.router.preset_name_placeholder')}
-                                    className="input input-sm flex-1 border-gray-300 focus:border-blue-500"
-                                />
-                                <button
-                                    onClick={handleSaveCurrentAsPreset}
-                                    disabled={!newPresetName.trim()}
-                                    className="btn btn-sm btn-primary text-white"
-                                >
-                                    {t('common.save')}
-                                </button>
-                            </div>
-                            <p className="text-[10px] text-gray-500 dark:text-gray-400">
-                                {t('proxy.router.save_hint')}
-                            </p>
-                        </div>
-
-                        {/* Existing Presets List */}
-                        <div className="space-y-3">
-                            <h3 className="text-sm font-bold text-gray-800 dark:text-gray-200 px-1">
-                                {t('proxy.router.your_presets')}
-                            </h3>
-                            <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1">
-                                {customPresets.length === 0 ? (
-                                    <div className="text-center py-8 text-gray-400 dark:text-gray-600 bg-gray-50 dark:bg-base-200 rounded-xl border border-dashed border-gray-200 dark:border-gray-700">
-                                        <p>{t('proxy.router.no_custom_presets')}</p>
-                                    </div>
-                                ) : (
-                                    customPresets.map(preset => (
-                                        <div key={preset.id} className="flex items-center justify-between p-3 bg-white dark:bg-base-200 border border-gray-100 dark:border-gray-700 rounded-xl hover:shadow-sm transition-all group">
-                                            <div className="flex-1 min-w-0">
-                                                <div className="font-bold text-sm text-gray-800 dark:text-gray-200 truncate">{preset.name}</div>
-                                                <div className="text-[10px] text-gray-400 dark:text-gray-500 truncate">
-                                                    {Object.keys(preset.mappings).length} {t('proxy.router.mappings_count')}
-                                                </div>
-                                            </div>
-                                            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                <button
-                                                    onClick={() => handleDeletePreset(preset.id)}
-                                                    className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
-                                                    title={t('common.delete')}
-                                                >
-                                                    <Trash2 size={16} />
-                                                </button>
-                                            </div>
-                                        </div>
-                                    ))
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </ModalDialog>
             </div >
         </div >
     );

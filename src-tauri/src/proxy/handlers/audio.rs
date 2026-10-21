@@ -49,6 +49,12 @@ pub async fn handle_audio_transcription(
         }
     }
 
+    let published = crate::proxy::middleware::model_registry::antigravity_model(&model)?;
+    model = crate::proxy::common::model_mapping::published_antigravity_target(
+        &published,
+        &*state.custom_mapping.read().await,
+        None,
+    );
     let audio_bytes = audio_data.ok_or((StatusCode::BAD_REQUEST, "缺少音频文件".to_string()))?;
 
     let file_name = filename.ok_or((StatusCode::BAD_REQUEST, "无法获取文件名".to_string()))?;
