@@ -22,6 +22,7 @@ ROOT = Path('/opt/antigravity-manager')
 BACKUPS = Path('/opt/antigravity-manager-backups')
 IMAGE = 'ghcr.io/david-yang-pixel/antigravity-tools-custom'
 CONTAINER = 'antigravity-manager'
+REGISTRY = 'data/model_registry.json'
 
 
 def parse_command(command):
@@ -78,7 +79,46 @@ def verify_portal_response(overview):
         raise RuntimeError('Portal billing response invalid')
 
 
-def verify(image, version):
+def publishable(model):
+    """Mirrors the registry's public ID rule; other IDs are skipped with a notice."""
+    model = model[len('models/'):] if model.startswith('models/') else model
+    if not model or len(model.encode()) > 512 or any(
+            c.isspace() or ord(c) < 32 or 127 <= ord(c) < 160 or c in '*?[]{}' for c in model):
+        return None
+    return model
+
+
+def billable_models(db):
+    """Exact priced and per-key free models: what user keys could already call."""
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    models = set()
+    if 'model_prices' in tables:
+        models.update(row[0] for row in db.execute('SELECT pattern FROM model_prices'))
+    for (free,) in db.execute('SELECT free_models FROM user_tokens'):
+        try:
+            entries = json.loads(free or '[]')
+        except ValueError:
+            continue
+        if isinstance(entries, list):
+            models.update(entry for entry in entries if isinstance(entry, str))
+    return {model for model in map(publishable, models) if model}
+
+
+def verify_model_registry(registry, required=()):
+    """Public inference is closed unless the registry loads; a first migration must keep billable models."""
+    if not isinstance(registry, dict) or not isinstance(registry.get('published_models'), list):
+        raise RuntimeError('Model registry response invalid')
+    published = {model.get('public_id') for model in registry['published_models']
+                 if isinstance(model, dict) and model.get('enabled') is True}
+    if not published:
+        raise RuntimeError('Model registry has no enabled published models')
+    missing = sorted(set(required) - published)
+    if missing:
+        raise RuntimeError(f'Model registry migration dropped {len(missing)} billable model(s): '
+                           + ', '.join(missing[:5]))
+
+
+def verify(image, version, first_registry=False):
     state = json.loads(run(['docker', 'inspect', CONTAINER], capture_output=True).stdout)[0]
     if state['Image'] != inspect_image(image)['Id'] or state['State']['Health']['Status'] != 'healthy':
         raise RuntimeError('Running image or container health did not match')
@@ -110,6 +150,9 @@ def verify(image, version):
         if not {'balance_micros', 'free_models', 'max_concurrency'} <= columns:
             raise RuntimeError('Token schema migration missing')
         user = db.execute('SELECT token FROM user_tokens WHERE enabled = 1 LIMIT 1').fetchone()
+        # Later deployments respect deliberate unpublication; only the cutover must keep them.
+        required = billable_models(db) if first_registry else set()
+    verify_model_registry(request('http://127.0.0.1:8045', '/api/model-registry', key=admin), required)
     if user:
         overview = request('http://127.0.0.1:8045', '/api/token-portal/me', key=user[0])
         verify_portal_response(overview)
@@ -148,6 +191,8 @@ def deploy(image, revision, credential):
     stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '-' + revision[:12]
     backup = BACKUPS / stamp
     backup.mkdir(mode=0o700)
+    registry = ROOT / REGISTRY
+    first_registry = not registry.exists()
     shutil.copy2(ROOT / 'compose.yaml', backup / 'compose.yaml')
     shutil.copy2(ROOT / '.env', backup / '.env')
     # Stop before archiving SQLite + WAL, so the snapshot is internally consistent.
@@ -156,9 +201,9 @@ def deploy(image, revision, credential):
         run(['tar', '-czf', str(backup / 'data.tar.gz'), '-C', str(ROOT), 'data', 'machine-id'])
         (ROOT / 'compose.yaml').write_text(updated)
         compose('up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', CONTAINER)
-        verify(image, version)
+        verify(image, version, first_registry)
         time.sleep(10)
-        verify(image, version)
+        verify(image, version, first_registry)
     except BaseException:
         (ROOT / 'compose.yaml').write_text(original)
         try:
@@ -166,6 +211,13 @@ def deploy(image, revision, credential):
             print('Previous image restored. Data retained; snapshot available at ' + str(backup), flush=True)
         except Exception:
             print('Automatic rollback failed; manual recovery required from ' + str(backup), flush=True)
+        # A registry created by a failed cutover would stop the next deploy from migrating
+        # current data again. Set it aside (never delete) once the new image has stopped.
+        if first_registry and registry.exists():
+            try:
+                shutil.move(str(registry), str(backup / 'model_registry.json'))
+            except OSError:
+                print('Move ' + str(registry) + ' aside before redeploying so the migration runs again', flush=True)
         raise
     (ROOT / 'last-deployment.json').write_text(json.dumps({
         'revision': revision, 'image': image, 'backup': str(backup), 'verified_at': stamp,

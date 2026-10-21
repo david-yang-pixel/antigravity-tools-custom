@@ -72,6 +72,14 @@ The helper validates the current balance-billing schema (`balance_micros`,
 `free_models`, `max_concurrency`) and portal response. `smoke.py` imports the same
 portal validator and exercises it against the built server before publication;
 legacy quota and allowlist fields are not part of this API contract.
+It also requires `GET /api/model-registry` to load with at least one enabled
+published model; public inference is closed when the registry cannot load. On
+the deployment that first creates `data/model_registry.json`, every exact priced
+model and per-key free model must be published. If that cutover fails, the
+previous image is restored and the newly created registry is moved into the
+backup directory, so the next deployment migrates current data again. Later
+deployments do not require priced models to stay published, because unpublishing
+is a deliberate administrator action.
 
 The existing `/opt/antigravity-manager/compose.yaml`, `.env`, Nginx, port mapping,
 resource limits and data directory are reused. The old container's machine ID

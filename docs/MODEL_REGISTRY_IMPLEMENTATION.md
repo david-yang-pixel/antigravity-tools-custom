@@ -212,6 +212,9 @@ real production probes require a separate explicit action.
   the registry notices; the bare ID keeps its own binding. Unreadable sources,
   invalid WorkBuddy configuration and aggregate limits still fail, because
   migrating without a source would silently and permanently drop its models.
+- The production deployment helper verifies the registry and, on the first
+  cutover, that every exact priced and free model is published; otherwise it
+  restores the previous image (see `deploy/stellar/README.md`).
 - Verification requires selected candidates and explicit upstream-usage consent.
   Antigravity probes use the normal outbound normalization and proxy selection
   with endpoint/compatibility retries disabled. HTTP endpoint errors alone are
