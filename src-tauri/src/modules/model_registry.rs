@@ -168,6 +168,33 @@ struct Discovery {
     // Account identifiers are transient and never serialized as discovery data.
     all_accounts: HashMap<String, HashSet<String>>,
     eligible_accounts: HashMap<String, HashSet<String>>,
+    // Per-item data that can never form a valid binding; shown to admins as notices.
+    skipped: Vec<String>,
+}
+
+const MAX_SKIP_NOTICES: usize = 50;
+
+impl Discovery {
+    /// One malformed ID must not close the whole registry. Aggregate limits and
+    /// unreadable sources remain hard errors in their callers.
+    fn skip(&mut self, kind: &str, value: &str) {
+        if self.skipped.len() < MAX_SKIP_NOTICES {
+            let shown: String = value.chars().take(128).collect();
+            self.skipped.push(format!("Skipped {kind} {shown:?}."));
+        } else if self.skipped.len() == MAX_SKIP_NOTICES {
+            self.skipped
+                .push("Further skipped model IDs are not listed.".into());
+        }
+    }
+
+    /// `None` when the native ID is invalid for its source; the item is skipped.
+    fn record(&mut self, source: &str, native: &str) -> Result<Option<String>, String> {
+        if validate_native(source, native).is_err() {
+            self.skip("invalid native model ID", native);
+            return Ok(None);
+        }
+        insert_record(&mut self.records, source, native).map(Some)
+    }
 }
 
 /// Length-independent, reversible source/native encoding; no delimiter ambiguity or hashing
@@ -436,6 +463,7 @@ fn discover() -> Result<Discovery, String> {
         observations: HashMap::new(),
         all_accounts: HashMap::new(),
         eligible_accounts: HashMap::new(),
+        skipped: Vec::new(),
     };
     for a in ag {
         discovery
@@ -456,7 +484,9 @@ fn discover() -> Result<Discovery, String> {
                 return Err("Model discovery metadata limit exceeded".into());
             }
             for model in quota.models {
-                let id = insert_record(&mut discovery.records, ANTIGRAVITY_SOURCE, &model.name)?;
+                let Some(id) = discovery.record(ANTIGRAVITY_SOURCE, &model.name)? else {
+                    continue;
+                };
                 if eligible {
                     discovery
                         .observations
@@ -513,7 +543,9 @@ fn discover() -> Result<Discovery, String> {
             .chain(a.unavailable_models.iter().map(String::as_str))
             .collect();
         for native in natives {
-            let id = insert_record(&mut discovery.records, WORKBUDDY_SOURCE, native)?;
+            let Some(id) = discovery.record(WORKBUDDY_SOURCE, native)? else {
+                continue;
+            };
             if eligible {
                 let verified_at = a.verified_models.get(native).copied().filter(|at| *at > 0);
                 let unavailable = a.unavailable_models.contains(native);
@@ -544,8 +576,9 @@ fn discover() -> Result<Discovery, String> {
             }
         }
     }
-    for native in discovery.settings.models.values() {
-        insert_record(&mut discovery.records, WORKBUDDY_SOURCE, native)?;
+    let configured: Vec<_> = discovery.settings.models.values().cloned().collect();
+    for native in configured {
+        discovery.record(WORKBUDDY_SOURCE, &native)?;
     }
     Ok(discovery)
 }
@@ -594,15 +627,25 @@ fn catalog_routes(
     for original in names {
         let public = normalized_public_id(&original);
         if !valid_id(public, MAX_ID_BYTES) {
-            return Err("Invalid legacy catalog public model ID".into());
+            discovery.skip("invalid legacy public model ID", &original);
+            continue;
         }
         let (source, native) = legacy_target(&original, mapping, &discovery.settings);
-        insert_record(&mut discovery.records, &source, &native)?;
-        // Prefix-equivalent catalog entries must not hide conflicting bindings.
-        if let Some(previous) = routes.insert(public.to_string(), (source.clone(), native.clone()))
-        {
-            if previous != (source, native) {
-                return Err("Conflicting legacy models/ prefix aliases".into());
+        if discovery.record(&source, &native)?.is_none() {
+            continue;
+        }
+        // A `models/` alias that binds elsewhere never replaces the bare ID's binding.
+        match routes.get(public) {
+            Some(previous) if previous != &(source.clone(), native.clone()) => {
+                let alias = format!("models/{public}");
+                discovery.skip("conflicting models/ prefix alias", &alias);
+                if original == public {
+                    routes.insert(public.to_string(), (source, native));
+                }
+            }
+            Some(_) => {}
+            None => {
+                routes.insert(public.to_string(), (source, native));
             }
         }
     }
@@ -711,6 +754,12 @@ fn initialize(
     ids.sort();
     ids.dedup();
     let routes = catalog_routes(&ids, mapping, discovery)?;
+    if !discovery.skipped.is_empty() {
+        tracing::warn!(
+            skipped = discovery.skipped.len(),
+            "Model registry migration skipped invalid model IDs; see the model registry notices"
+        );
+    }
     let store = StoredRegistry {
         schema_version: SCHEMA_VERSION,
         revision: 1,
@@ -965,17 +1014,23 @@ fn candidate_view(
     }
 }
 fn make_view(store: &StoredRegistry, discovery: &Discovery) -> ModelRegistryView {
+    let mut notices: Vec<String> = vec![
+        "Discovery never publishes new models after the one-time legacy migration.".into(),
+        "Verification proves basic text only; reasoning, vision and tools are not verified.".into(),
+        "Legacy publications retain their original billing IDs without fabricated verification evidence.".into(),
+    ];
+    notices.extend(discovery.skipped.iter().cloned());
     ModelRegistryView {
         schema_version: store.schema_version,
         revision: store.revision,
         sources: discovery.sources.clone(),
-        candidates: store.candidates.iter().map(|record| candidate_view(record, store, discovery)).collect(),
+        candidates: store
+            .candidates
+            .iter()
+            .map(|record| candidate_view(record, store, discovery))
+            .collect(),
         published_models: store.published_models.clone(),
-        notices: vec![
-            "Discovery never publishes new models after the one-time legacy migration.".into(),
-            "Verification proves basic text only; reasoning, vision and tools are not verified.".into(),
-            "Legacy publications retain their original billing IDs without fabricated verification evidence.".into(),
-        ],
+        notices,
     }
 }
 

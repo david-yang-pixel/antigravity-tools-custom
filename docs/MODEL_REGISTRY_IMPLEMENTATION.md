@@ -207,6 +207,11 @@ real production probes require a separate explicit action.
   billing/free-rule identity. Same-name provider discoveries cannot steal routes.
 - Registry errors deny public access. Administrative endpoints remain available;
   malformed files require operator repair rather than silent legacy fallback.
+- One malformed input item (invalid public ID, invalid native target, or a
+  `models/` alias that binds elsewhere than its bare ID) is skipped and listed in
+  the registry notices; the bare ID keeps its own binding. Unreadable sources,
+  invalid WorkBuddy configuration and aggregate limits still fail, because
+  migrating without a source would silently and permanently drop its models.
 - Verification requires selected candidates and explicit upstream-usage consent.
   Antigravity probes use the normal outbound normalization and proxy selection
   with endpoint/compatibility retries disabled. HTTP endpoint errors alone are

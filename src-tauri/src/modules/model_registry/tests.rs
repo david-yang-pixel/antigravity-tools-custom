@@ -804,6 +804,54 @@ fn migration_keeps_exact_priced_and_free_models_that_were_never_called() {
 }
 
 #[test]
+fn invalid_items_are_skipped_with_notices_instead_of_closing_the_registry() {
+    let _dir = Sandbox::new();
+    seed_ag(&["bad native", "GoodNative"]);
+    let mapping = HashMap::from([
+        ("bad key".into(), "Native".into()),
+        ("BadTarget".into(), "has space".into()),
+        ("Good".into(), "GoodNative".into()),
+        ("models/Dual".into(), "AliasNative".into()),
+    ]);
+    let legacy = ids(&["Dual", "models/Dual", "Odd?"]);
+    let registry = view(&legacy, &mapping).unwrap();
+    let published = published_ids().unwrap();
+    assert!(published.contains(&"Good".into()));
+    assert!(published.contains(&"Dual".into()));
+    for skipped in ["bad key", "BadTarget", "Odd?"] {
+        assert!(
+            !published.contains(&skipped.into()),
+            "{skipped} must be skipped"
+        );
+    }
+    // The bare ID keeps its own binding; the conflicting alias is reported.
+    assert_ne!(
+        resolve_existing("Dual").unwrap().unwrap().native_model,
+        "AliasNative"
+    );
+    for expected in [
+        "\"bad key\"",
+        "\"has space\"",
+        "\"Odd?\"",
+        "\"bad native\"",
+        "\"models/Dual\"",
+    ] {
+        assert!(
+            registry
+                .notices
+                .iter()
+                .any(|notice| notice.contains(expected)),
+            "missing notice for {expected}"
+        );
+    }
+    assert!(find(&registry, ANTIGRAVITY_SOURCE, "GoodNative").account_count == 1);
+    // Later reads and saves see the same data and stay available.
+    let reloaded = view(&legacy, &mapping).unwrap();
+    assert_eq!(reloaded.revision, registry.revision);
+    assert!(save(request(&reloaded), &legacy, &mapping).is_ok());
+}
+
+#[test]
 fn absent_historical_database_is_not_created_and_empty_schema_is_not_migrated() {
     let _dir = Sandbox::new();
     let data_dir = account::get_data_dir().unwrap();
