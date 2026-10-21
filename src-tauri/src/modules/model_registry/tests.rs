@@ -764,6 +764,46 @@ fn external_write_between_snapshot_and_commit_returns_conflict() {
 }
 
 #[test]
+fn migration_keeps_exact_priced_and_free_models_that_were_never_called() {
+    let _dir = Sandbox::new();
+    let db_path = account::get_data_dir().unwrap().join("user_tokens.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE model_prices(pattern TEXT PRIMARY KEY);
+        INSERT INTO model_prices VALUES ('PricedOnly-20250929'), ('priced-*');
+        CREATE TABLE user_tokens(id TEXT, free_models TEXT);
+        INSERT INTO user_tokens VALUES ('a', '[\"FreeOnly\",\"models/FreePrefixed\"]'),
+        ('b', 'not json'), ('c', '[]');",
+    )
+    .unwrap();
+    drop(conn);
+    let before = std::fs::read(&db_path).unwrap();
+    view(&ids(&["CatalogOnly"]), &HashMap::new()).unwrap();
+    let published = published_ids().unwrap();
+    for id in [
+        "CatalogOnly",
+        "PricedOnly-20250929",
+        "FreeOnly",
+        "FreePrefixed",
+    ] {
+        assert!(
+            published.contains(&id.to_string()),
+            "{id} must stay callable"
+        );
+    }
+    // Wildcard prices are billing patterns, never public model names.
+    assert!(!published.iter().any(|id| id.contains('*')));
+    assert_eq!(
+        resolve_existing("PricedOnly-20250929")
+            .unwrap()
+            .unwrap()
+            .source_id,
+        ANTIGRAVITY_SOURCE
+    );
+    assert_eq!(std::fs::read(&db_path).unwrap(), before);
+}
+
+#[test]
 fn absent_historical_database_is_not_created_and_empty_schema_is_not_migrated() {
     let _dir = Sandbox::new();
     let data_dir = account::get_data_dir().unwrap();

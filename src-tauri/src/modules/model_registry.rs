@@ -611,6 +611,9 @@ fn catalog_routes(
     }
     Ok(routes)
 }
+/// Model IDs that the old dispatcher already admitted for user keys: successful
+/// calls, exact price rules and per-key free grants. Wildcard price rules stay
+/// billing patterns; the concrete IDs they cover come from the catalog/history.
 fn historical_ids(data_dir: &Path) -> Result<Vec<String>, String> {
     let path = data_dir.join("user_tokens.db");
     if !path
@@ -627,39 +630,52 @@ fn historical_ids(data_dir: &Path) -> Result<Vec<String>, String> {
     .map_err(|_| "Cannot read existing historical model database")?;
     conn.busy_timeout(std::time::Duration::from_secs(2))
         .map_err(|_| "Cannot bound historical model database wait")?;
-    let exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='token_usage_logs')",
-            [],
+    let has_column = |table: &str, column: &str| -> Result<bool, String> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            [table, column],
             |row| row.get(0),
         )
-        .map_err(|_| "Cannot inspect historical model database")?;
-    if !exists {
-        return Ok(Vec::new());
-    }
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT model FROM token_usage_logs WHERE status >= 200 AND status < 300 AND model IS NOT NULL AND model <> '' ORDER BY model LIMIT ?1")
-        .map_err(|_| "Cannot read historical successful model IDs")?;
-    let rows = stmt
-        .query_map([(MAX_PUBLISHED_MODELS + 1) as i64], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|_| "Cannot read historical successful model IDs")?;
-    let mut ids = Vec::new();
-    for (index, row) in rows.enumerate() {
-        if index >= MAX_PUBLISHED_MODELS {
-            return Err("Historical publication limit exceeded".into());
+        .map_err(|_| "Cannot inspect historical model database".into())
+    };
+    let limit = (MAX_PUBLISHED_MODELS + 1) as i64;
+    let mut ids = BTreeSet::new();
+    let mut collect = |sql: &str, error: &str| -> Result<(), String> {
+        let mut stmt = conn.prepare(sql).map_err(|_| error.to_string())?;
+        let rows = stmt
+            .query_map([limit], |row| row.get::<_, String>(0))
+            .map_err(|_| error.to_string())?;
+        for row in rows {
+            ids.insert(row.map_err(|_| error.to_string())?);
+            if ids.len() > MAX_PUBLISHED_MODELS {
+                return Err("Historical publication limit exceeded".into());
+            }
         }
-        let id = row.map_err(|_| "Invalid historical model ID")?;
-        // Historical request strings are untrusted: they cannot create wildcard publications.
-        if valid_id(normalized_public_id(&id), MAX_ID_BYTES) {
-            ids.push(id);
-        }
+        Ok(())
+    };
+    if has_column("token_usage_logs", "model")? {
+        collect(
+            "SELECT DISTINCT model FROM token_usage_logs WHERE status >= 200 AND status < 300 AND model IS NOT NULL AND model <> '' ORDER BY model LIMIT ?1",
+            "Cannot read historical successful model IDs",
+        )?;
     }
-    if ids.len() > MAX_PUBLISHED_MODELS {
-        return Err("Historical publication limit exceeded".into());
+    if has_column("model_prices", "pattern")? {
+        collect(
+            "SELECT pattern FROM model_prices WHERE instr(pattern, '*') = 0 ORDER BY pattern LIMIT ?1",
+            "Cannot read priced model IDs",
+        )?;
     }
-    Ok(ids)
+    if has_column("user_tokens", "free_models")? {
+        collect(
+            "SELECT DISTINCT j.value FROM user_tokens AS t, json_each(CASE WHEN json_valid(t.free_models) THEN t.free_models ELSE '[]' END) AS j WHERE j.type = 'text' ORDER BY j.value LIMIT ?1",
+            "Cannot read free model IDs",
+        )?;
+    }
+    // Stored strings are untrusted: they cannot create wildcard or malformed publications.
+    Ok(ids
+        .into_iter()
+        .filter(|id| valid_id(normalized_public_id(id), MAX_ID_BYTES))
+        .collect())
 }
 fn merge_candidates(store: &mut StoredRegistry, discovery: &Discovery) -> Result<bool, String> {
     let mut records: BTreeMap<_, _> = store

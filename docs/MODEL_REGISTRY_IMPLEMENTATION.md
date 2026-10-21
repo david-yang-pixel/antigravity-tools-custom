@@ -123,7 +123,9 @@ whitespace, control characters or wildcards. Preserve native ID case.
 
 Initial migration uses the passed legacy catalog, explicit (non-wildcard) custom
 mapping keys, and, if available without creating a DB, historical successful
-model IDs from the existing user_tokens.db. Bind WB using the old target_model
+model IDs, exact (non-wildcard) price rules and per-key free models from the
+existing user_tokens.db, so every model a user key could already be billed for
+stays callable. Bind WB using the old target_model
 precedence, else AG using the legacy resolver. The parent provides a public
 `resolve_legacy_model_route(original_model, mapping) -> String` helper in
 proxy/common/model_mapping.rs, which retains the previous resolver behavior and
