@@ -222,6 +222,32 @@ fn retryable_status(status: StatusCode) -> bool {
     !matches!(status.as_u16(), 400 | 413 | 422)
 }
 
+/// Reads a bounded, redacted prefix of a rejected response so the upstream's reason
+/// reaches the log; the client error stays generic.
+async fn rejection_detail(upstream: reqwest::Response, deadline: tokio::time::Instant) -> String {
+    let read = async {
+        let mut body = Vec::new();
+        let mut chunks = upstream.bytes_stream();
+        while let Some(Ok(chunk)) = chunks.next().await {
+            body.extend_from_slice(&chunk);
+            if body.len() >= 4096 {
+                break;
+            }
+        }
+        body
+    };
+    let wait = deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .min(std::time::Duration::from_secs(2));
+    match tokio::time::timeout(wait, read).await {
+        Ok(body) if body.is_empty() => "<empty body>".into(),
+        Ok(body) => crate::proxy::upstream::client::sanitize_error_for_log(
+            String::from_utf8_lossy(&body).trim(),
+        ),
+        Err(_) => "<body not received>".into(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn forward(
     timeout: u64,
@@ -344,14 +370,26 @@ async fn attempt(
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i64>().ok());
-        lease.failure(
-            &format!("Upstream HTTP {}", status.as_u16()),
-            retry_after.unwrap_or(if status.as_u16() == 429 { 60 } else { 15 }),
+        let retry = retryable_status(status);
+        // A request rejected for its own shape says nothing about the account, so it
+        // must not cool the account down for every other caller.
+        if retry {
+            lease.failure(
+                &format!("Upstream HTTP {}", status.as_u16()),
+                retry_after.unwrap_or(if status.as_u16() == 429 { 60 } else { 15 }),
+            );
+        }
+        tracing::warn!(
+            "WorkBuddy rejected model {} on account {} with HTTP {}: {}",
+            target,
+            lease.account.id,
+            status.as_u16(),
+            rejection_detail(upstream, deadline).await
         );
         return Err(Failure {
             response: error(if status.as_u16() == 429 { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::BAD_GATEWAY },
                 "workbuddy_upstream_rejected", &format!("WorkBuddy returned HTTP {}; refresh account authorization or check model availability",status.as_u16())),
-            retry: retryable_status(status),
+            retry,
         });
     }
     if !upstream
