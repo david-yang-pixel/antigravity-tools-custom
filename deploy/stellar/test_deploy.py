@@ -118,6 +118,22 @@ class PortalVerificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'Model registry'):
                     self.verify()
 
+    def test_images_without_a_registry_skip_the_registry_check(self):
+        self.prices = ['priced']
+        self.registry = b'<html>spa</html>'
+        self.verify(first_registry=True)
+
+        def missing(*args, **kwargs):
+            raise deploy.HTTPStatusError('/api/model-registry', 200, 404)
+
+        with patch.object(deploy, 'request', side_effect=missing):
+            self.assertIs(deploy.fetch_model_registry('test-admin'), deploy.NO_REGISTRY)
+        for code in (401, 500, 503):
+            with self.subTest(code=code), patch.object(
+                    deploy, 'request', side_effect=deploy.HTTPStatusError('/api/model-registry', 200, code)), \
+                    self.assertRaises(deploy.HTTPStatusError):
+                deploy.fetch_model_registry('test-admin')
+
     def test_first_cutover_must_keep_exact_priced_and_free_models(self):
         self.prices = ['catalog', 'models/priced', 'wild-*', 'bad id']
         self.free = json.dumps(['free'])

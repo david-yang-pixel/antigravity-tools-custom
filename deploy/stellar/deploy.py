@@ -44,6 +44,12 @@ def compose(*args):
     run(['docker', 'compose', '--project-directory', str(ROOT), '-f', str(ROOT / 'compose.yaml'), *args])
 
 
+class HTTPStatusError(RuntimeError):
+    def __init__(self, path, expected, code):
+        super().__init__(f'{path}: expected HTTP {expected}, got {code}')
+        self.code = code
+
+
 def request(base, path, expected=200, key=None):
     headers = {'Authorization': 'Bearer ' + key} if key else {}
     req = urllib.request.Request(base + path, headers=headers)
@@ -54,7 +60,7 @@ def request(base, path, expected=200, key=None):
     with response:
         data = response.read()
         if response.code != expected:
-            raise RuntimeError(f'{path}: expected HTTP {expected}, got {response.code}')
+            raise HTTPStatusError(path, expected, response.code)
         return json.loads(data) if 'application/json' in response.headers.get('Content-Type', '') else data
 
 
@@ -102,6 +108,21 @@ def billable_models(db):
         if isinstance(entries, list):
             models.update(entry for entry in entries if isinstance(entry, str))
     return {model for model in map(publishable, models) if model}
+
+
+NO_REGISTRY = object()
+
+
+def fetch_model_registry(admin):
+    """NO_REGISTRY when the running image predates the registry: its admin API has no
+    such route (404, or the SPA page). A registry image always answers JSON or an error."""
+    try:
+        registry = request('http://127.0.0.1:8045', '/api/model-registry', key=admin)
+    except HTTPStatusError as exc:
+        if exc.code == 404:
+            return NO_REGISTRY
+        raise
+    return NO_REGISTRY if isinstance(registry, bytes) else registry
 
 
 def verify_model_registry(registry, required=()):
@@ -152,7 +173,9 @@ def verify(image, version, first_registry=False):
         user = db.execute('SELECT token FROM user_tokens WHERE enabled = 1 LIMIT 1').fetchone()
         # Later deployments respect deliberate unpublication; only the cutover must keep them.
         required = billable_models(db) if first_registry else set()
-    verify_model_registry(request('http://127.0.0.1:8045', '/api/model-registry', key=admin), required)
+    registry = fetch_model_registry(admin)
+    if registry is not NO_REGISTRY:
+        verify_model_registry(registry, required)
     if user:
         overview = request('http://127.0.0.1:8045', '/api/token-portal/me', key=user[0])
         verify_portal_response(overview)
