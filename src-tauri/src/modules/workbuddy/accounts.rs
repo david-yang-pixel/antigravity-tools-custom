@@ -336,13 +336,15 @@ pub fn upsert(mut account: Account) -> Result<AccountView, String> {
             account.models_verified_at = old.models_verified_at;
             account.management = old.management.clone();
             account.management.next_sync_at = 0;
-            if account.device_token.is_empty() {
+            // Stable per-account fingerprints survive reauthorization even when the
+            // new payload carries a different non-empty device_token / client block.
+            if !old.device_token.is_empty() {
                 account.device_token = old.device_token.clone();
             }
             if account.refresh_token.is_empty() {
                 account.refresh_token = old.refresh_token.clone();
             }
-            if account.client.machine_id.is_empty() {
+            if !old.client.machine_id.is_empty() {
                 account.client = old.client.clone();
             }
             *old = account.clone();
@@ -856,12 +858,23 @@ mod tests {
         assert!(!public.contains("secret"));
         assert!(!public.contains("token"));
         assert_eq!(get(&view.id).unwrap().access_token, "secret_access");
+        let fingerprint = get(&view.id).unwrap();
+        assert!(!fingerprint.device_token.is_empty());
+        assert!(!fingerprint.client.machine_id.is_empty());
         set_enabled(&view.id, false).unwrap();
-        let updated = upsert(parse_import(value).unwrap()).unwrap();
+        let mut reauth = parse_import(value).unwrap();
+        reauth.device_token = "replacement-device-token".into();
+        reauth.client.user_agent = "WorkBuddy/9.9.9".into();
+        reauth.client.machine_id = "replacement-machine".into();
+        let updated = upsert(reauth).unwrap();
         assert_eq!(updated.id, view.id);
         assert!(!updated.enabled);
         assert_eq!(updated.models.len(), 1);
         assert_eq!(updated.candidate_model_count, 1);
+        let kept = get(&view.id).unwrap();
+        assert_eq!(kept.device_token, fingerprint.device_token);
+        assert_eq!(kept.client.machine_id, fingerprint.client.machine_id);
+        assert_ne!(kept.device_token, "replacement-device-token");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
