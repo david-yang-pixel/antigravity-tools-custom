@@ -50,9 +50,25 @@ export interface SaveModelRegistryRequest {
     allow_unverified?: boolean;
 }
 export interface RefreshModelCandidatesRequest { source_id?: string | null }
+// WorkBuddy region: cn = domestic, global = international.
+export type WorkBuddyRealm = 'cn' | 'global';
+export interface DiscoverUpstreamModelsRequest {
+    source_id: string;
+    realm?: WorkBuddyRealm | null;
+}
+export interface UpstreamDiscoveryReport {
+    source_id: string;
+    realm: WorkBuddyRealm | null;
+    account_id: string;
+    account_label: string;
+    attempts: number;
+    candidate_ids: string[];
+    registry: ModelRegistryView;
+}
 export interface VerifyModelCandidatesRequest {
     candidate_ids: string[];
     confirm_upstream_usage: boolean;
+    account_id?: string | null;
 }
 export interface ModelVerificationResult {
     candidate_id: string;

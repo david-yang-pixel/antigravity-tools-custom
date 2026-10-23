@@ -633,6 +633,7 @@ fn verification_consent_selection_and_limits_are_enforced_without_io() {
     let mut request = VerifyModelCandidatesRequest {
         candidate_ids: ids(&["0"]),
         confirm_upstream_usage: false,
+        account_id: None,
     };
     assert!(validate_verification_request(&request, &registry).is_err());
     request.confirm_upstream_usage = true;
@@ -648,6 +649,10 @@ fn verification_consent_selection_and_limits_are_enforced_without_io() {
     }
     request.candidate_ids = ids(&["0", "1", "2", "3", "4"]);
     assert!(validate_verification_request(&request, &registry).is_ok());
+    request.account_id = Some("account-1".into());
+    assert!(validate_verification_request(&request, &registry).is_ok());
+    request.account_id = Some(String::new());
+    assert!(validate_verification_request(&request, &registry).is_err());
     assert_eq!(VERIFY_TIMEOUT_SECONDS, 30);
 }
 
@@ -878,6 +883,19 @@ fn serde_defaults_and_wire_field_names_match_the_contract() {
     assert!(!request.allow_unverified);
     let refresh: RefreshModelCandidatesRequest = serde_json::from_value(json!({})).unwrap();
     assert!(refresh.source_id.is_none());
+    let discover: DiscoverUpstreamModelsRequest =
+        serde_json::from_value(json!({"source_id": WORKBUDDY_SOURCE, "realm": "global"})).unwrap();
+    assert_eq!(discover.realm, Some(workbuddy::accounts::Realm::Global));
+    assert!(validate_discovery_request(&discover).is_ok());
+    assert!(validate_discovery_request(&DiscoverUpstreamModelsRequest {
+        source_id: ANTIGRAVITY_SOURCE.into(),
+        realm: Some(workbuddy::accounts::Realm::Cn),
+    })
+    .is_err());
+    assert!(serde_json::from_value::<DiscoverUpstreamModelsRequest>(
+        json!({"source_id": WORKBUDDY_SOURCE, "realm": "moon"})
+    )
+    .is_err());
     assert!(
         serde_json::from_value::<VerifyModelCandidatesRequest>(json!({"candidate_ids": []}))
             .is_err()

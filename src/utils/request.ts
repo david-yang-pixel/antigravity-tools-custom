@@ -156,6 +156,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'save_model_registry': { url: '/api/model-registry', method: 'POST' },
   'refresh_model_candidates': { url: '/api/model-registry/refresh', method: 'POST' },
   'verify_model_candidates': { url: '/api/model-registry/verify', method: 'POST' },
+  'discover_upstream_models': { url: '/api/model-registry/discover', method: 'POST' },
   'get_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'GET' },
   'save_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'POST' },
   'start_workbuddy_model_verification': { url: '/api/workbuddy-models/verify', method: 'POST' },
@@ -243,7 +244,7 @@ export async function request<T>(cmd: string, args?: any, requestOptions?: { sig
     if (qs) url += `?${qs}`;
   } else if ((mapping.method === 'POST' || mapping.method === 'PATCH') && bodyArgs) {
     // Registry mutations retain the same { request } envelope as Tauri.
-    const registryMutation = ['save_model_registry', 'refresh_model_candidates', 'verify_model_candidates'].includes(cmd);
+    const registryMutation = ['save_model_registry', 'refresh_model_candidates', 'discover_upstream_models', 'verify_model_candidates'].includes(cmd);
     const body = !registryMutation && bodyArgs.request !== undefined ? bodyArgs.request : bodyArgs;
     options.body = JSON.stringify(body);
   }

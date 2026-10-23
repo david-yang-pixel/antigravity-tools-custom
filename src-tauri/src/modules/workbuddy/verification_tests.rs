@@ -157,11 +157,11 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
     };
     select(&a);
     assert_eq!(
-        verify_selected_model("shared").await.unwrap(),
+        verify_selected_model("shared", None).await.unwrap(),
         (a.clone(), Outcome::Available)
     );
     assert_eq!(
-        verify_selected_model("denied").await.unwrap(),
+        verify_selected_model("denied", None).await.unwrap(),
         (a.clone(), Outcome::Unavailable)
     );
     // A single-target denial never erases another target's successful evidence.
@@ -171,9 +171,11 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
         .contains_key("shared"));
     select(&b);
     assert_eq!(
-        verify_selected_model("shared").await.unwrap(),
+        verify_selected_model("shared", None).await.unwrap(),
         (b.clone(), Outcome::Unavailable)
     );
+    // A pinned account outside the eligible pool is refused before any upstream call.
+    assert!(verify_selected_model("shared", Some(&a)).await.is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(accounts::get(&a).unwrap().supports_model("shared"));
     assert!(!accounts::get(&b).unwrap().supports_model("shared"));

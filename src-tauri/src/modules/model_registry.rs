@@ -94,11 +94,36 @@ pub struct RefreshModelCandidatesRequest {
     #[serde(default)]
     pub source_id: Option<String>,
 }
+/// Metadata-only discovery through one randomly sampled account of a source.
+/// `realm` narrows the WorkBuddy pool to its domestic (cn) or global accounts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoverUpstreamModelsRequest {
+    pub source_id: String,
+    #[serde(default)]
+    pub realm: Option<workbuddy::accounts::Realm>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamDiscoveryReport {
+    pub source_id: String,
+    pub realm: Option<workbuddy::accounts::Realm>,
+    /// The sampled account; verification may be pinned to it with `account_id`.
+    pub account_id: String,
+    pub account_label: String,
+    /// Accounts tried, including the sampled one, before a model list was returned.
+    pub attempts: usize,
+    pub candidate_ids: Vec<String>,
+    pub registry: ModelRegistryView,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifyModelCandidatesRequest {
     pub candidate_ids: Vec<String>,
     pub confirm_upstream_usage: bool,
+    /// Probe through this account instead of the first eligible one.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1234,6 +1259,13 @@ pub fn validate_refresh_request(request: &RefreshModelCandidatesRequest) -> Resu
     Ok(())
 }
 
+pub fn validate_discovery_request(request: &DiscoverUpstreamModelsRequest) -> Result<(), String> {
+    if provider(&request.source_id)? != "workbuddy" && request.realm.is_some() {
+        return Err("Only WorkBuddy accounts have a region".into());
+    }
+    Ok(())
+}
+
 /// The runtime owner must enforce the timeout and one upstream attempt per selected candidate.
 /// This helper validates consent/selection without ever initiating an upstream request.
 pub fn validate_verification_request(
@@ -1245,6 +1277,13 @@ pub fn validate_verification_request(
     }
     if request.candidate_ids.is_empty() || request.candidate_ids.len() > MAX_VERIFY_CANDIDATES {
         return Err("Select between 1 and 5 candidates for basic text verification".into());
+    }
+    if request
+        .account_id
+        .as_deref()
+        .is_some_and(|id| !valid_id(id, MAX_RECORD_ID_BYTES))
+    {
+        return Err("Invalid verification account ID".into());
     }
     let mut selected = HashSet::new();
     for id in &request.candidate_ids {

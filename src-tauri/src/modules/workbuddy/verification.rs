@@ -29,7 +29,11 @@ pub fn start() -> Result<Progress, String> {
 
 /// A single explicit basic-text probe. The caller enforces consent and action limits.
 /// Shares the runtime pool's capacity and never registers or publishes an alias.
-pub(crate) async fn verify_selected_model(model: &str) -> Result<(String, Outcome), String> {
+/// `account_id` pins the probe to one account, e.g. the one that listed the model.
+pub(crate) async fn verify_selected_model(
+    model: &str,
+    account_id: Option<&str>,
+) -> Result<(String, Outcome), String> {
     let settings = super::load()?;
     if !settings.enabled || !super::valid_model_id(model) {
         return Err("Enable the source and select a valid native model".into());
@@ -38,6 +42,7 @@ pub(crate) async fn verify_selected_model(model: &str) -> Result<(String, Outcom
         .into_iter()
         .find(|account| {
             account.enabled
+                && account_id.is_none_or(|id| id == account.id)
                 && settings
                     .preferred_account_id
                     .as_ref()

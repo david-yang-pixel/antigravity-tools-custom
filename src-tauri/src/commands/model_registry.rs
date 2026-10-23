@@ -53,6 +53,14 @@ pub async fn refresh_model_candidates(
     service::refresh(&manager, request).await
 }
 #[tauri::command]
+pub async fn discover_upstream_models(
+    request: DiscoverUpstreamModelsRequest,
+    state: State<'_, ProxyServiceState>,
+) -> Result<UpstreamDiscoveryReport, String> {
+    let (manager, _) = runtime(&state).await?;
+    service::discover(&manager, request).await
+}
+#[tauri::command]
 pub async fn verify_model_candidates(
     request: VerifyModelCandidatesRequest,
     state: State<'_, ProxyServiceState>,

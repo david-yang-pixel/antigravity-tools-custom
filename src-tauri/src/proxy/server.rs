@@ -1009,6 +1009,10 @@ impl AxumServer {
                 post(admin_refresh_model_candidates),
             )
             .route(
+                "/model-registry/discover",
+                post(admin_discover_upstream_models),
+            )
+            .route(
                 "/model-registry/verify",
                 post(admin_verify_model_candidates),
             )
@@ -2691,6 +2695,17 @@ async fn admin_refresh_model_candidates(
     >,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::modules::model_registry_service::refresh(&state.token_manager, payload.request)
+        .await
+        .map(Json)
+        .map_err(registry_admin_error)
+}
+async fn admin_discover_upstream_models(
+    State(state): State<AppState>,
+    Json(payload): Json<
+        RegistryMutation<crate::modules::model_registry::DiscoverUpstreamModelsRequest>,
+    >,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::modules::model_registry_service::discover(&state.token_manager, payload.request)
         .await
         .map(Json)
         .map_err(registry_admin_error)
