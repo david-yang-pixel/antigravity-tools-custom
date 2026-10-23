@@ -41,9 +41,10 @@ async fn post(account: &Account, path: &str, body: &Value) -> Result<reqwest::Re
         .map_err(|_| "Cannot connect to WorkBuddy account resources".into())
 }
 pub(super) fn headers(account: &Account) -> Result<reqwest::header::HeaderMap, String> {
+    // Keep the per-account UA from client::headers; do not collapse every account
+    // onto one shared WorkBuddy build string for billing/activity calls.
     let mut headers = client::headers(account.realm, Some(account))?;
     for (key, value) in [
-        ("user-agent", "WorkBuddy/5.5.4"),
         ("x-enterprise-id", account.enterprise_id.as_str()),
         ("x-tenant-id", account.enterprise_id.as_str()),
         ("x-domain", account.domain.as_str()),

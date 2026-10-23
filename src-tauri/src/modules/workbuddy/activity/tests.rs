@@ -106,7 +106,8 @@ async fn run(id: &str, action: Action) -> Account {
         m.activity.run_id = running.0.clone();
         m.activity.status = "running".into();
         m.activity.last_attempt_at = accounts::now();
-        m.activity.next_run_at = accounts::now() + INTERVAL;
+        m.activity.next_run_at =
+            accounts::now() + super::super::identity::activity_interval_secs(id, 0);
     })
     .unwrap();
     execute(accounts::get(id).unwrap(), action).await;
@@ -122,12 +123,19 @@ fn activity_eligibility_is_explicit_and_legacy_accounts_are_opt_in() {
     let mut a = a;
     a.management.auto_rewards = true;
     assert!(due(&a, accounts::now()));
+    assert!(due_opportunistic(&a, accounts::now()));
     a.realm = Realm::Global;
     assert!(!due(&a, accounts::now()));
     assert!(serde_json::from_value::<Action>(json!("automatic")).is_err());
     a.realm = Realm::Cn;
     a.management.activity.last_attempt_at = accounts::now();
+    a.management.activity.next_run_at = accounts::now() + 7200;
     assert!(!due(&a, accounts::now() + 30));
+    assert!(!due_opportunistic(&a, accounts::now() + 30));
+    assert!(due_opportunistic(
+        &a,
+        accounts::now() + super::super::identity::ACTIVITY_OPPORTUNITY_SECS
+    ));
     let entries = tasks(
         &json!({"tasks":[
             {"task_code":"locked","accept_status":"locked","progress":{"current":20,"target":1}},

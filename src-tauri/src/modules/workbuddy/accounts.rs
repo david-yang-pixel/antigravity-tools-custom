@@ -63,6 +63,9 @@ pub struct Account {
     pub revision: String,
     #[serde(default)]
     pub management: super::maintenance::Management,
+    /// Stable per-account UA / machine / session; never shared across accounts.
+    #[serde(default)]
+    pub client: super::identity::ClientIdentity,
 }
 #[derive(Serialize)]
 pub struct AccountView {
@@ -339,6 +342,9 @@ pub fn upsert(mut account: Account) -> Result<AccountView, String> {
             if account.refresh_token.is_empty() {
                 account.refresh_token = old.refresh_token.clone();
             }
+            if account.client.machine_id.is_empty() {
+                account.client = old.client.clone();
+            }
             *old = account.clone();
         } else {
             if accounts.len() >= 500 {
@@ -346,9 +352,28 @@ pub fn upsert(mut account: Account) -> Result<AccountView, String> {
             }
             accounts.push(account.clone());
         }
+        if let Some(entry) = accounts.iter_mut().find(|a| a.id == account.id) {
+            let _ = super::identity::ensure(entry);
+            account = entry.clone();
+        }
         write(&accounts)?;
     }
     view(account)
+}
+/// Backfill stable client fingerprints for accounts created before identity existed.
+pub fn ensure_identities() -> Result<(), String> {
+    let _lock = STORE_LOCK
+        .lock()
+        .map_err(|_| "WorkBuddy account store unavailable")?;
+    let mut accounts = read()?;
+    let mut dirty = false;
+    for account in &mut accounts {
+        dirty |= super::identity::ensure(account);
+    }
+    if dirty {
+        write(&accounts)?;
+    }
+    Ok(())
 }
 pub fn set_enabled(id: &str, enabled: bool) -> Result<AccountView, String> {
     let account = {
@@ -535,6 +560,15 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.management.auto_rewards = old.management.auto_rewards;
     account.management.auto_lottery = old.management.auto_lottery;
     account.management.activity = old.management.activity.clone();
+    if account.client.machine_id.is_empty() {
+        account.client = old.client.clone();
+    }
+    if account.device_token.is_empty() {
+        account.device_token = old.device_token.clone();
+    }
+    let _ = super::identity::ensure(account);
+    old.client = account.client.clone();
+    old.device_token = account.device_token.clone();
     old.models = account.models.clone();
     // Maintenance does not turn catalog entries into successful verification results.
     old.verified_models
@@ -689,6 +723,7 @@ pub fn parse_import(value: Value) -> Result<Account, String> {
         last_error: None,
         revision: uuid::Uuid::new_v4().to_string(),
         management: super::maintenance::Management::default(),
+        client: super::identity::ClientIdentity::default(),
     };
     validate(&account)?;
     Ok(account)
@@ -726,6 +761,16 @@ impl Lease {
                 entry.health.last_error = None;
             }
         }
+        // Piggyback domestic reward collection on real usage so it is not a lonely cron.
+        let id = self.account.id.clone();
+        tauri::async_runtime::spawn(async move {
+            let Ok(account) = get(&id) else {
+                return;
+            };
+            if super::activity::due_opportunistic(&account, now()) {
+                let _ = super::activity::start(&id, super::activity::Action::Automatic);
+            }
+        });
     }
     pub fn failure(&self, reason: &str, seconds: i64) {
         if self
