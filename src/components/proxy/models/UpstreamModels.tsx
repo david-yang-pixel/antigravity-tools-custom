@@ -34,7 +34,8 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
     const sourceName = (id: string) => view.sources.find(s => s.id === id)?.display_name || id;
     const models = useMemo(() => report ? report.candidate_ids.flatMap(id => view.candidates.filter(c => c.id === id)) : [], [report, view.candidates]);
     const visible = useMemo(() => filterCandidates(models, '', query, '', true, view.sources), [models, query, view.sources]);
-    const published = (c: CandidateModel) => view.published_models.some(p => p.source_id === c.source_id && p.native_model === c.native_model);
+    // A published model can take more aliases; public IDs stay unique, which the publish dialog enforces.
+    const aliases = (c: CandidateModel) => view.published_models.filter(p => p.source_id === c.source_id && p.native_model === c.native_model).map(p => p.public_id);
     const sourceEnabled = !!view.sources.find(s => s.id === report?.source_id)?.enabled;
 
     if (!report) return <RegistryDialog title="获取上游模型 / Fetch upstream models" confirmText={fetching ? '获取中 / Fetching' : '获取 / Fetch'} onConfirm={onFetch} onCancel={onClose} busy={!!busy} blocked={!pick.source_id}>
@@ -78,14 +79,15 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
             {visible.map((c, index) => {
                 const result = tested[c.id];
                 const unavailable = c.verification_status === 'unavailable';
+                const published = aliases(c);
                 return <tr key={c.id} style={{ '--registry-order': Math.min(index, 6) } as React.CSSProperties}>
-                    <td data-label="上游模型 / Model"><code className="font-semibold">{c.native_model}</code>{c.display_name && c.display_name !== c.native_model && <p className="registry-muted mt-1">{c.display_name}</p>}</td>
+                    <td data-label="上游模型 / Model"><code className="font-semibold">{c.native_model}</code>{c.display_name && c.display_name !== c.native_model && <p className="registry-muted mt-1">{c.display_name}</p>}
+                        {published.length > 0 && <p className="registry-muted mt-1 break-words"><span className="registry-badge registry-verified mr-1">已上架 / Published</span>{published.join(', ')}</p>}</td>
                     <td data-label="测试结果 / Test"><span className={`registry-badge registry-${result?.status ?? c.verification_status}`}>{verificationLabels[result?.status ?? c.verification_status]}</span>
                         {result ? <p className="registry-muted mt-1 break-words">{result.message} · {formatCheckedAt(result.checked_at)}</p> : c.last_verified_at && <p className="registry-muted mt-1">{formatCheckedAt(c.last_verified_at)}</p>}</td>
                     <td data-label="操作 / Actions"><div className="registry-row-actions">
                         <button className="registry-btn" disabled={!!busy} onClick={() => onTest(c)}>{testing === c.id ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : <ShieldCheck size={14} aria-hidden />}{testing === c.id ? '测试中 / Testing' : '测试 / Test'}</button>
-                        {published(c) ? <span className="registry-badge registry-verified self-center">已上架 / Published</span>
-                            : <button className="registry-btn registry-primary" disabled={!!busy || unavailable || !sourceEnabled} title={unavailable ? '测试确认不可用，不能添加 / Unavailable models cannot be added' : !sourceEnabled ? '来源未启用 / Source disabled' : undefined} onClick={() => onAdd(c)}><Plus size={14} aria-hidden />添加 / Add</button>}
+                        <button className="registry-btn registry-primary" disabled={!!busy || unavailable || !sourceEnabled} title={unavailable ? '测试确认不可用，不能添加 / Unavailable models cannot be added' : !sourceEnabled ? '来源未启用 / Source disabled' : published.length ? '用新的公开 ID 再上架一次 / Publish under another public ID' : undefined} onClick={() => onAdd(c)}><Plus size={14} aria-hidden />{published.length ? '添加别名 / Add alias' : '添加 / Add'}</button>
                     </div></td>
                 </tr>;
             })}

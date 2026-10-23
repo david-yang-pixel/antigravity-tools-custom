@@ -518,6 +518,38 @@ fn unavailable_candidates_are_not_publishable_even_with_confirmation() {
 }
 
 #[test]
+fn a_published_binding_can_take_another_alias_but_not_a_used_name() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb("aliased", &["Flash"], &["Flash"], &[]);
+    let registry = view(&[], &HashMap::new()).unwrap();
+    let mut draft = request(&registry);
+    draft
+        .published_models
+        .push(publication("Flash", WORKBUDDY_SOURCE, "Flash"));
+    let registry = save(draft, &[], &HashMap::new()).unwrap();
+
+    let mut duplicate = request(&registry);
+    let mut reused = publication("Flash", WORKBUDDY_SOURCE, "Flash");
+    reused.id = "new:second".into();
+    duplicate.published_models.push(reused);
+    assert!(save(duplicate, &[], &HashMap::new()).is_err());
+
+    let mut alias = request(&registry);
+    alias
+        .published_models
+        .push(publication("my-flash", WORKBUDDY_SOURCE, "Flash"));
+    save(alias, &[], &HashMap::new()).unwrap();
+    for public in ["Flash", "my-flash"] {
+        let resolved = resolve_existing(public).unwrap().unwrap();
+        assert_eq!(
+            (resolved.source_id.as_str(), resolved.native_model.as_str()),
+            (WORKBUDDY_SOURCE, "Flash")
+        );
+    }
+}
+
+#[test]
 fn one_account_denial_does_not_prove_other_candidate_accounts_unavailable() {
     let _dir = Sandbox::new();
     seed_wb("denied", &["Mixed"], &[], &["Mixed"]);
