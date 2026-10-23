@@ -3,6 +3,7 @@ use super::{
     accounts::{self, Account, AccountView, Realm},
     resources::Credits,
 };
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -53,17 +54,38 @@ impl Default for Management {
     }
 }
 pub fn day(at: i64) -> String {
+    beijing(at).format("%Y-%m-%d").to_string()
+}
+fn beijing(at: i64) -> chrono::DateTime<chrono::FixedOffset> {
     chrono::DateTime::from_timestamp(at, 0)
         .unwrap_or_default()
         .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
-        .format("%Y-%m-%d")
-        .to_string()
+}
+fn beijing_minute(at: i64) -> u32 {
+    let local = beijing(at);
+    local.hour() * 60 + local.minute()
+}
+fn sync_delay(account_id: &str) -> i64 {
+    900 + super::identity::sync_extra_secs(account_id)
 }
 fn checkin_due(a: &Account, now: i64) -> bool {
-    a.realm == Realm::Cn
-        && a.management.auto_checkin
-        && a.management.checkin_date.as_deref() != Some(day(now).as_str())
-        && now - a.management.checkin_attempt_at >= 3600
+    if a.realm != Realm::Cn
+        || !a.management.auto_checkin
+        || a.management.checkin_date.as_deref() == Some(day(now).as_str())
+    {
+        return false;
+    }
+    let retry = if a.management.checkin_attempt_at > 0 {
+        super::identity::checkin_retry_secs(&a.id, a.management.checkin_attempt_at)
+    } else {
+        0
+    };
+    if now - a.management.checkin_attempt_at < retry {
+        return false;
+    }
+    // Prefer a stable daytime habit slot; fall back late evening so the day is not missed.
+    let mins = beijing_minute(now);
+    mins >= super::identity::checkin_minute(&a.id) || mins >= 22 * 60 + 30
 }
 fn keepalive_due(a: &Account, now: i64) -> bool {
     a.management.keepalive
@@ -94,7 +116,8 @@ pub async fn run(
         return accounts::view(initial);
     }
     // Persist the attempt before network I/O so a restart cannot cause a tight retry loop.
-    accounts::edit_management(id, |m| m.next_sync_at = now + 900)?;
+    // Per-account jitter keeps the pool from syncing in lockstep.
+    accounts::edit_management(id, |m| m.next_sync_at = now + sync_delay(id))?;
     let refresh = force_refresh || (automatic && keepalive_due(&initial, now));
     let mut account = match accounts::fresh(id, refresh).await {
         Ok(account) => account,
@@ -147,7 +170,7 @@ pub async fn run(
         Err(e) => account.management.credits_error = Some(e),
     }
     account.management.last_sync_at = accounts::now();
-    account.management.next_sync_at = accounts::now() + 900;
+    account.management.next_sync_at = accounts::now() + sync_delay(id);
     accounts::save_observation(&mut account)?;
     super::register_models(&account.available_models())?;
     accounts::view(account)
@@ -158,6 +181,9 @@ pub fn start() {
         return;
     }
     tauri::async_runtime::spawn(async {
+        if let Err(error) = accounts::ensure_identities() {
+            tracing::warn!("WorkBuddy identity backfill: {error}");
+        }
         loop {
             match accounts::all() {
                 Ok(accounts) => {
@@ -193,27 +219,30 @@ mod tests {
             json!({"uid":"test","accessToken":"secret","expiresAt":2000000000}),
         )
         .unwrap();
-        let now = 1792425600;
-        assert!(due(&a, now));
-        assert!(checkin_due(&a, now));
-        a.management.checkin_date = Some(day(now));
-        assert!(!checkin_due(&a, now));
-        assert!(checkin_due(&a, now + 86400));
+        // Beijing 2026-10-20 00:00 — sync is due, but check-in waits for the habit slot.
+        let midnight = 1792425600;
+        let evening = midnight + 23 * 3600; // past the 22:30 same-day fallback
+        assert!(due(&a, midnight));
+        assert!(!checkin_due(&a, midnight));
+        assert!(checkin_due(&a, evening));
+        a.management.checkin_date = Some(day(evening));
+        assert!(!checkin_due(&a, evening));
+        assert!(checkin_due(&a, evening + 86400));
         a.management.checkin_date = None;
-        a.management.checkin_attempt_at = now;
-        assert!(!checkin_due(&a, now + 60));
-        a.management.last_keepalive_at = now;
-        a.management.next_sync_at = now + 900;
-        assert!(!due(&a, now + 60));
-        a.expires_at = now + 100;
-        assert!(due(&a, now + 60));
+        a.management.checkin_attempt_at = evening;
+        assert!(!checkin_due(&a, evening + 60));
+        a.management.last_keepalive_at = evening;
+        a.management.next_sync_at = evening + sync_delay(&a.id);
+        assert!(!due(&a, evening + 60));
+        a.expires_at = evening + 100;
+        assert!(due(&a, evening + 60));
         a.management.managed = false;
-        assert!(!due(&a, now + 60));
+        assert!(!due(&a, evening + 60));
         a.management.managed = true;
         a.enabled = false;
-        assert!(!due(&a, now + 60));
+        assert!(!due(&a, evening + 60));
         a.realm = Realm::Global;
-        assert!(!checkin_due(&a, now + 86400));
+        assert!(!checkin_due(&a, evening + 86400));
         let mut old = serde_json::to_value(&a).unwrap();
         old.as_object_mut().unwrap().remove("management");
         let restored: Account = serde_json::from_value(old).unwrap();
@@ -298,7 +327,8 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         }));
         let id=accounts::upsert(accounts::parse_import(json!({"uid":"managed","accessToken":"old","refreshToken":"r","expiresAt":accounts::now()+3600})).unwrap()).unwrap().id;
-        let a = run(&id, false, false, true).await.unwrap();
+        // Force refresh+check-in: habit slots are daytime-only and would skip around midnight.
+        let a = run(&id, true, true, false).await.unwrap();
         assert_eq!(a.management.checkin_status, "already");
         assert!(a.management.checkin_error.is_none());
         assert!(a.management.checkin_at > 0);

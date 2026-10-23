@@ -41,15 +41,21 @@ fn add(headers: &mut HeaderMap, key: &'static str, value: &str) -> Result<(), St
     );
     Ok(())
 }
+fn default_user_agent(realm: Realm) -> &'static str {
+    match realm {
+        Realm::Cn => "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1",
+        Realm::Global => "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1",
+    }
+}
 pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, String> {
     let origin = match realm {
         Realm::Cn => "https://www.codebuddy.cn",
         Realm::Global => "https://www.workbuddy.ai",
     };
-    let ua = match realm {
-        Realm::Cn => "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1",
-        Realm::Global => "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1",
-    };
+    let ua = account
+        .map(|a| a.client.user_agent.as_str())
+        .filter(|ua| !ua.is_empty())
+        .unwrap_or_else(|| default_user_agent(realm));
     let mut h = HeaderMap::new();
     for (key, value) in [
         ("content-type", "application/json"),
@@ -73,11 +79,20 @@ pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, Str
             &format!("Bearer {}", account.access_token),
         )?;
         add(&mut h, "x-user-id", &account.uid)?;
-        for (purpose, header) in [("machine", "x-machine-id"), ("session", "x-session-id")] {
-            let digest = Sha256::digest(format!("wb2a:{purpose}:{}", account.uid).as_bytes());
-            let id: String = digest[..18].iter().map(|b| format!("{b:02x}")).collect();
-            add(&mut h, header, &id)?;
-        }
+        // Match identity::ensure seeds (account.id), never uid — otherwise the first
+        // pre-backfill request and later persisted headers disagree.
+        let machine = if account.client.machine_id.is_empty() {
+            super::identity::machine_id(&account.id)
+        } else {
+            account.client.machine_id.clone()
+        };
+        let session = if account.client.session_id.is_empty() {
+            super::identity::session_id(&account.id)
+        } else {
+            account.client.session_id.clone()
+        };
+        add(&mut h, "x-machine-id", &machine)?;
+        add(&mut h, "x-session-id", &session)?;
     }
     Ok(h)
 }
@@ -379,11 +394,16 @@ pub async fn chat(
     let request_id = uuid::Uuid::new_v4().simple().to_string();
     let mut h = headers(account.realm, Some(account))?;
     add(&mut h, "accept", "text/event-stream")?;
+    let product_version = if account.client.product_version.is_empty() {
+        "5.5.4"
+    } else {
+        account.client.product_version.as_str()
+    };
     for (name, value) in [
         ("x-agent-purpose", "conversation"),
         ("x-ide-name", "WorkBuddy"),
         ("x-ide-type", "WorkBuddy"),
-        ("x-ide-version", "5.5.4"),
+        ("x-ide-version", product_version),
         ("x-product", "WorkBuddy"),
     ] {
         add(&mut h, name, value)?;

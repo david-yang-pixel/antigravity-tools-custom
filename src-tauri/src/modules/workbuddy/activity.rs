@@ -17,7 +17,6 @@ use std::{
     time::Duration,
 };
 
-const INTERVAL: i64 = 3600;
 const MAX_ACTIONS: usize = 20;
 static SLOTS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
@@ -74,6 +73,9 @@ pub struct State {
     pub error: Option<String>,
     pub items: Vec<Item>,
     pub history: Vec<Record>,
+    /// Consecutive automatic runs that found nothing claimable; stretches the next delay.
+    #[serde(default)]
+    pub idle_streak: u32,
     #[serde(default)]
     pub(super) run_id: String,
     /// Persist the same idempotency key across ambiguous draw responses/restarts.
@@ -90,6 +92,7 @@ impl Default for State {
             error: None,
             items: vec![],
             history: vec![],
+            idle_streak: 0,
             pending_draw: None,
             run_id: String::new(),
         }
@@ -124,14 +127,26 @@ fn item(kind: &str, id: &str, status: &str) -> Item {
         detail: None,
     }
 }
+fn eligible(account: &Account) -> bool {
+    let m = &account.management;
+    account.realm == Realm::Cn && account.enabled && m.managed && (m.auto_rewards || m.auto_lottery)
+}
+fn next_delay(account: &Account) -> i64 {
+    super::identity::activity_interval_secs(&account.id, account.management.activity.idle_streak)
+}
 pub(super) fn due(account: &Account, now: i64) -> bool {
     let m = &account.management;
-    account.realm == Realm::Cn
-        && account.enabled
-        && m.managed
-        && (m.auto_rewards || m.auto_lottery)
+    eligible(account)
         && now >= m.activity.next_run_at
-        && (m.activity.last_attempt_at == 0 || now - m.activity.last_attempt_at >= INTERVAL)
+        && (m.activity.last_attempt_at == 0
+            || now - m.activity.last_attempt_at >= next_delay(account))
+}
+/// Real inference success may collect rewards without waiting for the sparse background cadence.
+pub(super) fn due_opportunistic(account: &Account, now: i64) -> bool {
+    let m = &account.management;
+    eligible(account)
+        && (m.activity.last_attempt_at == 0
+            || now - m.activity.last_attempt_at >= super::identity::ACTIVITY_OPPORTUNITY_SECS)
 }
 fn current(account: &Account, action: Action) -> Result<Account, String> {
     let value = accounts::get(&account.id)?;
@@ -162,7 +177,10 @@ pub fn start(id: &str, action: Action) -> Result<AccountView, String> {
     if !initial.enabled {
         return Err("Enable the account before querying activities".into());
     }
-    if action == Action::Automatic && !due(&initial, accounts::now()) {
+    if action == Action::Automatic
+        && !due(&initial, accounts::now())
+        && !due_opportunistic(&initial, accounts::now())
+    {
         return accounts::view(initial);
     }
     // Manual retries also have a short debounce; queries remain read-only.
@@ -171,6 +189,7 @@ pub fn start(id: &str, action: Action) -> Result<AccountView, String> {
         return Err("Wait 30 seconds before retrying activity collection".into());
     }
     let running = RunGuard::new()?;
+    let delay = next_delay(&initial);
     accounts::edit_activity(&initial, |m| {
         m.activity.status = "running".into();
         m.activity.run_id = running.0.clone();
@@ -178,7 +197,8 @@ pub fn start(id: &str, action: Action) -> Result<AccountView, String> {
         // A read-only query must not postpone the automatic collection schedule.
         if action != Action::Query {
             m.activity.last_attempt_at = accounts::now();
-            m.activity.next_run_at = accounts::now() + INTERVAL;
+            // Provisional delay; execute() may stretch it after an empty collection.
+            m.activity.next_run_at = accounts::now() + delay;
         }
     })?;
     let initial = accounts::get(id)?;
@@ -193,17 +213,20 @@ pub fn start(id: &str, action: Action) -> Result<AccountView, String> {
 async fn execute(initial: Account, action: Action) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     let account = match current(&initial, action) {
-        Ok(_) => {
-            match accounts::fresh_before(&initial.id, deadline).await {
-                Ok(Ok(account)) => account,
-                _ => {
-                    fail_run(&initial, "Could not prepare account credentials; retry after authorization is restored".into());
-                    return;
-                }
+        Ok(_) => match accounts::fresh_before(&initial.id, deadline).await {
+            Ok(Ok(account)) => account,
+            _ => {
+                fail_run(
+                    &initial,
+                    action,
+                    "Could not prepare account credentials; retry after authorization is restored"
+                        .into(),
+                );
+                return;
             }
-        }
+        },
         Err(error) => {
-            fail_run(&initial, error);
+            fail_run(&initial, action, error);
             return;
         }
     };
@@ -234,12 +257,32 @@ async fn execute(initial: Account, action: Action) {
     }
     .into();
     runner.state.error = (!runner.failures.is_empty()).then(|| runner.failures.join("; "));
+    if action != Action::Query {
+        let claimed = runner
+            .state
+            .history
+            .iter()
+            .any(|r| r.at >= runner.state.last_attempt_at && r.status == "claimed");
+        if claimed {
+            runner.state.idle_streak = 0;
+        } else if action == Action::Automatic && runner.read_ok > 0 {
+            // Stretch only after a successful empty poll — outages must not look like "nothing to claim".
+            runner.state.idle_streak = runner.state.idle_streak.saturating_add(1).min(8);
+        }
+        runner.state.next_run_at = accounts::now()
+            + super::identity::activity_interval_secs(&runner.account.id, runner.state.idle_streak);
+    }
     let _ = runner.save();
 }
-fn fail_run(account: &Account, error: String) {
+fn fail_run(account: &Account, action: Action, error: String) {
     let mut state = account.management.activity.clone();
     state.status = "failed".into();
     state.error = Some(error);
+    // Read-only queries must not postpone automatic collection (same rule as start()).
+    if action != Action::Query {
+        state.next_run_at = accounts::now()
+            + super::identity::activity_interval_secs(&account.id, state.idle_streak);
+    }
     let _ = accounts::save_activity(account, state);
 }
 struct Runner {
