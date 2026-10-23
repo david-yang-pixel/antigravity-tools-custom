@@ -1,10 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, CircleHelp, Download, Loader2, RefreshCw, Search } from 'lucide-react';
 import { request } from '../../../utils/request';
-import type { CandidateModel, ModelRegistryView, ModelVerificationReport, ModelVerificationResult, PublishedModel, RefreshModelCandidatesRequest, SaveModelRegistryRequest, VerifyModelCandidatesRequest } from '../../../types/modelRegistry';
+import type { CandidateModel, DiscoverUpstreamModelsRequest, ModelRegistryView, ModelVerificationReport, ModelVerificationResult, PublishedModel, SaveModelRegistryRequest, UpstreamDiscoveryReport, VerifyModelCandidatesRequest } from '../../../types/modelRegistry';
 import { candidateFor, capabilityLabels, capabilityScope, filterPublications, formatCheckedAt, mergePublications, needsUnverifiedConfirmation, newPublicationId, publicationError, registryError, saveRequest, verificationLabels } from './registryLogic';
 import RegistryDialog from './RegistryDialog';
-import UpstreamModels from './UpstreamModels';
+import UpstreamModels, { hasRealm, type UpstreamPick } from './UpstreamModels';
 import './modelRegistry.css';
 
 type Tab = 'published' | 'advanced';
@@ -26,6 +26,8 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
     const [verification, setVerification] = useState('');
     const [publicationState, setPublicationState] = useState('');
     const [upstreamOpen, setUpstreamOpen] = useState(false);
+    const [pick, setPick] = useState<UpstreamPick>({ source_id: '', realm: 'cn' });
+    const [discovery, setDiscovery] = useState<UpstreamDiscoveryReport | null>(null);
     const [testing, setTesting] = useState<string | null>(null);
     const [tested, setTested] = useState<Record<string, ModelVerificationResult>>({});
     const [busy, setBusy] = useState<string | null>('load');
@@ -90,19 +92,19 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
     const draftError = view && action?.kind === 'publish' ? (action.editing && !view.published_models.some(p => p.id === action.drafts[0]?.id)
         ? '上架记录已被其他管理员删除，草稿仍保留，请重新选择。 / Publication was removed by another admin; draft retained. Select again.' : publicationError(view, action.drafts)) : null;
 
-    async function mutate(command: 'save_model_registry' | 'refresh_model_candidates' | 'verify_model_candidates', payload: SaveModelRegistryRequest | RefreshModelCandidatesRequest | VerifyModelCandidatesRequest, label: string) {
+    async function mutate(command: 'save_model_registry' | 'discover_upstream_models' | 'verify_model_candidates', payload: SaveModelRegistryRequest | DiscoverUpstreamModelsRequest | VerifyModelCandidatesRequest, label: string) {
         if (locked.current) return;
         locked.current = true;
         setBusy(command); setFeedback(null); setActionError(null);
         try {
-            const response = await request<ModelRegistryView | ModelVerificationReport>(command, { request: payload });
-            const report = 'registry' in response ? response : null;
-            const next = report ? report.registry : response as ModelRegistryView;
+            const response = await request<ModelRegistryView | ModelVerificationReport | UpstreamDiscoveryReport>(command, { request: payload });
+            const next = 'registry' in response ? response.registry : response;
             window.dispatchEvent(new Event('model-registry-changed'));
             if (!alive.current) return;
             setView(next);
             setAction(null); setConfirmed(false);
-            if (report) setTested(prev => ({ ...prev, ...Object.fromEntries(report.results.map(r => [r.candidate_id, r])) }));
+            if ('results' in response) setTested(prev => ({ ...prev, ...Object.fromEntries(response.results.map(r => [r.candidate_id, r])) }));
+            if ('candidate_ids' in response) setDiscovery(response);
             setFeedback({ message: label });
         } catch (error) {
             if (!alive.current) return;
@@ -110,7 +112,7 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
             const message = command === 'verify_model_candidates'
                 ? `${reason.message} · 验证失败或结果未知；不自动重试，请重新读取核对。再次发起可能重复消耗额度。 / Check failed or outcome unknown; reload first. Retrying may consume quota again.`
                 : `${reason.message} · 未收到成功确认，草稿保留。 / No success confirmation; draft retained.`;
-            const failure: Feedback = { ...reason, message, error: true, retry: command === 'refresh_model_candidates' ? 'sync' : command === 'verify_model_candidates' ? 'load' : undefined };
+            const failure: Feedback = { ...reason, message, error: true, retry: command === 'discover_upstream_models' ? 'sync' : command === 'verify_model_candidates' ? 'load' : undefined };
             setFeedback(failure); setActionError(failure); setConfirmed(false);
         } finally {
             locked.current = false;
@@ -134,13 +136,19 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
             await mutate('save_model_registry', saveRequest(view, mergePublications(view, [toggleDraft]), undefined, unverified && confirmed), toggleDraft.enabled ? '已启用公开模型。 / Publication enabled.' : '已停用，绑定保留。 / Disabled; binding retained.');
         } else fail('记录已变化，请重新加载。 / Publication changed; reload first.');
     }
-    const sync = () => void mutate('refresh_model_candidates', { source_id: null }, '已获取上游模型，仅元数据：无推理、无自动上架。 / Upstream models fetched: metadata only, no inference or publication.');
-    const fetchUpstream = () => { setUpstreamOpen(true); sync(); };
-    // Clicking Test on one model is the explicit consent for that single upstream request.
+    // One randomly sampled account of the picked source (and WorkBuddy region) lists the models.
+    const sync = () => view && void mutate('discover_upstream_models', { source_id: pick.source_id, realm: hasRealm(view, pick.source_id) ? pick.realm : null }, '已获取上游模型，仅元数据：无推理、无自动上架。 / Upstream models fetched: metadata only, no inference or publication.');
+    const fetchUpstream = () => {
+        setDiscovery(null); setFeedback(null); setUpstreamOpen(true);
+        if (view && !view.sources.some(s => s.id === pick.source_id)) setPick({ ...pick, source_id: view.sources[0]?.id ?? '' });
+    };
+    // Clicking Test on one model is the explicit consent for that single upstream request,
+    // sent through the account that listed the model.
     async function test(candidate: CandidateModel) {
         setTesting(candidate.id);
         try {
-            await mutate('verify_model_candidates', { candidate_ids: [candidate.id], confirm_upstream_usage: true }, `${candidate.native_model} 测试完成，仅基础文本。 / Test finished: basic text only.`);
+            const account_id = discovery?.source_id === candidate.source_id ? discovery.account_id : null;
+            await mutate('verify_model_candidates', { candidate_ids: [candidate.id], confirm_upstream_usage: true, account_id }, `${candidate.native_model} 测试完成，仅基础文本。 / Test finished: basic text only.`);
         } finally { if (alive.current) setTesting(null); }
     }
     const closeAction = () => { if (!busy) { setAction(null); setActionError(null); } };
@@ -174,7 +182,7 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
                 }}>{label}</button>)}
         </div>
         {!action && issue(feedback)}
-        {busy && <p role="status" className="registry-muted flex items-center gap-2"><Loader2 size={14} className="motion-safe:animate-spin" aria-hidden />{busy === 'verify_model_candidates' ? '正在测试基础文本，最多 30 秒，不自动重试。 / Testing basic text: up to 30s, no automatic retries.' : busy === 'load' ? '正在读取目录 / Loading registry…' : busy === 'refresh_model_candidates' ? '正在获取上游模型（无推理） / Fetching upstream models (no inference)…' : '等待服务端确认，请勿重复提交。 / Waiting for the server; do not resubmit.'}</p>}
+        {busy && <p role="status" className="registry-muted flex items-center gap-2"><Loader2 size={14} className="motion-safe:animate-spin" aria-hidden />{busy === 'verify_model_candidates' ? '正在测试基础文本，最多 30 秒，不自动重试。 / Testing basic text: up to 30s, no automatic retries.' : busy === 'load' ? '正在读取目录 / Loading registry…' : busy === 'discover_upstream_models' ? '正在获取上游模型（无推理） / Fetching upstream models (no inference)…' : '等待服务端确认，请勿重复提交。 / Waiting for the server; do not resubmit.'}</p>}
         {view?.notices.map((notice, index) => <p key={index} className="registry-muted flex items-start gap-2"><CircleHelp size={14} className="mt-0.5 shrink-0" aria-hidden /><span className="break-words">{notice}</span></p>)}
         <div role="tabpanel" id={`${id}-content`} aria-labelledby={`${id}-${tab}`} aria-busy={!!busy}>
             <div hidden={tab !== 'advanced'} className="space-y-4">
@@ -182,7 +190,6 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
                 {advancedContent || <p className="registry-empty">当前没有高级设置。 / No advanced settings available.</p>}
             </div>
             {tab !== 'advanced' && (view ? <div className="space-y-3">
-                {upstreamOpen && <UpstreamModels view={view} busy={busy} testing={testing} tested={tested} sourceName={sourceName} onTest={c => void test(c)} onAdd={c => openPublish([c])} onClose={() => setUpstreamOpen(false)} />}
                 <div className="flex flex-wrap items-center gap-2">
                     <label className="min-w-0 flex-1 basis-52 relative"><span className="sr-only">搜索模型 / Search models</span><Search size={14} className="absolute left-3 top-3 text-gray-400" aria-hidden /><input className="registry-input pl-9" placeholder="搜索 ID、名称、来源 / Search ID, name, source" value={query} onChange={e => setQuery(e.target.value)} /></label>
                     <label><span className="sr-only">上游来源 / Source</span><select className="registry-input" value={source} onChange={e => setSource(e.target.value)}><option value="">全部来源 / All sources</option>{view.sources.map(s => <option key={s.id} value={s.id}>{s.display_name} · {s.account_count} 账号 / accounts{s.enabled ? '' : '（未启用 / Disabled）'}</option>)}</select></label>
@@ -202,6 +209,8 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
                 {!visiblePublished.length && <div className="registry-empty"><p>{view.published_models.length ? '没有匹配的上架模型。 / No matching publications.' : '暂无上架模型，发现候选不会开放调用。 / No publications; discovery does not enable inference.'}</p>{!upstreamOpen && <button className="registry-btn mt-3" disabled={!!busy} onClick={() => { resetFilters(); fetchUpstream(); }}><Download size={14} aria-hidden />获取上游模型 / Fetch upstream models</button>}</div>}
             </div> : !busy && <p className="registry-empty">目录不可用时不回退旧路由，请重新加载。 / Registry unavailable; no legacy fallback. Reload to retry.</p>)}
         </div>
+        {upstreamOpen && !action && view && <UpstreamModels view={view} pick={pick} report={discovery} busy={busy} testing={testing} tested={tested} notice={issue(feedback)}
+            onPick={setPick} onFetch={sync} onChangeSource={() => setDiscovery(null)} onTest={c => void test(c)} onAdd={c => openPublish([c])} onClose={() => { if (!busy) setUpstreamOpen(false); }} />}
         {action && view && <RegistryDialog title={action.kind === 'publish' ? (action.editing ? '编辑公开模型 / Edit publication' : '添加到已上架 / Add to published') : action.kind === 'remove' ? '确认下架 / Unpublish' : toggleDraft?.enabled ? '启用 / Enable' : '停用 / Disable'}
             confirmText={action.kind === 'publish' ? (action.editing ? '保存 / Save' : '添加 / Add') : action.kind === 'remove' ? '确认下架 / Unpublish' : '确认保存 / Save'}
             onConfirm={() => void submit()} onCancel={closeAction} busy={!!busy} destructive={action.kind === 'remove' || (action.kind === 'toggle' && !toggleDraft?.enabled)}

@@ -3,7 +3,8 @@ use super::model_registry::{
     self, CandidateModel, ModelRegistryView, ModelVerificationResult, SaveModelRegistryRequest,
 };
 pub use super::model_registry::{
-    ModelVerificationReport, RefreshModelCandidatesRequest, VerifyModelCandidatesRequest,
+    DiscoverUpstreamModelsRequest, ModelVerificationReport, RefreshModelCandidatesRequest,
+    UpstreamDiscoveryReport, VerifyModelCandidatesRequest,
 };
 use crate::proxy::{upstream::client::UpstreamClient, TokenManager};
 use serde_json::{json, Value};
@@ -137,6 +138,176 @@ pub async fn refresh(
     Ok(registry)
 }
 
+/// Accounts tried per discovery: the random sample plus fallbacks when it fails or lists nothing.
+const MAX_DISCOVERY_ATTEMPTS: usize = 3;
+
+struct Sampled {
+    account_id: String,
+    account_label: String,
+    models: Vec<String>,
+    attempts: usize,
+}
+
+fn shuffled<T>(mut items: Vec<T>) -> Vec<T> {
+    use rand::seq::SliceRandom;
+    items.shuffle(&mut rand::thread_rng());
+    items
+}
+
+/// Explicit metadata-only discovery through one randomly sampled account of the selected
+/// source (and WorkBuddy region). Another account is tried only when the sample fails or
+/// lists no models. No inference is made and nothing is published.
+pub async fn discover(
+    manager: &TokenManager,
+    request: DiscoverUpstreamModelsRequest,
+) -> Result<UpstreamDiscoveryReport, String> {
+    let _guard = DISCOVERY_LOCK
+        .try_lock()
+        .map_err(|_| "Model discovery is already running".to_string())?;
+    model_registry::validate_discovery_request(&request)?;
+    view(manager).await?; // Initialize publication BEFORE discovering new candidates.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let sampled = if request.source_id == model_registry::ANTIGRAVITY_SOURCE {
+        discover_antigravity(manager, deadline).await?
+    } else {
+        discover_workbuddy(request.realm, deadline).await?
+    };
+    let mut registry = view(manager).await?;
+    let candidate_ids: Vec<String> = sampled
+        .models
+        .iter()
+        .filter_map(|native| {
+            registry
+                .candidates
+                .iter()
+                .find(|c| c.source_id == request.source_id && &c.native_model == native)
+                .map(|c| c.id.clone())
+        })
+        .collect();
+    registry.notices.push(format!(
+        "已从随机抽取的账号获取 {} 个上游模型（尝试 {} 个账号）。未发起模型推理，未自动上架新模型。",
+        candidate_ids.len(),
+        sampled.attempts
+    ));
+    Ok(UpstreamDiscoveryReport {
+        source_id: request.source_id,
+        realm: request.realm,
+        account_id: sampled.account_id,
+        account_label: sampled.account_label,
+        attempts: sampled.attempts,
+        candidate_ids,
+        registry,
+    })
+}
+
+async fn discover_antigravity(
+    manager: &TokenManager,
+    deadline: tokio::time::Instant,
+) -> Result<Sampled, String> {
+    let accounts = shuffled(
+        super::account::list_accounts()?
+            .into_iter()
+            .filter(|a| !a.disabled && !a.proxy_disabled)
+            .collect(),
+    );
+    if accounts.is_empty() {
+        return Err("No enabled Antigravity account".into());
+    }
+    let mut attempts = 0;
+    let mut found = None;
+    for account in accounts.into_iter().take(MAX_DISCOVERY_ATTEMPTS) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        attempts += 1;
+        let result = tokio::time::timeout(remaining.min(Duration::from_secs(15)), async {
+            let (token, _, _, _, _) = manager.get_token_by_email(&account.email).await?;
+            let (quota, _) = super::quota::fetch_quota(&token, &account.email, Some(&account.id))
+                .await
+                .map_err(|e| e.to_string())?;
+            let models: Vec<String> = quota.models.iter().map(|m| m.name.clone()).collect();
+            super::account::update_account_quota(&account.id, quota)?;
+            Ok::<_, String>(models)
+        })
+        .await;
+        if let Ok(Ok(models)) = result {
+            if !models.is_empty() {
+                found = Some((account, models));
+                break;
+            }
+        }
+    }
+    load_local_accounts(manager).await?;
+    let (account, models) = found.ok_or_else(|| {
+        format!("No sampled Antigravity account returned models ({attempts} tried)")
+    })?;
+    Ok(Sampled {
+        account_id: account.id,
+        account_label: account.email,
+        models,
+        attempts,
+    })
+}
+
+async fn discover_workbuddy(
+    realm: Option<super::workbuddy::accounts::Realm>,
+    deadline: tokio::time::Instant,
+) -> Result<Sampled, String> {
+    let preferred = super::workbuddy::load()?.preferred_account_id;
+    // A preferred account restricts routing, so models of other accounts are not routable.
+    let accounts = shuffled(
+        super::workbuddy::accounts::list()?
+            .into_iter()
+            .filter(|a| {
+                a.enabled
+                    && realm.is_none_or(|realm| realm == a.realm)
+                    && preferred.as_ref().is_none_or(|id| id == &a.id)
+            })
+            .collect(),
+    );
+    if accounts.is_empty() {
+        return Err("No enabled WorkBuddy account in this region (or the preferred account is in another region)".into());
+    }
+    let mut attempts = 0;
+    for account in accounts.into_iter().take(MAX_DISCOVERY_ATTEMPTS) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        attempts += 1;
+        let result = tokio::time::timeout(
+            remaining.min(Duration::from_secs(15)),
+            super::workbuddy::accounts::sync(&account.id, false),
+        )
+        .await;
+        // Sync reports credential and catalog failures through last_error, not Err.
+        if !matches!(&result, Ok(Ok(view)) if view.last_error.is_none()) {
+            continue;
+        }
+        let models: Vec<String> = super::workbuddy::accounts::get(&account.id)?
+            .models
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        if !models.is_empty() {
+            return Ok(Sampled {
+                account_label: if account.nickname.is_empty() {
+                    account.uid
+                } else {
+                    account.nickname
+                },
+                account_id: account.id,
+                models,
+                attempts,
+            });
+        }
+    }
+    Err(format!(
+        "No sampled WorkBuddy account returned models ({attempts} tried)"
+    ))
+}
+
 pub fn validate_verification_request(request: &VerifyModelCandidatesRequest) -> Result<(), String> {
     if !request.confirm_upstream_usage {
         return Err("Confirm upstream quota/cost before verifying models".into());
@@ -187,7 +358,7 @@ pub async fn verify(
         let checked_at = chrono::Utc::now().timestamp();
         let result = tokio::time::timeout(
             remaining.min(Duration::from_secs(30)),
-            probe(manager, upstream, &candidate),
+            probe(manager, upstream, &candidate, request.account_id.as_deref()),
         )
         .await;
         let (status, message, account_id) = match result {
@@ -227,12 +398,15 @@ async fn probe(
     manager: &TokenManager,
     upstream: &UpstreamClient,
     candidate: &CandidateModel,
+    account_id: Option<&str>,
 ) -> Result<(String, String, Option<String>), String> {
     match candidate.source_id.as_str() {
         model_registry::WORKBUDDY_SOURCE => {
-            let (account_id, outcome) =
-                super::workbuddy::verification::verify_selected_model(&candidate.native_model)
-                    .await?;
+            let (account_id, outcome) = super::workbuddy::verification::verify_selected_model(
+                &candidate.native_model,
+                account_id,
+            )
+            .await?;
             use super::workbuddy::verification::Outcome;
             let (status, message) = match outcome {
                 Outcome::Available => (
@@ -250,7 +424,9 @@ async fn probe(
             };
             Ok((status.into(), message.into(), Some(account_id)))
         }
-        model_registry::ANTIGRAVITY_SOURCE => probe_antigravity(manager, upstream, candidate).await,
+        model_registry::ANTIGRAVITY_SOURCE => {
+            probe_antigravity(manager, upstream, candidate, account_id).await
+        }
         _ => Err("This source has no basic-text verification adapter".into()),
     }
 }
@@ -259,6 +435,7 @@ async fn probe_antigravity(
     manager: &TokenManager,
     upstream: &UpstreamClient,
     candidate: &CandidateModel,
+    account_id: Option<&str>,
 ) -> Result<(String, String, Option<String>), String> {
     // Never silently invoke image generation under a basic-text verification action.
     let lower = candidate.native_model.to_lowercase();
@@ -273,7 +450,8 @@ async fn probe_antigravity(
     let account = accounts
         .into_iter()
         .find(|account| {
-            !account.disabled
+            account_id.is_none_or(|id| id == account.id)
+                && !account.disabled
                 && !account.proxy_disabled
                 && account.quota.as_ref().is_some_and(|quota| {
                     quota.models.iter().any(|model| {
@@ -373,6 +551,7 @@ mod tests {
         let request = |ids, confirm| VerifyModelCandidatesRequest {
             candidate_ids: ids,
             confirm_upstream_usage: confirm,
+            account_id: None,
         };
         assert!(validate_verification_request(&request(vec!["a".into()], false)).is_err());
         assert!(validate_verification_request(&request(vec![], true)).is_err());

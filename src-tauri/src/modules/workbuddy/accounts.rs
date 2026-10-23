@@ -26,7 +26,7 @@ static REFRESH_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>
 pub fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Realm {
     #[default]
