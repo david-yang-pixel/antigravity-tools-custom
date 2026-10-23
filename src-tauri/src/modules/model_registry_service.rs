@@ -363,16 +363,27 @@ pub async fn verify(
         .await;
         let (status, message, account_id) = match result {
             Ok(Ok(value)) => value,
-            Ok(Err(_)) => (
-                "failed".to_string(),
-                "基础文本验证未完成：账号、网络或服务暂不可用；未判定模型永久不可用。".to_string(),
-                None,
-            ),
-            Err(_) => (
-                "failed".to_string(),
-                "基础文本验证超时；未判定模型永久不可用。".to_string(),
-                None,
-            ),
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "Model probe for {} did not complete: {}",
+                    candidate.native_model,
+                    crate::proxy::upstream::client::sanitize_error_for_log(&error)
+                );
+                (
+                    "failed".to_string(),
+                    "基础文本验证未完成：账号、网络或服务暂不可用；未判定模型永久不可用。"
+                        .to_string(),
+                    None,
+                )
+            }
+            Err(_) => {
+                tracing::warn!("Model probe for {} timed out", candidate.native_model);
+                (
+                    "failed".to_string(),
+                    "基础文本验证超时；未判定模型永久不可用。".to_string(),
+                    None,
+                )
+            }
         };
         let result = model_registry::sanitize_verification_result(ModelVerificationResult {
             candidate_id: candidate.id,
@@ -417,10 +428,17 @@ async fn probe(
                     "unavailable",
                     "抽样账号明确无此模型权限；不代表其他账号均不可用。",
                 ),
-                Outcome::Failed => (
-                    "failed",
-                    "抽样调用失败或暂不可用；未撤销其他账号的成功证据。",
-                ),
+                Outcome::Failed => {
+                    tracing::warn!(
+                        "Model probe for {} on WorkBuddy account {} failed",
+                        candidate.native_model,
+                        account_id
+                    );
+                    (
+                        "failed",
+                        "抽样调用失败或暂不可用；未撤销其他账号的成功证据。",
+                    )
+                }
             };
             Ok((status.into(), message.into(), Some(account_id)))
         }
@@ -429,6 +447,30 @@ async fn probe(
         }
         _ => Err("This source has no basic-text verification adapter".into()),
     }
+}
+
+/// Logs at most this much of a probe response; enough to see the upstream's reason.
+const PROBE_LOG_BYTES: usize = 4096;
+
+fn probe_body_for_log(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(PROBE_LOG_BYTES)]);
+    match text.trim() {
+        "" => "<empty body>".into(),
+        text => crate::proxy::upstream::client::sanitize_error_for_log(text),
+    }
+}
+
+/// Reads a bounded prefix of a rejected probe response; the caller's timeout bounds the wait.
+async fn probe_detail(mut response: rquest::Response) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < PROBE_LOG_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+            Ok(None) => break,
+            Err(_) => return "<body interrupted>".into(),
+        }
+    }
+    probe_body_for_log(&bytes)
 }
 
 async fn probe_antigravity(
@@ -440,6 +482,10 @@ async fn probe_antigravity(
     // Never silently invoke image generation under a basic-text verification action.
     let lower = candidate.native_model.to_lowercase();
     if lower.contains("image") || lower.contains("dall-e") || lower.contains("midjourney") {
+        tracing::info!(
+            "Model probe skipped {}: image models need a dedicated check",
+            candidate.native_model
+        );
         return Ok((
             "failed".into(),
             "该模型不能用安全的基础文本探测确认；未发起图片生成，仍需专项验证。".into(),
@@ -447,6 +493,9 @@ async fn probe_antigravity(
         ));
     }
     let accounts = super::account::list_accounts()?;
+    // Candidates are keyed by the quota entry's `name`, which is the API model ID.
+    // Its `model` field is an internal enum (e.g. MODEL_PLACEHOLDER_M35) that the
+    // upstream rejects as a model name, so it must never be sent.
     let account = accounts
         .into_iter()
         .find(|account| {
@@ -454,28 +503,17 @@ async fn probe_antigravity(
                 && !account.disabled
                 && !account.proxy_disabled
                 && account.quota.as_ref().is_some_and(|quota| {
-                    quota.models.iter().any(|model| {
-                        model.name == candidate.native_model
-                            || model.model.as_deref() == Some(candidate.native_model.as_str())
-                    })
+                    quota
+                        .models
+                        .iter()
+                        .any(|model| model.name == candidate.native_model)
                 })
         })
         .ok_or("No enabled account declares this model")?;
-    let native = account
-        .quota
-        .as_ref()
-        .and_then(|quota| {
-            quota
-                .models
-                .iter()
-                .find(|model| model.name == candidate.native_model)
-        })
-        .and_then(|model| model.model.clone())
-        .unwrap_or_else(|| candidate.native_model.clone());
     let (token, project, _, account_id, _) = manager.get_token_by_email(&account.email).await?;
     let body = json!({
         "project": project, "requestId": format!("registry-verify-{}", uuid::Uuid::new_v4()),
-        "model": native, "userAgent": "antigravity", "requestType": "agent",
+        "model": candidate.native_model, "userAgent": "antigravity", "requestType": "agent",
         "request": {
             "contents": [{"role": "user", "parts": [{"text": "Reply with only OK."}]}],
             "generationConfig": {"maxOutputTokens": 512, "temperature": 0}
@@ -487,6 +525,13 @@ async fn probe_antigravity(
         .response;
     let status = response.status();
     if !status.is_success() {
+        tracing::warn!(
+            "Model probe for {} on account {} got HTTP {}: {}",
+            candidate.native_model,
+            account_id,
+            status.as_u16(),
+            probe_detail(response).await
+        );
         // An HTTP endpoint error alone is not conclusive model-permission evidence.
         let state = "failed";
         return Ok((
@@ -531,6 +576,14 @@ async fn probe_antigravity(
                     })
             })
         });
+    if !text {
+        tracing::warn!(
+            "Model probe for {} on account {} returned no answer text: {}",
+            candidate.native_model,
+            account_id,
+            probe_body_for_log(&bytes)
+        );
+    }
     Ok((
         if text { "verified" } else { "failed" }.into(),
         if text {
@@ -564,6 +617,14 @@ mod tests {
         assert!(
             validate_verification_request(&request(vec!["a".into(), "b".into()], true)).is_ok()
         );
+    }
+
+    #[test]
+    fn model_probe_log_is_bounded_and_redacted() {
+        assert_eq!(probe_body_for_log(b"  \n"), "<empty body>");
+        let logged = probe_body_for_log(br#"{"error":"bad model","auth":"Bearer ya29.secret"}"#);
+        assert!(logged.contains("bad model") && !logged.contains("ya29.secret"));
+        assert!(probe_body_for_log(&[b'x'; PROBE_LOG_BYTES * 2]).len() <= PROBE_LOG_BYTES);
     }
 }
 
