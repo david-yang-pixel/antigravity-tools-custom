@@ -960,8 +960,10 @@ async fn scripted(
             tokio::time::sleep(Duration::from_millis(50)).await;
             yield Ok(bytes::Bytes::from_static(b"data: {\"error\":{\"message\":\"failed\"}}\n\n"));
         })),
-        status => StatusCode::from_u16(status.parse().unwrap())
-            .unwrap()
+        status => (
+            StatusCode::from_u16(status.parse().unwrap()).unwrap(),
+            r#"{"error":{"message":"rejected by mock"}}"#,
+        )
             .into_response(),
     }
 }
@@ -1050,6 +1052,26 @@ async fn workbuddy_failure_after_output_or_bad_request_is_not_retried() {
     let response = send(false, Policy::default()).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(hits(&script).len(), 1);
+}
+
+#[tokio::test]
+async fn workbuddy_bad_request_does_not_cool_the_account_down() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(1, &["400", "413", "422"]).await;
+    let mut policy = Policy::default();
+    policy.breaker.enabled = true;
+    for _ in 0..3 {
+        assert_eq!(
+            send(false, policy.clone()).await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+    let account = &workbuddy::accounts::list().unwrap()[0];
+    assert_eq!(account.health.failures, 0);
+    assert_eq!(account.cooldown_until, 0);
+    // The only account keeps serving other requests right away.
+    assert_eq!(send(false, policy).await.status(), StatusCode::OK);
+    assert_eq!(hits(&script).len(), 4);
 }
 
 #[tokio::test]
