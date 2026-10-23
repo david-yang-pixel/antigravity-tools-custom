@@ -79,21 +79,15 @@ pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, Str
             &format!("Bearer {}", account.access_token),
         )?;
         add(&mut h, "x-user-id", &account.uid)?;
+        // Match identity::ensure seeds (account.id), never uid — otherwise the first
+        // pre-backfill request and later persisted headers disagree.
         let machine = if account.client.machine_id.is_empty() {
-            let digest = Sha256::digest(format!("wb2a:machine:{}", account.uid).as_bytes());
-            digest[..18]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            super::identity::machine_id(&account.id)
         } else {
             account.client.machine_id.clone()
         };
         let session = if account.client.session_id.is_empty() {
-            let digest = Sha256::digest(format!("wb2a:session:{}", account.uid).as_bytes());
-            digest[..18]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            super::identity::session_id(&account.id)
         } else {
             account.client.session_id.clone()
         };

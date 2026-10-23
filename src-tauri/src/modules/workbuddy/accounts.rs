@@ -420,6 +420,14 @@ fn update_if_current(account: &mut Account) -> Result<(), String> {
     account.verified_models = old.verified_models.clone();
     account.unavailable_models = old.unavailable_models.clone();
     account.models_verified_at = old.models_verified_at;
+    // Keep a fingerprint that another path may have backfilled while this refresh ran.
+    if account.client.machine_id.is_empty() {
+        account.client = old.client.clone();
+    }
+    if account.device_token.is_empty() {
+        account.device_token = old.device_token.clone();
+    }
+    let _ = super::identity::ensure(account);
     account.revision = uuid::Uuid::new_v4().to_string();
     *old = account.clone();
     write(&accounts)

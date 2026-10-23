@@ -29,6 +29,14 @@ fn hex_id(seed: &str) -> String {
         .collect()
 }
 
+/// Same derivation as `ensure`; headers use this before backfill persists the fields.
+pub fn machine_id(account_id: &str) -> String {
+    hex_id(&format!("wb2a:machine:{account_id}"))
+}
+pub fn session_id(account_id: &str) -> String {
+    hex_id(&format!("wb2a:session:{account_id}"))
+}
+
 fn uuid_from(seed: &str) -> String {
     let d = digest(seed);
     // RFC-ish layout from hash bytes; stable across restarts, unique per account id.
@@ -72,11 +80,11 @@ fn user_agent(realm: Realm, product: &str, cli: &str) -> String {
 pub fn ensure(account: &mut Account) -> bool {
     let mut changed = false;
     if account.client.machine_id.is_empty() {
-        account.client.machine_id = hex_id(&format!("wb2a:machine:{}", account.id));
+        account.client.machine_id = machine_id(&account.id);
         changed = true;
     }
     if account.client.session_id.is_empty() {
-        account.client.session_id = hex_id(&format!("wb2a:session:{}", account.id));
+        account.client.session_id = session_id(&account.id);
         changed = true;
     }
     if account.device_token.is_empty() {
@@ -148,6 +156,8 @@ mod tests {
         assert_ne!(a.client.user_agent, b.client.user_agent);
         assert_ne!(a.client.machine_id, b.client.machine_id);
         assert_ne!(a.device_token, b.device_token);
+        assert_eq!(a.client.machine_id, machine_id(&a.id));
+        assert_eq!(a.client.session_id, session_id(&a.id));
         let ua = a.client.user_agent.clone();
         let machine = a.client.machine_id.clone();
         assert!(!ensure(&mut a));

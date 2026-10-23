@@ -213,17 +213,20 @@ pub fn start(id: &str, action: Action) -> Result<AccountView, String> {
 async fn execute(initial: Account, action: Action) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     let account = match current(&initial, action) {
-        Ok(_) => {
-            match accounts::fresh_before(&initial.id, deadline).await {
-                Ok(Ok(account)) => account,
-                _ => {
-                    fail_run(&initial, "Could not prepare account credentials; retry after authorization is restored".into());
-                    return;
-                }
+        Ok(_) => match accounts::fresh_before(&initial.id, deadline).await {
+            Ok(Ok(account)) => account,
+            _ => {
+                fail_run(
+                    &initial,
+                    action,
+                    "Could not prepare account credentials; retry after authorization is restored"
+                        .into(),
+                );
+                return;
             }
-        }
+        },
         Err(error) => {
-            fail_run(&initial, error);
+            fail_run(&initial, action, error);
             return;
         }
     };
@@ -260,24 +263,26 @@ async fn execute(initial: Account, action: Action) {
             .history
             .iter()
             .any(|r| r.at >= runner.state.last_attempt_at && r.status == "claimed");
-        if action == Action::Automatic || action == Action::Claim {
-            if claimed {
-                runner.state.idle_streak = 0;
-            } else if action == Action::Automatic {
-                runner.state.idle_streak = runner.state.idle_streak.saturating_add(1).min(8);
-            }
+        if claimed {
+            runner.state.idle_streak = 0;
+        } else if action == Action::Automatic && runner.read_ok > 0 {
+            // Stretch only after a successful empty poll — outages must not look like "nothing to claim".
+            runner.state.idle_streak = runner.state.idle_streak.saturating_add(1).min(8);
         }
         runner.state.next_run_at = accounts::now()
             + super::identity::activity_interval_secs(&runner.account.id, runner.state.idle_streak);
     }
     let _ = runner.save();
 }
-fn fail_run(account: &Account, error: String) {
+fn fail_run(account: &Account, action: Action, error: String) {
     let mut state = account.management.activity.clone();
     state.status = "failed".into();
     state.error = Some(error);
-    state.next_run_at =
-        accounts::now() + super::identity::activity_interval_secs(&account.id, state.idle_streak);
+    // Read-only queries must not postpone automatic collection (same rule as start()).
+    if action != Action::Query {
+        state.next_run_at = accounts::now()
+            + super::identity::activity_interval_secs(&account.id, state.idle_streak);
+    }
     let _ = accounts::save_activity(account, state);
 }
 struct Runner {
