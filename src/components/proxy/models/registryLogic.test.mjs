@@ -74,6 +74,12 @@ test('publication validates exact case-sensitive public names and a single model
     assert.ok(logic.publicationError(view(), [publication('new', ag.id, 'same-name', 'x'), publication('other', wb.id, 'same-name', 'x')]));
 });
 
+test('a published binding can take another alias, never a used name', () => {
+    const registry = view({ published_models: [publication('old', ag.id, 'same-name', 'same-name')] });
+    assert.ok(logic.publicationError(registry, [publication('new', ag.id, 'same-name', 'same-name')]));
+    assert.equal(logic.publicationError(registry, [publication('new', ag.id, 'same-name', 'my-alias')]), null);
+});
+
 test('unavailable/new disabled-source candidates cannot be published', () => {
     const unavailable = view({ candidates: [candidate('ag-c', ag.id, 'same-name', { verification_status: 'unavailable' })] });
     assert.ok(logic.publicationError(unavailable, [publication('new', ag.id, 'same-name', 'new')]));
