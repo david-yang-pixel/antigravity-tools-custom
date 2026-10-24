@@ -162,6 +162,10 @@ async fn workbuddy_native_stream_to_three_protocols_and_pool_release() {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["x-upstream-provider"], "workbuddy");
+            assert_eq!(
+                response.headers()["x-account-email"],
+                "mock-uid@workbuddy-cn"
+            );
             let data = to_bytes(response.into_body(), 100_000).await.unwrap();
             let data = String::from_utf8(data.to_vec()).unwrap();
             assert!(data.contains("你好"));
@@ -877,6 +881,7 @@ async fn assert_zero_balance_admin_policy(client: &reqwest::Client, base: &str) 
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["x-upstream-provider"], "workbuddy");
+            assert!(response.headers().get("x-account-email").is_some());
             assert!(response.text().await.unwrap().contains(model));
         }
     }
@@ -1134,7 +1139,142 @@ async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alia
         let response = app(config).oneshot(wb).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-mapped-model"], "claude-sonnet-4-6");
+        assert_eq!(
+            response.headers()["x-account-email"],
+            "mock-uid@workbuddy-cn"
+        );
         let data = to_bytes(response.into_body(), 100_000).await.unwrap();
         assert!(String::from_utf8_lossy(&data).contains("wb-sonnet"));
     }
+}
+
+#[test]
+fn workbuddy_account_stats_key_ignores_nickname_and_encodes_uid_separators() {
+    let mut account = workbuddy::accounts::parse_import(json!({
+        "uid":"u1","nickname":"Ada Lovelace","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
+    account.nickname = "Grace_Hopper".into();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
+    account.nickname = "中文昵称".into();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
+    account.nickname.clear();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
+    account.realm = workbuddy::accounts::Realm::Global;
+    account.nickname = "Ada".into();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-global");
+
+    // Old key `{nick}+{uid}` collided: nickname Ada + uid 42 == uid Ada+42.
+    let nick_and_uid = workbuddy::accounts::parse_import(json!({
+        "uid":"42","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    let mut plus_uid = workbuddy::accounts::parse_import(json!({
+        "uid":"Ada+42","nickname":"","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(super::account_stats_key(&nick_and_uid), "42@workbuddy-cn");
+    assert_eq!(super::account_stats_key(&plus_uid), "Ada%2B42@workbuddy-cn");
+    assert_ne!(
+        super::account_stats_key(&nick_and_uid),
+        super::account_stats_key(&plus_uid)
+    );
+    plus_uid.nickname = "ignored".into();
+    assert_eq!(super::account_stats_key(&plus_uid), "Ada%2B42@workbuddy-cn");
+
+    // A literal percent-encoded uid must not decode to the same key, and `@`
+    // stays in the local-part so it cannot be read as the realm separator.
+    let literal_percent = workbuddy::accounts::parse_import(json!({
+        "uid":"Ada%2B42","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(
+        super::account_stats_key(&literal_percent),
+        "Ada%252B42@workbuddy-cn"
+    );
+    let at_uid = workbuddy::accounts::parse_import(json!({
+        "uid":"Ada+42@workbuddy-global","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(
+        super::account_stats_key(&at_uid),
+        "Ada%2B42%40workbuddy-global@workbuddy-cn"
+    );
+}
+
+#[test]
+fn workbuddy_reauthorization_nickname_change_keeps_the_same_stats_key() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let account = workbuddy::accounts::parse_import(json!({
+        "uid":"42","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    let before = super::account_stats_key(&account);
+    let view = workbuddy::accounts::upsert(account).unwrap();
+    let renamed = workbuddy::accounts::parse_import(json!({
+        "uid":"42","nickname":"Grace Hopper","accessToken":"t2","refreshToken":"r","expiresAt":1
+    }))
+    .unwrap();
+    let updated = workbuddy::accounts::upsert(renamed).unwrap();
+    assert_eq!(updated.id, view.id);
+    assert_eq!(updated.nickname, "Grace Hopper");
+    let stored = workbuddy::accounts::get(&view.id).unwrap();
+    assert_eq!(stored.nickname, "Grace Hopper");
+    assert_eq!(super::account_stats_key(&stored), before);
+    assert_eq!(before, "42@workbuddy-cn");
+}
+
+fn monitored_app(settings: Settings) -> Router {
+    let monitor = std::sync::Arc::new(crate::proxy::monitor::ProxyMonitor::disabled_for_test());
+    let state = crate::proxy::server::test_app_state(monitor);
+    app(settings).layer(axum::middleware::from_fn_with_state(
+        state,
+        crate::proxy::middleware::monitor_middleware,
+    ))
+}
+
+async fn persisted_account_stats() -> Vec<crate::modules::token_stats::AccountTokenStats> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let stats =
+            tokio::task::spawn_blocking(|| crate::modules::token_stats::get_account_stats(24))
+                .await
+                .expect("token stats query")
+                .expect("token stats db");
+        let settled = stats.iter().any(|row| row.request_count >= 2);
+        if settled || tokio::time::Instant::now() >= deadline {
+            return stats;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn workbuddy_stream_and_nonstream_usage_aggregate_on_one_stats_key() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    crate::modules::token_stats::init_db().unwrap();
+    let _mock = mock().await;
+    seed();
+    let key = "mock-uid@workbuddy-cn";
+    for stream in [false, true] {
+        let response = monitored_app(settings())
+            .oneshot(request("/v1/chat/completions", "wb-sonnet", stream))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-account-email"], key);
+        let body = to_bytes(response.into_body(), 100_000).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("你好"), "{body}");
+    }
+    let stats = persisted_account_stats().await;
+    assert_eq!(stats.len(), 1, "{stats:?}");
+    let row = &stats[0];
+    assert_eq!(row.account_email, key);
+    assert_eq!(row.request_count, 2);
+    assert_eq!(row.total_input_tokens, 2000);
+    assert_eq!(row.total_output_tokens, 40);
+    assert_eq!(row.total_cached_tokens, 1200);
+    assert_eq!(row.total_tokens, 2040);
 }

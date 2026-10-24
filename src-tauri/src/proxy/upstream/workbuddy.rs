@@ -485,6 +485,7 @@ async fn attempt(
                 ))
                 .unwrap(),
             target,
+            &account,
         ));
     }
     // Non-streaming follows the same rule: retry only before the first parsed output,
@@ -530,7 +531,7 @@ async fn attempt(
     match output.end() {
         Ok((value, _)) => {
             lease.success();
-            Ok(decorate(Json(value).into_response(), target))
+            Ok(decorate(Json(value).into_response(), target, &account))
         }
         Err(message) => {
             lease.failure("Incomplete upstream generation", 15);
@@ -539,7 +540,47 @@ async fn attempt(
     }
 }
 
-fn decorate(mut response: Response, target: &str) -> Response {
+/// Token Stats key (`X-Account-Email`). Identity is realm + uid only.
+///
+/// Re-authorization replaces the nickname (`accounts::upsert` matches on
+/// realm+uid and stores the new nickname). Token Stats groups by the full
+/// header value, so the nickname stays on the account record and is not part
+/// of this key. The uid is percent-encoded so separators such as `+` and `@`
+/// cannot alias two accounts (an empty nickname plus uid `Ada+42` used to
+/// collide with nickname `Ada` plus uid `42`).
+fn account_stats_key(account: &workbuddy::accounts::Account) -> String {
+    let realm = match account.realm {
+        workbuddy::accounts::Realm::Cn => "cn",
+        workbuddy::accounts::Realm::Global => "global",
+    };
+    format!("{}@workbuddy-{realm}", encode_stats_uid(&account.uid))
+}
+
+/// RFC 3986 unreserved bytes stay literal. Every other byte is `%HH` (uppercase),
+/// which is injective and a valid header value even when the uid contains `+` or `@`.
+fn encode_stats_uid(uid: &str) -> String {
+    let mut out = String::with_capacity(uid.len());
+    for byte in uid.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+fn decorate(
+    mut response: Response,
+    target: &str,
+    account: &workbuddy::accounts::Account,
+) -> Response {
     response.headers_mut().insert(
         "x-mapped-model",
         target.parse().expect("validated model id"),
@@ -547,6 +588,10 @@ fn decorate(mut response: Response, target: &str) -> Response {
     response
         .headers_mut()
         .insert("x-upstream-provider", "workbuddy".parse().unwrap());
+    // Mirror Antigravity's X-Account-Email so token_stats.record_usage can attribute usage.
+    if let Ok(value) = account_stats_key(account).parse() {
+        response.headers_mut().insert("x-account-email", value);
+    }
     response
 }
 

@@ -109,6 +109,56 @@ pub struct AppState {
     pub image_scheduler: Arc<ImageScheduler>,
 }
 
+/// Monitor-only state for tests that call `monitor_middleware`. The middleware
+/// reads `state.monitor`; the other fields stay inert.
+#[cfg(test)]
+pub(crate) fn test_app_state(monitor: Arc<crate::proxy::monitor::ProxyMonitor>) -> AppState {
+    let proxy_pool_state = Arc::new(tokio::sync::RwLock::new(
+        crate::proxy::config::ProxyPoolConfig::default(),
+    ));
+    let integration = crate::modules::integration::SystemManager::Headless;
+    AppState {
+        token_manager: Arc::new(TokenManager::new(std::path::PathBuf::new())),
+        custom_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        request_timeout: 30,
+        thought_signature_map: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        upstream_proxy: Arc::new(tokio::sync::RwLock::new(
+            crate::proxy::config::UpstreamProxyConfig::default(),
+        )),
+        upstream: Arc::new(crate::proxy::upstream::client::UpstreamClient::new(
+            None, None,
+        )),
+        monitor,
+        experimental: Arc::new(RwLock::new(
+            crate::proxy::config::ExperimentalConfig::default(),
+        )),
+        debug_logging: Arc::new(RwLock::new(
+            crate::proxy::config::DebugLoggingConfig::default(),
+        )),
+        switching: Arc::new(RwLock::new(false)),
+        integration: integration.clone(),
+        account_service: Arc::new(crate::modules::account_service::AccountService::new(
+            integration,
+        )),
+        security: Arc::new(RwLock::new(crate::proxy::ProxySecurityConfig {
+            auth_mode: crate::proxy::config::ProxyAuthMode::Off,
+            api_key: String::new(),
+            admin_password: None,
+            allow_lan_access: false,
+            port: 0,
+            security_monitor: crate::proxy::config::SecurityMonitorConfig::default(),
+        })),
+        is_running: Arc::new(RwLock::new(false)),
+        port: 0,
+        proxy_pool_state: proxy_pool_state.clone(),
+        proxy_pool_manager: Arc::new(crate::proxy::proxy_pool::ProxyPoolManager::new(
+            proxy_pool_state,
+        )),
+        only_raw_quota_models: Arc::new(tokio::sync::RwLock::new(false)),
+        image_scheduler: build_image_scheduler(Vec::new(), 1),
+    }
+}
+
 #[derive(Default)]
 struct ImageAccountState {
     enabled: bool,
