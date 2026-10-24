@@ -540,25 +540,40 @@ async fn attempt(
     }
 }
 
-/// Stable account key for Token Stats / monitor (`X-Account-Email`).
-/// Identity is realm+uid; ASCII nicknames are preferred in the local-part for display.
+/// Token Stats key (`X-Account-Email`). Identity is realm + uid only.
+///
+/// Re-authorization replaces the nickname (`accounts::upsert` matches on
+/// realm+uid and stores the new nickname). Token Stats groups by the full
+/// header value, so the nickname stays on the account record and is not part
+/// of this key. The uid is percent-encoded so separators such as `+` and `@`
+/// cannot alias two accounts (an empty nickname plus uid `Ada+42` used to
+/// collide with nickname `Ada` plus uid `42`).
 fn account_stats_key(account: &workbuddy::accounts::Account) -> String {
     let realm = match account.realm {
         workbuddy::accounts::Realm::Cn => "cn",
         workbuddy::accounts::Realm::Global => "global",
     };
-    let nick = account.nickname.trim();
-    let safe_nick = (!nick.is_empty()
-        && nick != account.uid
-        && nick.is_ascii()
-        && nick
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ')))
-    .then(|| nick.replace(' ', "_"));
-    match safe_nick {
-        Some(nick) => format!("{nick}+{}@workbuddy-{realm}", account.uid),
-        None => format!("{}@workbuddy-{realm}", account.uid),
+    format!("{}@workbuddy-{realm}", encode_stats_uid(&account.uid))
+}
+
+/// RFC 3986 unreserved bytes stay literal. Every other byte is `%HH` (uppercase),
+/// which is injective and a valid header value even when the uid contains `+` or `@`.
+fn encode_stats_uid(uid: &str) -> String {
+    let mut out = String::with_capacity(uid.len());
+    for byte in uid.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
     }
+    out
 }
 
 fn decorate(

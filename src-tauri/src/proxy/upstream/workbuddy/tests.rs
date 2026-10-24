@@ -164,7 +164,7 @@ async fn workbuddy_native_stream_to_three_protocols_and_pool_release() {
             assert_eq!(response.headers()["x-upstream-provider"], "workbuddy");
             assert_eq!(
                 response.headers()["x-account-email"],
-                "Mock_account+mock-uid@workbuddy-cn"
+                "mock-uid@workbuddy-cn"
             );
             let data = to_bytes(response.into_body(), 100_000).await.unwrap();
             let data = String::from_utf8(data.to_vec()).unwrap();
@@ -1141,7 +1141,7 @@ async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alia
         assert_eq!(response.headers()["x-mapped-model"], "claude-sonnet-4-6");
         assert_eq!(
             response.headers()["x-account-email"],
-            "Mock_account+mock-uid@workbuddy-cn"
+            "mock-uid@workbuddy-cn"
         );
         let data = to_bytes(response.into_body(), 100_000).await.unwrap();
         assert!(String::from_utf8_lossy(&data).contains("wb-sonnet"));
@@ -1149,18 +1149,78 @@ async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alia
 }
 
 #[test]
-fn workbuddy_account_stats_key_prefers_ascii_nickname_and_falls_back_to_uid() {
+fn workbuddy_account_stats_key_ignores_nickname_and_encodes_uid_separators() {
     let mut account = workbuddy::accounts::parse_import(json!({
         "uid":"u1","nickname":"Ada Lovelace","accessToken":"t","expiresAt":1
     }))
     .unwrap();
-    assert_eq!(
-        super::account_stats_key(&account),
-        "Ada_Lovelace+u1@workbuddy-cn"
-    );
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
+    account.nickname = "Grace_Hopper".into();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
     account.nickname = "中文昵称".into();
     assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
-    account.realm = workbuddy::accounts::Realm::Global;
     account.nickname.clear();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
+    account.realm = workbuddy::accounts::Realm::Global;
+    account.nickname = "Ada".into();
     assert_eq!(super::account_stats_key(&account), "u1@workbuddy-global");
+
+    // Old key `{nick}+{uid}` collided: nickname Ada + uid 42 == uid Ada+42.
+    let nick_and_uid = workbuddy::accounts::parse_import(json!({
+        "uid":"42","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    let mut plus_uid = workbuddy::accounts::parse_import(json!({
+        "uid":"Ada+42","nickname":"","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(super::account_stats_key(&nick_and_uid), "42@workbuddy-cn");
+    assert_eq!(super::account_stats_key(&plus_uid), "Ada%2B42@workbuddy-cn");
+    assert_ne!(
+        super::account_stats_key(&nick_and_uid),
+        super::account_stats_key(&plus_uid)
+    );
+    plus_uid.nickname = "ignored".into();
+    assert_eq!(super::account_stats_key(&plus_uid), "Ada%2B42@workbuddy-cn");
+
+    // A literal percent-encoded uid must not decode to the same key, and `@`
+    // stays in the local-part so it cannot be read as the realm separator.
+    let literal_percent = workbuddy::accounts::parse_import(json!({
+        "uid":"Ada%2B42","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(
+        super::account_stats_key(&literal_percent),
+        "Ada%252B42@workbuddy-cn"
+    );
+    let at_uid = workbuddy::accounts::parse_import(json!({
+        "uid":"Ada+42@workbuddy-global","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(
+        super::account_stats_key(&at_uid),
+        "Ada%2B42%40workbuddy-global@workbuddy-cn"
+    );
+}
+
+#[test]
+fn workbuddy_reauthorization_nickname_change_keeps_the_same_stats_key() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let account = workbuddy::accounts::parse_import(json!({
+        "uid":"42","nickname":"Ada","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    let before = super::account_stats_key(&account);
+    let view = workbuddy::accounts::upsert(account).unwrap();
+    let renamed = workbuddy::accounts::parse_import(json!({
+        "uid":"42","nickname":"Grace Hopper","accessToken":"t2","refreshToken":"r","expiresAt":1
+    }))
+    .unwrap();
+    let updated = workbuddy::accounts::upsert(renamed).unwrap();
+    assert_eq!(updated.id, view.id);
+    assert_eq!(updated.nickname, "Grace Hopper");
+    let stored = workbuddy::accounts::get(&view.id).unwrap();
+    assert_eq!(stored.nickname, "Grace Hopper");
+    assert_eq!(super::account_stats_key(&stored), before);
+    assert_eq!(before, "42@workbuddy-cn");
 }
