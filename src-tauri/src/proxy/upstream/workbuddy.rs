@@ -485,6 +485,7 @@ async fn attempt(
                 ))
                 .unwrap(),
             target,
+            &account,
         ));
     }
     // Non-streaming follows the same rule: retry only before the first parsed output,
@@ -530,7 +531,7 @@ async fn attempt(
     match output.end() {
         Ok((value, _)) => {
             lease.success();
-            Ok(decorate(Json(value).into_response(), target))
+            Ok(decorate(Json(value).into_response(), target, &account))
         }
         Err(message) => {
             lease.failure("Incomplete upstream generation", 15);
@@ -539,7 +540,32 @@ async fn attempt(
     }
 }
 
-fn decorate(mut response: Response, target: &str) -> Response {
+/// Stable account key for Token Stats / monitor (`X-Account-Email`).
+/// Identity is realm+uid; ASCII nicknames are preferred in the local-part for display.
+fn account_stats_key(account: &workbuddy::accounts::Account) -> String {
+    let realm = match account.realm {
+        workbuddy::accounts::Realm::Cn => "cn",
+        workbuddy::accounts::Realm::Global => "global",
+    };
+    let nick = account.nickname.trim();
+    let safe_nick = (!nick.is_empty()
+        && nick != account.uid
+        && nick.is_ascii()
+        && nick
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' ')))
+    .then(|| nick.replace(' ', "_"));
+    match safe_nick {
+        Some(nick) => format!("{nick}+{}@workbuddy-{realm}", account.uid),
+        None => format!("{}@workbuddy-{realm}", account.uid),
+    }
+}
+
+fn decorate(
+    mut response: Response,
+    target: &str,
+    account: &workbuddy::accounts::Account,
+) -> Response {
     response.headers_mut().insert(
         "x-mapped-model",
         target.parse().expect("validated model id"),
@@ -547,6 +573,10 @@ fn decorate(mut response: Response, target: &str) -> Response {
     response
         .headers_mut()
         .insert("x-upstream-provider", "workbuddy".parse().unwrap());
+    // Mirror Antigravity's X-Account-Email so token_stats.record_usage can attribute usage.
+    if let Ok(value) = account_stats_key(account).parse() {
+        response.headers_mut().insert("x-account-email", value);
+    }
     response
 }
 

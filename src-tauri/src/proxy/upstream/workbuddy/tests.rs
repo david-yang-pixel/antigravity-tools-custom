@@ -162,6 +162,10 @@ async fn workbuddy_native_stream_to_three_protocols_and_pool_release() {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["x-upstream-provider"], "workbuddy");
+            assert_eq!(
+                response.headers()["x-account-email"],
+                "Mock_account+mock-uid@workbuddy-cn"
+            );
             let data = to_bytes(response.into_body(), 100_000).await.unwrap();
             let data = String::from_utf8(data.to_vec()).unwrap();
             assert!(data.contains("你好"));
@@ -877,6 +881,7 @@ async fn assert_zero_balance_admin_policy(client: &reqwest::Client, base: &str) 
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()["x-upstream-provider"], "workbuddy");
+            assert!(response.headers().get("x-account-email").is_some());
             assert!(response.text().await.unwrap().contains(model));
         }
     }
@@ -1134,7 +1139,28 @@ async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alia
         let response = app(config).oneshot(wb).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-mapped-model"], "claude-sonnet-4-6");
+        assert_eq!(
+            response.headers()["x-account-email"],
+            "Mock_account+mock-uid@workbuddy-cn"
+        );
         let data = to_bytes(response.into_body(), 100_000).await.unwrap();
         assert!(String::from_utf8_lossy(&data).contains("wb-sonnet"));
     }
+}
+
+#[test]
+fn workbuddy_account_stats_key_prefers_ascii_nickname_and_falls_back_to_uid() {
+    let mut account = workbuddy::accounts::parse_import(json!({
+        "uid":"u1","nickname":"Ada Lovelace","accessToken":"t","expiresAt":1
+    }))
+    .unwrap();
+    assert_eq!(
+        super::account_stats_key(&account),
+        "Ada_Lovelace+u1@workbuddy-cn"
+    );
+    account.nickname = "中文昵称".into();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-cn");
+    account.realm = workbuddy::accounts::Realm::Global;
+    account.nickname.clear();
+    assert_eq!(super::account_stats_key(&account), "u1@workbuddy-global");
 }
