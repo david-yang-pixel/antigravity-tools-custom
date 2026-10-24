@@ -88,9 +88,11 @@ fn checkin_due(a: &Account, now: i64) -> bool {
     mins >= super::identity::checkin_minute(&a.id) || mins >= 22 * 60 + 30
 }
 fn keepalive_due(a: &Account, now: i64) -> bool {
+    // Renew inside the proactive window so inference rarely hits a blocking refresh.
     a.management.keepalive
         && now - a.management.keepalive_attempt_at >= 300
-        && (a.expires_at <= now + 600 || now - a.management.last_keepalive_at >= 86400)
+        && (a.expires_at <= now + accounts::PROACTIVE_REFRESH_SECS
+            || now - a.management.last_keepalive_at >= 86400)
 }
 fn due(a: &Account, now: i64) -> bool {
     if a.management.keepalive_error.is_some() && now - a.management.keepalive_attempt_at < 300 {
@@ -234,6 +236,13 @@ mod tests {
         a.management.last_keepalive_at = evening;
         a.management.next_sync_at = evening + sync_delay(&a.id);
         assert!(!due(&a, evening + 60));
+        // Inside the proactive window (30m) maintenance should renew before hot-path blocking.
+        a.expires_at = evening + 60 + 20 * 60;
+        a.management.keepalive_attempt_at = evening - 301;
+        assert!(keepalive_due(&a, evening + 60));
+        assert!(due(&a, evening + 60));
+        a.expires_at = evening + 60 + accounts::PROACTIVE_REFRESH_SECS + 60;
+        assert!(!keepalive_due(&a, evening + 60));
         a.expires_at = evening + 100;
         assert!(due(&a, evening + 60));
         a.management.managed = false;

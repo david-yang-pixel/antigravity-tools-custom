@@ -545,7 +545,8 @@ mod tests {
         }));
         let mut account = accounts::parse_import(json!({
             "uid":"deadline", "accessToken":"old-secret", "refreshToken":"old-refresh",
-            "expiresAt":accounts::now()+60,
+            // Hot path only blocks refresh near expiry; keep this inside that window.
+            "expiresAt":accounts::now()+10,
         }))
         .unwrap();
         account.models.push(accounts::Model {
@@ -646,7 +647,7 @@ mod tests {
         );
         let app = Router::new()
             .route("/v2/plugin/auth/state",post(|| async { Json(json!({"code":0,"data":{"state":"mock-state","authUrl":"https://copilot.tencent.com/authorize?state=mock-state"}})) }))
-            .route("/v2/plugin/auth/token",get(|| async { Json(json!({"code":0,"data":{"accessToken":"login-secret","refreshToken":"refresh-secret","expiresIn":60}})) }))
+            .route("/v2/plugin/auth/token",get(|| async { Json(json!({"code":0,"data":{"accessToken":"login-secret","refreshToken":"refresh-secret","expiresIn":10}})) }))
             .route("/v2/plugin/login/account",get(|headers:HeaderMap| async move { assert_eq!(headers["authorization"],"Bearer login-secret"); Json(json!({"code":0,"data":{"uid":12345,"nickname":"Example"}})) }))
             .route("/v2/plugin/auth/token/refresh",post(|State(count):State<Arc<AtomicUsize>>,headers:HeaderMap| async move {
                 assert_eq!(headers["x-refresh-token"],"refresh-secret"); count.fetch_add(1,Ordering::SeqCst);

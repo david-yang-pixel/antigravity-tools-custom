@@ -2196,7 +2196,7 @@
       "managed": "Auto-manage",
       "auto_checkin": "Auto check-in",
       "keepalive": "Auto keepalive",
-      "managed_hint": "While the service runs: sync credits and models every 15 minutes, check in daily (UTC+8), refresh credentials daily and before expiry. Disabled accounts are skipped.",
+      "managed_hint": "While the service runs: sync credits and models every 15 minutes, check in daily (UTC+8), refresh credentials daily and about 30 minutes before expiry; inference does not block on refresh while the token is still valid. Disabled accounts are skipped.",
       "checkin_now": "Check in now",
       "status_error": "Account error",
       "account_column": "Account",
