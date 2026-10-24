@@ -22,6 +22,9 @@ static RUNTIME: LazyLock<Mutex<HashMap<String, Runtime>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static REFRESH_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// In-memory proactive-nudge claims so the inference hot path never waits on encrypted store I/O.
+static NUDGE_CLAIMS: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -534,26 +537,54 @@ fn needs_refresh(account: &Account, mode: RefreshMode, at: i64) -> bool {
     }
 }
 
-/// Fire-and-forget renewal while the access token is still usable for inference.
-/// Rate-limited so a burst of requests cannot stampede the upstream refresh API.
-fn maybe_nudge_proactive_refresh(account: &Account) {
-    if !account.enabled || !account.management.keepalive {
-        return;
+fn eligible_for_proactive_nudge(account: &Account) -> bool {
+    account.enabled && account.management.managed && account.management.keepalive
+}
+
+/// Atomically claim one proactive nudge for this account without touching the encrypted store.
+/// Callers that lose the race return false and must not spawn another refresh.
+fn claim_proactive_nudge(account: &Account) -> bool {
+    if !eligible_for_proactive_nudge(account) {
+        return false;
     }
     let at = now();
     if account.expires_at > at + PROACTIVE_REFRESH_SECS
         || account.expires_at <= at + HOT_PATH_REFRESH_SECS
     {
-        return;
+        return false;
     }
-    if at - account.management.keepalive_attempt_at < PROACTIVE_ATTEMPT_GAP_SECS {
+    let Ok(key) = runtime_key(&account.id) else {
+        return false;
+    };
+    let Ok(mut claims) = NUDGE_CLAIMS.lock() else {
+        return false;
+    };
+    claims.retain(|_, stamped| at - *stamped < PROACTIVE_ATTEMPT_GAP_SECS * 4);
+    let memory = claims.get(&key).copied().unwrap_or(0);
+    let last = account.management.keepalive_attempt_at.max(memory);
+    if at - last < PROACTIVE_ATTEMPT_GAP_SECS {
+        return false;
+    }
+    claims.insert(key, at);
+    true
+}
+
+fn note_refresh_attempt(id: &str, at: i64) {
+    if let Ok(key) = runtime_key(id) {
+        if let Ok(mut claims) = NUDGE_CLAIMS.lock() {
+            claims.insert(key, at);
+        }
+    }
+}
+
+/// Fire-and-forget renewal while the access token is still usable for inference.
+/// Rate-limited in memory so a burst of requests cannot stampede the upstream refresh API
+/// or stall the hot path on encrypted account-store I/O.
+fn maybe_nudge_proactive_refresh(account: &Account) {
+    if !claim_proactive_nudge(account) {
         return;
     }
     let id = account.id.clone();
-    // Optimistic stamp before spawn so concurrent hot-path callers skip the herd.
-    if edit_management(&id, |m| m.keepalive_attempt_at = at).is_err() {
-        return;
-    }
     tauri::async_runtime::spawn(async move {
         match fresh_with_mode(&id, RefreshMode::Proactive).await {
             Ok(_) => tracing::debug!(account_id = %id, "WorkBuddy proactive refresh completed"),
@@ -566,10 +597,20 @@ fn maybe_nudge_proactive_refresh(account: &Account) {
 
 async fn fresh_locked(id: &str, mode: RefreshMode) -> Result<Account, String> {
     let mut account = get(id)?;
-    if !needs_refresh(&account, mode, now()) {
+    let at = now();
+    if !needs_refresh(&account, mode, at) {
         return Ok(account);
     }
-    edit_management(id, |m| m.keepalive_attempt_at = now())?;
+    if mode == RefreshMode::Proactive {
+        // Re-check under the single-flight lock: a peer may have claimed/refreshed already.
+        if !eligible_for_proactive_nudge(&account)
+            || at - account.management.keepalive_attempt_at < PROACTIVE_ATTEMPT_GAP_SECS
+        {
+            return Ok(account);
+        }
+    }
+    note_refresh_attempt(id, at);
+    edit_management(id, |m| m.keepalive_attempt_at = at)?;
     match super::client::refresh(&mut account).await {
         Ok(()) => {
             account.last_error = None;
@@ -1131,6 +1172,9 @@ mod tests {
         )
         .unwrap()
         .id;
+        // Hold the refresh lock so the background nudge cannot persist yet.
+        let lock = refresh_lock(&id).unwrap();
+        let guard = lock.lock().await;
         let prepared = fresh_before(
             &id,
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
@@ -1139,6 +1183,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(prepared.access_token, "old");
+        // Claim is memory-only: the hot path must not persist keepalive_attempt_at itself.
+        assert_eq!(get(&id).unwrap().management.keepalive_attempt_at, 0);
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        drop(guard);
         let started = tokio::time::Instant::now();
         while refreshes.load(Ordering::SeqCst) == 0
             && started.elapsed() < std::time::Duration::from_secs(2)
@@ -1153,6 +1201,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(get(&id).unwrap().access_token, "nudged");
+        assert!(get(&id).unwrap().management.keepalive_attempt_at > 0);
         // A second hot-path call inside the attempt gap must not stampede refresh.
         let _ = fresh_before(
             &id,
@@ -1161,6 +1210,100 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_proactive_nudge_respects_managed_and_single_claims() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let count = refreshes.clone();
+        let app = Router::new().route(
+            "/v2/plugin/auth/token/refresh",
+            post(move || {
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    Json(json!({"code":0,"data":{"accessToken":"once","refreshToken":"r2","expiresIn":900}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "STELLAR_TEST_WORKBUDDY_BASE",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        struct Mock(tokio::task::JoinHandle<()>);
+        impl Drop for Mock {
+            fn drop(&mut self) {
+                self.0.abort();
+                std::env::remove_var("STELLAR_TEST_WORKBUDDY_BASE");
+            }
+        }
+        let _mock = Mock(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+
+        let unmanaged = upsert(
+            parse_import(json!({
+                "uid":"unmanaged","accessToken":"old","refreshToken":"r",
+                "expiresAt": now() + 600
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+        .id;
+        configure(&unmanaged, Some(false), None, None, None, None).unwrap();
+        let _ = fresh_before(
+            &unmanaged,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        assert_eq!(get(&unmanaged).unwrap().access_token, "old");
+
+        let id = upsert(
+            parse_import(json!({
+                "uid":"claimed","accessToken":"old","refreshToken":"r",
+                "expiresAt": now() + 600
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+        .id;
+        let mut joins = Vec::new();
+        for _ in 0..16 {
+            let id = id.clone();
+            joins.push(tokio::spawn(async move {
+                fresh_before(
+                    &id,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+            }));
+        }
+        for join in joins {
+            assert_eq!(join.await.unwrap().access_token, "old");
+        }
+        let started = tokio::time::Instant::now();
+        while get(&id).unwrap().access_token != "once"
+            && started.elapsed() < std::time::Duration::from_secs(2)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(get(&id).unwrap().access_token, "once");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
     }
