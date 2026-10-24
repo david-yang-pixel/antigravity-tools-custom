@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { request as invoke } from '../utils/request';
+import { accountChartLabel } from './tokenStatsAccountLabel';
 import { useTranslation } from 'react-i18next';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { Clock, Calendar, CalendarDays, Users, Zap, TrendingUp, RefreshCw, Cpu } from 'lucide-react';
@@ -179,7 +180,7 @@ const TokenStats: React.FC = () => {
     }, [timeRange]);
 
     const pieData = accountData.slice(0, 8).map((account, index) => ({
-        name: account.account_email.split('@')[0] + '...',
+        name: accountChartLabel(account.account_email) + '...',
         value: account.total_tokens,
         fullEmail: account.account_email,
         color: COLORS[index % COLORS.length]
@@ -250,7 +251,7 @@ const TokenStats: React.FC = () => {
                 <div className="max-h-[180px] overflow-y-auto space-y-1 pr-1.5 scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-gray-700">
                     {sortedPayload.map((entry: any, index: number) => {
                         const name = entry.name;
-                        const displayName = viewMode === 'model' ? shortenModelName(name) : name.split('@')[0];
+                        const displayName = viewMode === 'model' ? shortenModelName(name) : accountChartLabel(name);
                         return (
                             <div key={index} className="flex items-center justify-between gap-4">
                                 <div className="flex items-center gap-2 overflow-hidden">
@@ -519,7 +520,7 @@ const TokenStats: React.FC = () => {
                                         wrapperStyle={{ zIndex: 100 }}
                                     />
                                     <Legend
-                                        formatter={(value) => viewMode === 'model' ? shortenModelName(value) : value.split('@')[0]}
+                                        formatter={(value) => viewMode === 'model' ? shortenModelName(value) : accountChartLabel(value)}
                                         wrapperStyle={{
                                             fontSize: '11px',
                                             paddingTop: '10px',
@@ -642,8 +643,8 @@ const TokenStats: React.FC = () => {
                                             className="w-3 h-3 rounded-full"
                                             style={{ backgroundColor: COLORS[index % COLORS.length] }}
                                         />
-                                        <span className="text-gray-600 dark:text-gray-300 truncate max-w-[120px]">
-                                            {account.account_email.split('@')[0]}
+                                        <span className="text-gray-600 dark:text-gray-300 truncate max-w-[120px]" title={account.account_email}>
+                                            {accountChartLabel(account.account_email)}
                                         </span>
                                     </div>
                                     <span className="font-medium text-gray-800 dark:text-white">
