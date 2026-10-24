@@ -1115,7 +1115,10 @@ mod tests {
         let guard = lock.lock().await;
         let prepared = tokio::time::timeout(
             std::time::Duration::from_millis(200),
-            fresh_before(&id, tokio::time::Instant::now() + std::time::Duration::from_secs(5)),
+            fresh_before(
+                &id,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            ),
         )
         .await
         .expect("hot path must not wait on the refresh lock")
