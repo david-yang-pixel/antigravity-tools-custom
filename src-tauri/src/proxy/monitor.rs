@@ -395,6 +395,21 @@ impl ProxyMonitor {
         self.capture_health_logs.load(Ordering::Relaxed)
     }
 
+    /// Logging stays off so a test can exercise token-stats recording without
+    /// proxy-log persistence. `app_handle` is private, so tests outside this
+    /// module cannot build the struct literal themselves.
+    #[cfg(test)]
+    pub(crate) fn disabled_for_test() -> Self {
+        Self {
+            logs: RwLock::new(VecDeque::new()),
+            stats: RwLock::new(ProxyStats::default()),
+            max_logs: 16,
+            enabled: Arc::new(AtomicBool::new(false)),
+            capture_health_logs: Arc::new(AtomicBool::new(false)),
+            app_handle: None,
+        }
+    }
+
     pub async fn log_request(&self, log: ProxyRequestLog) {
         if let (Some(account), Some(input), Some(output)) =
             (&log.account_email, log.input_tokens, log.output_tokens)

@@ -1224,3 +1224,57 @@ fn workbuddy_reauthorization_nickname_change_keeps_the_same_stats_key() {
     assert_eq!(super::account_stats_key(&stored), before);
     assert_eq!(before, "42@workbuddy-cn");
 }
+
+fn monitored_app(settings: Settings) -> Router {
+    let monitor = std::sync::Arc::new(crate::proxy::monitor::ProxyMonitor::disabled_for_test());
+    let state = crate::proxy::server::test_app_state(monitor);
+    app(settings).layer(axum::middleware::from_fn_with_state(
+        state,
+        crate::proxy::middleware::monitor_middleware,
+    ))
+}
+
+async fn persisted_account_stats() -> Vec<crate::modules::token_stats::AccountTokenStats> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let stats =
+            tokio::task::spawn_blocking(|| crate::modules::token_stats::get_account_stats(24))
+                .await
+                .expect("token stats query")
+                .expect("token stats db");
+        let settled = stats.iter().any(|row| row.request_count >= 2);
+        if settled || tokio::time::Instant::now() >= deadline {
+            return stats;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn workbuddy_stream_and_nonstream_usage_aggregate_on_one_stats_key() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    crate::modules::token_stats::init_db().unwrap();
+    let _mock = mock().await;
+    seed();
+    let key = "mock-uid@workbuddy-cn";
+    for stream in [false, true] {
+        let response = monitored_app(settings())
+            .oneshot(request("/v1/chat/completions", "wb-sonnet", stream))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-account-email"], key);
+        let body = to_bytes(response.into_body(), 100_000).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("你好"), "{body}");
+    }
+    let stats = persisted_account_stats().await;
+    assert_eq!(stats.len(), 1, "{stats:?}");
+    let row = &stats[0];
+    assert_eq!(row.account_email, key);
+    assert_eq!(row.request_count, 2);
+    assert_eq!(row.total_input_tokens, 2000);
+    assert_eq!(row.total_output_tokens, 40);
+    assert_eq!(row.total_cached_tokens, 1200);
+    assert_eq!(row.total_tokens, 2040);
+}
