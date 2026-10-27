@@ -149,18 +149,27 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
         match body.get("input") {
             Some(Value::String(input)) => messages.push(json!({"role":"user","content":input})),
             Some(Value::Array(items)) => {
+                // Responses replays one turn's parallel calls as consecutive items; native
+                // Chat upstreams (e.g. DeepSeek) require them in a single assistant message.
+                let mut calls = Vec::new();
                 for item in items {
-                    match item.get("type").and_then(Value::as_str).unwrap_or("message") {
-                    "message" => messages.push(json!({"role":item.get("role").cloned().unwrap_or(json!("user")),"content":response_content(&item["content"])?})),
-                    "function_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":call_name(item)?,"arguments":required(item,"arguments")?}}]})),
+                    let message = match item.get("type").and_then(Value::as_str).unwrap_or("message") {
+                    "message" => json!({"role":item.get("role").cloned().unwrap_or(json!("user")),"content":response_content(&item["content"])?}),
+                    "function_call" => { calls.push(json!({"id":required(item,"call_id")?,"type":"function","function":{"name":call_name(item)?,"arguments":required(item,"arguments")?}})); continue; }
                     // Custom (freeform) tool calls travel as function calls with a single `input` string argument.
-                    "custom_tool_call" => messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":required(item,"call_id")?,"type":"function","function":{"name":call_name(item)?,"arguments":json!({"input":text(item,"input")}).to_string()}}]})),
-                    "function_call_output" | "custom_tool_call_output" => messages.push(json!({"role":"tool","tool_call_id":required(item,"call_id")?,"content": if item["output"].is_string() { item["output"].clone() } else { response_content(&item["output"])? }})),
-                    "reasoning" => { /* Reasoning summaries are metadata, not user instructions. */ }
-                    _ if drop_hosted_web_search(item, "input item") => {}
+                    "custom_tool_call" => { calls.push(json!({"id":required(item,"call_id")?,"type":"function","function":{"name":call_name(item)?,"arguments":json!({"input":text(item,"input")}).to_string()}})); continue; }
+                    "function_call_output" | "custom_tool_call_output" => json!({"role":"tool","tool_call_id":required(item,"call_id")?,"content": if item["output"].is_string() { item["output"].clone() } else { response_content(&item["output"])? }}),
+                    // Reasoning summaries are metadata, not user instructions; neither they nor
+                    // dropped hosted calls split a turn's call group.
+                    "reasoning" => continue,
+                    _ if drop_hosted_web_search(item, "input item") => continue,
                     _ => return Err("Unsupported WorkBuddy Responses input item; provide message or function call history".into()),
+                    };
+                    // A message or tool result closes the group, so later turns never merge.
+                    flush_calls(&mut messages, &mut calls);
+                    messages.push(message);
                 }
-                }
+                flush_calls(&mut messages, &mut calls);
             }
             _ => return Err("Responses input must be text or an array".into()),
         }
@@ -288,6 +297,14 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
     }
     out["messages"] = json!(messages);
     Ok(out)
+}
+
+/// Emits one turn's buffered tool calls as a single assistant message.
+fn flush_calls(messages: &mut Vec<Value>, calls: &mut Vec<Value>) {
+    if !calls.is_empty() {
+        messages
+            .push(json!({"role":"assistant","content":null,"tool_calls":std::mem::take(calls)}));
+    }
 }
 
 /// WorkBuddy upstreams have no hosted web search, so Responses `web_search*`
