@@ -357,6 +357,181 @@ fn workbuddy_codec_round_trips_codex_namespace_tools() {
     )
     .is_err());
 }
+/// Role + tool call ids per converted message, for asserting the replayed history shape.
+fn history_shape(converted: &Value) -> Vec<(String, Vec<String>)> {
+    converted["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let ids = match m["role"].as_str().unwrap() {
+                "tool" => vec![m["tool_call_id"].as_str().unwrap().to_owned()],
+                _ => m["tool_calls"]
+                    .as_array()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|c| c["id"].as_str().unwrap().to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            (m["role"].as_str().unwrap().to_owned(), ids)
+        })
+        .collect()
+}
+fn shape(expected: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+    expected
+        .iter()
+        .map(|(role, ids)| {
+            (
+                role.to_string(),
+                ids.iter().map(|id| id.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+fn grouping_tools() -> Value {
+    json!([
+        {"type":"function","name":"read","parameters":{"type":"object"}},
+        {"type":"custom","name":"apply_patch"},
+        {"type":"namespace","name":"mcp__repl","tools":[{"type":"function","name":"js","parameters":{"type":"object"}}]}
+    ])
+}
+#[test]
+fn workbuddy_codec_groups_parallel_responses_calls_per_turn() {
+    use codec::{request as convert, Protocol};
+    let fc = |id: &str| json!({"type":"function_call","call_id":id,"name":"read","arguments":format!("{{\"path\":\"{id}\"}}")});
+    let out =
+        |id: &str| json!({"type":"function_call_output","call_id":id,"output":format!("out {id}")});
+    let convert_input = |input: Value| {
+        convert(
+            Protocol::Responses,
+            json!({"input":input,"tools":grouping_tools()}),
+        )
+        .unwrap()
+    };
+
+    // Single call: unchanged one-call assistant message.
+    let single = convert_input(json!([{"role":"user","content":"go"}, fc("a"), out("a")]));
+    assert_eq!(
+        history_shape(&single),
+        shape(&[("user", &[]), ("assistant", &["a"]), ("tool", &["a"])])
+    );
+    assert!(single["messages"][1]["content"].is_null());
+
+    // One turn with function, custom and namespaced calls: one assistant message,
+    // order, names, arguments and call ids preserved; results stay one per call.
+    let parallel = convert_input(json!([
+        {"role":"user","content":"go"},
+        fc("a"),
+        {"type":"reasoning","summary":[]},
+        {"type":"custom_tool_call","call_id":"p","name":"apply_patch","input":"*** Begin Patch"},
+        {"type":"function_call","call_id":"j","namespace":"mcp__repl","name":"js","arguments":"{}"},
+        out("a"),
+        {"type":"custom_tool_call_output","call_id":"p","output":"ok"},
+        out("j"),
+        {"role":"assistant","content":"done"}
+    ]));
+    assert_eq!(
+        history_shape(&parallel),
+        shape(&[
+            ("user", &[]),
+            ("assistant", &["a", "p", "j"]),
+            ("tool", &["a"]),
+            ("tool", &["p"]),
+            ("tool", &["j"]),
+            ("assistant", &[]),
+        ])
+    );
+    let calls = &parallel["messages"][1]["tool_calls"];
+    assert_eq!(calls[0]["function"]["name"], "read");
+    assert_eq!(calls[0]["function"]["arguments"], r#"{"path":"a"}"#);
+    assert_eq!(calls[1]["function"]["name"], "apply_patch");
+    assert_eq!(
+        calls[1]["function"]["arguments"],
+        r#"{"input":"*** Begin Patch"}"#
+    );
+    assert_eq!(calls[2]["function"]["name"], "mcp__repl__js");
+    assert_eq!(parallel["messages"][4]["content"], "out j");
+
+    // Serial turns: a tool result or a message closes the group, never merging across turns.
+    let serial = convert_input(json!([
+        {"role":"user","content":"go"},
+        fc("a"),
+        out("a"),
+        fc("b"),
+        fc("c"),
+        out("b"),
+        out("c"),
+        {"role":"assistant","content":"next"},
+        fc("d"),
+        out("d")
+    ]));
+    assert_eq!(
+        history_shape(&serial),
+        shape(&[
+            ("user", &[]),
+            ("assistant", &["a"]),
+            ("tool", &["a"]),
+            ("assistant", &["b", "c"]),
+            ("tool", &["b"]),
+            ("tool", &["c"]),
+            ("assistant", &[]),
+            ("assistant", &["d"]),
+            ("tool", &["d"]),
+        ])
+    );
+}
+#[test]
+fn workbuddy_streamed_parallel_calls_replay_as_one_assistant_turn() {
+    use codec::{namespaced_tools, request as convert, Output, Protocol};
+    let first = json!({"input":[{"role":"user","content":"go"}],"tools":grouping_tools()});
+    let mut output =
+        Output::new(Protocol::Responses, "wb-test").with_namespaced(namespaced_tools(&first));
+    output.start();
+    for chunk in [
+        json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"call_a","type":"function","function":{"name":"read","arguments":"{\"path\":"}},
+            {"index":1,"id":"call_p","type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"x\"}"}},
+            {"index":2,"id":"call_j","type":"function","function":{"name":"mcp__repl__js","arguments":"{}"}}
+        ]}}]}),
+        json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"function":{"arguments":"\"a.rs\"}"}}
+        ]},"finish_reason":"tool_calls"}]}),
+    ] {
+        output.push(chunk).unwrap();
+    }
+    let (response, _) = output.end().unwrap();
+
+    // Codex replays the streamed output items, then one result per call.
+    let items = response["output"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    let mut input = vec![json!({"role":"user","content":"go"})];
+    input.extend(items.iter().cloned());
+    for item in items {
+        input.push(json!({"type":"function_call_output","call_id":item["call_id"],"output":"ok"}));
+    }
+    let converted = convert(
+        Protocol::Responses,
+        json!({"input":input,"tools":grouping_tools()}),
+    )
+    .unwrap();
+    assert_eq!(
+        history_shape(&converted),
+        shape(&[
+            ("user", &[]),
+            ("assistant", &["call_a", "call_p", "call_j"]),
+            ("tool", &["call_a"]),
+            ("tool", &["call_p"]),
+            ("tool", &["call_j"]),
+        ])
+    );
+    let calls = &converted["messages"][1]["tool_calls"];
+    assert_eq!(calls[0]["function"]["arguments"], r#"{"path":"a.rs"}"#);
+    assert_eq!(calls[1]["function"]["name"], "apply_patch");
+    assert_eq!(calls[2]["function"]["name"], "mcp__repl__js");
+}
 #[test]
 fn workbuddy_codec_streaming_tools_reasoning_and_incomplete_errors() {
     for protocol in [
