@@ -13,7 +13,7 @@ pub struct Mail {
     pub body: String,
 }
 
-fn brand(smtp: &SmtpSettings) -> &str {
+pub fn brand(smtp: &SmtpSettings) -> &str {
     if smtp.from_name.is_empty() {
         "API Usage Portal"
     } else {

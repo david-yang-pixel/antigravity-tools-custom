@@ -161,6 +161,14 @@ docker build --build-arg USE_MIRROR=true -t antigravity-manager:latest -f docker
 | `ABV_ZPAY_PAY_TYPES` | `alipay` | 提供的支付方式，逗號分隔：`alipay`、`wxpay`；只填已開通並簽約的渠道 |
 | `ABV_ZPAY_MIN_AMOUNT` / `ABV_ZPAY_MAX_AMOUNT` | `5` / `1000` | 單筆儲值金額範圍（元，最多兩位小數）；兩者需滿足 0.01 ≤ 最低 ≤ 最高 ≤ 100000，否則忽略 |
 | `ABV_ZPAY_SUBJECT` | `API 调用额度充值` | 支付頁顯示的商品名稱，需如實描述售賣內容（不可含 `&` 或 `=`） |
+| `ABV_PORTAL_ANNOUNCEMENT` | - | 用量中心登入頁與首頁顯示的公告（純文字，`\n` 換行）；設為空字串則關閉公告 |
+| `ABV_PORTAL_ANNOUNCEMENT_LEVEL` | `info` | 公告樣式：`info`（一般）或 `warning`（醒目提醒） |
+| `ABV_ALERT_ENABLED` | `false` | 是否啟用維運告警：模型連續失敗、上游額度耗盡、WorkBuddy 點數低於門檻時推送 |
+| `ABV_ALERT_WEBHOOKS` | - | 告警 Webhook，逗號分隔；自動識別企業微信、釘釘（自訂關鍵字填「告警」）、飛書、Slack、Discord、Server醬，其他位址收到含 `title`/`body`/`text` 的 JSON |
+| `ABV_ALERT_EMAILS` | - | 告警收件信箱，逗號分隔（透過上方 SMTP 寄送） |
+| `ABV_ALERT_FAILURE_THRESHOLD` | `5` | 同一模型連續上游失敗（401/403/429/5xx）幾次後告警（1-1000） |
+| `ABV_ALERT_COOLDOWN_MINUTES` | `30` | 同一模型或帳號的重複提醒間隔（1-1440 分鐘） |
+| `ABV_ALERT_CREDIT_THRESHOLD` | `0` | WorkBuddy 帳號剩餘點數 ≤ 此值時告警；`0` 表示僅在用完時告警 |
 
 > 以上用量中心設定（含線上儲值）也可以在管理後台「用戶 Token → 註冊設置」中修改，保存在數據目錄的 `portal_settings.json`；設置了環境變量的欄位以環境變量為準，後台顯示為鎖定。反向代理（如 Nginx）請以 `proxy_set_header X-Forwarded-For $remote_addr;` 覆蓋客戶端 IP，並傳遞 `X-Forwarded-Proto`，以確保登入限流與 Cookie 的 `Secure` 屬性正確生效。
 

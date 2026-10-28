@@ -2,10 +2,16 @@
 // /api/token-portal; key sign-in keeps sending the key as a Bearer header.
 import type { TopupConfig } from './PortalTopup';
 
+export interface PortalAnnouncementData {
+    level: 'info' | 'warning';
+    content: string;
+}
+
 export interface PortalConfig {
     registration_enabled: boolean;
     password_reset_enabled: boolean;
     topup?: TopupConfig;
+    announcement?: PortalAnnouncementData | null;
 }
 
 export interface PortalResult<T = Record<string, unknown>> {

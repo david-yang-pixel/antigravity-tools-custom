@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowRight, Eye, EyeOff, KeyRound, Mail, RefreshCw, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { PortalConfig, PortalResult, portalCall } from './portalApi';
+import PortalAnnouncement from './PortalAnnouncement';
 
 type Tab = 'email' | 'key';
 type EmailView = 'login' | 'register' | 'reset';
@@ -103,6 +104,7 @@ export default function PortalAuthForms({ config, busy, keyError, accountError, 
 
     return (
         <main className="max-w-md mx-auto px-5 py-16 sm:py-24">
+            {config?.announcement && <div className="mb-8"><PortalAnnouncement announcement={config.announcement} /></div>}
             <div className="mb-8">
                 <div className="w-12 h-12 flex items-center justify-center rounded-xl bg-blue-50 text-blue-600 mb-6">{tab === 'key' ? <KeyRound size={24} /> : <Mail size={24} />}</div>
                 <p className="text-sm text-blue-600 font-medium mb-3">{t('token_portal.kicker')}</p>

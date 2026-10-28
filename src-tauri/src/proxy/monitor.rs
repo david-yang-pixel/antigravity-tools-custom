@@ -411,6 +411,8 @@ impl ProxyMonitor {
     }
 
     pub async fn log_request(&self, log: ProxyRequestLog) {
+        // Alerts watch every request, also while request logging is off.
+        crate::modules::alerts::observe_request(&log);
         if let (Some(account), Some(input), Some(output)) =
             (&log.account_email, log.input_tokens, log.output_tokens)
         {

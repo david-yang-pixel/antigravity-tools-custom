@@ -829,6 +829,7 @@ pub fn run() {
             commands::workbuddy::cancel_workbuddy_login,
             commands::user_token::save_portal_settings,
             commands::user_token::send_portal_test_email,
+            commands::user_token::send_test_alert,
             commands::query_transit_info,
             // Patch commands
             commands::patch_agy_binary,
