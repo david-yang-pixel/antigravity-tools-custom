@@ -181,13 +181,11 @@ fn record(
     };
     let cooldown_secs = i64::from(settings.alerts.cooldown_minutes) * 60;
     if log.status < 400 {
-        // Cooldowns survive recovery and recovery has its own, so traffic that
-        // alternates between success and failure cannot alert on every request.
+        // Recovery answers exactly one delivered alert. Alert cooldowns survive
+        // it, so traffic alternating between success and failure cannot alert
+        // on every request, and every alert still gets its recovery.
         return match state.streaks.remove(model) {
-            Some(streak)
-                if streak.alerted
-                    && claim(state, &format!("recovered:{model}"), cooldown_secs, at) =>
-            {
+            Some(streak) if streak.alerted => {
                 vec![Alert {
                     key: format!("recovered:{model}"),
                     title: format!("模型已恢复 / Model recovered: {model}"),
@@ -585,6 +583,30 @@ mod tests {
         }
         let keys: Vec<_> = sent.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys, ["quota:m", "recovered:m"]);
+    }
+
+    #[test]
+    fn alerts_every_delivered_alert_gets_its_recovery() {
+        let settings = settings(1);
+        let mut state = State::default();
+        let fail = log("m", 503, None);
+        let ok = log("m", 200, None);
+        let minute = 60;
+        assert_eq!(record(&mut state, &fail, &settings, 0)[0].key, "failing:m");
+        assert_eq!(
+            record(&mut state, &ok, &settings, 29 * minute)[0].key,
+            "recovered:m"
+        );
+        // The failing cooldown has elapsed, so the next outage alerts again,
+        // and its recovery arrives even though the last one was 2 minutes ago.
+        assert_eq!(
+            record(&mut state, &fail, &settings, 30 * minute)[0].key,
+            "failing:m"
+        );
+        assert_eq!(
+            record(&mut state, &ok, &settings, 31 * minute)[0].key,
+            "recovered:m"
+        );
     }
 
     #[test]
