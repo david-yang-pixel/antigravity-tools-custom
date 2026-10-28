@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, CreditCard, Mail, RefreshCw, AlertTriangle } from 'lucide-react';
+import { CheckCircle2, CreditCard, Mail, RefreshCw, AlertTriangle, Bell, Megaphone } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { request as invoke } from '../../utils/request';
 import { showToast } from '../common/ToastContainer';
@@ -31,6 +31,25 @@ interface PortalSettings {
         max_amount_cents: number;
         subject: string;
     };
+    announcement: {
+        enabled: boolean;
+        level: 'info' | 'warning';
+        content: string;
+    };
+    alerts: {
+        enabled: boolean;
+        webhooks: string[];
+        emails: string[];
+        failure_threshold: number;
+        cooldown_minutes: number;
+        credit_threshold: number;
+    };
+}
+
+interface AlertDelivery {
+    target: string;
+    ok: boolean;
+    error: string | null;
 }
 
 interface PortalSettingsView extends PortalSettings {
@@ -66,7 +85,18 @@ const ENV_NAMES: Record<string, string> = {
     'payment.min_amount_cents': 'ABV_ZPAY_MIN_AMOUNT',
     'payment.max_amount_cents': 'ABV_ZPAY_MAX_AMOUNT',
     'payment.subject': 'ABV_ZPAY_SUBJECT',
+    'announcement.enabled': 'ABV_PORTAL_ANNOUNCEMENT',
+    'announcement.content': 'ABV_PORTAL_ANNOUNCEMENT',
+    'announcement.level': 'ABV_PORTAL_ANNOUNCEMENT_LEVEL',
+    'alerts.enabled': 'ABV_ALERT_ENABLED',
+    'alerts.webhooks': 'ABV_ALERT_WEBHOOKS',
+    'alerts.emails': 'ABV_ALERT_EMAILS',
+    'alerts.failure_threshold': 'ABV_ALERT_FAILURE_THRESHOLD',
+    'alerts.cooldown_minutes': 'ABV_ALERT_COOLDOWN_MINUTES',
+    'alerts.credit_threshold': 'ABV_ALERT_CREDIT_THRESHOLD',
 };
+const ANNOUNCEMENT_MAX = 2000;
+const lines = (value: string) => value.split(/[\s,]+/).filter(Boolean);
 const PAY_TYPES = ['alipay', 'wxpay'] as const;
 
 /** Registration switch, defaults for new accounts' keys, and SMTP for verification codes. */
@@ -80,13 +110,18 @@ export default function PortalSettingsModal({ open, onClose }: Props) {
     const [minAmount, setMinAmount] = useState('');
     const [maxAmount, setMaxAmount] = useState('');
     const [testTo, setTestTo] = useState('');
+    const [webhooks, setWebhooks] = useState('');
+    const [alertEmails, setAlertEmails] = useState('');
     const [saving, setSaving] = useState(false);
     const [testing, setTesting] = useState(false);
+    const [testingAlert, setTestingAlert] = useState(false);
 
     function apply(next: PortalSettingsView) {
         setView(next);
         setForm(next);
         setDomains(next.allowed_email_domains.join(', '));
+        setWebhooks(next.alerts.webhooks.join('\n'));
+        setAlertEmails(next.alerts.emails.join('\n'));
         setPassword('');
         setPaymentKey('');
         // Yuan in the form, cents on the wire.
@@ -104,6 +139,9 @@ export default function PortalSettingsModal({ open, onClose }: Props) {
     const lockHint = (name: string) => locked(name) && <span className="text-[10px] text-amber-600 ml-2">{t('user_token.portal_env_locked', { name: ENV_NAMES[name] })}</span>;
     const setSmtp = (patch: Partial<PortalSettings['smtp']>) => form && setForm({ ...form, smtp: { ...form.smtp, ...patch } });
     const setPayment = (patch: Partial<PortalSettings['payment']>) => form && setForm({ ...form, payment: { ...form.payment, ...patch } });
+    const setAnnouncement = (patch: Partial<PortalSettings['announcement']>) => form && setForm({ ...form, announcement: { ...form.announcement, ...patch } });
+    const setAlerts = (patch: Partial<PortalSettings['alerts']>) => form && setForm({ ...form, alerts: { ...form.alerts, ...patch } });
+    const alertTargets = lines(webhooks).length + lines(alertEmails).length;
     // Judged from the form being edited, not the last save, so the warning tracks what is typed.
     const paymentComplete = !!form && !!form.payment.gateway.trim() && !!form.payment.pid.trim()
         && !!form.payment.public_url.trim() && form.payment.pay_types.length > 0 && (!!paymentKey || !!view?.payment_key_set);
@@ -128,6 +166,8 @@ export default function PortalSettingsModal({ open, onClose }: Props) {
                     smtp: form.smtp,
                     allowed_email_domains: domains.split(/[\s,]+/).filter(Boolean),
                     payment: { ...form.payment, min_amount_cents: minCents, max_amount_cents: maxCents },
+                    announcement: form.announcement,
+                    alerts: { ...form.alerts, webhooks: lines(webhooks), emails: lines(alertEmails) },
                     ...(password ? { smtp_password: password } : {}),
                     ...(paymentKey ? { payment_key: paymentKey } : {}),
                 },
@@ -157,6 +197,24 @@ export default function PortalSettingsModal({ open, onClose }: Props) {
             setTesting(false);
         }
     }
+
+    async function sendTestAlert() {
+        // Like the SMTP test: what is on screen is saved, then every target is tried.
+        if (!(await save())) return;
+        setTestingAlert(true);
+        try {
+            const results = await invoke<AlertDelivery[]>('send_test_alert');
+            const failed = results.filter(result => !result.ok);
+            if (failed.length === 0) showToast(t('user_token.alert_test_sent', { count: results.length }), 'success');
+            else showToast(failed.map(result => `${result.target}: ${result.error ?? ''}`).join('\n'), 'error');
+        } catch (e) {
+            showToast(String(e), 'error');
+        } finally {
+            setTestingAlert(false);
+        }
+    }
+
+    const toggle = 'toggle toggle-sm bg-gray-200 dark:bg-base-300 border-gray-300 dark:border-base-300 checked:bg-blue-600 checked:border-blue-600 disabled:opacity-50 disabled:bg-gray-100 dark:disabled:bg-base-200';
 
     return (
         <div className="modal modal-open">
@@ -197,6 +255,31 @@ export default function PortalSettingsModal({ open, onClose }: Props) {
                                     {['never', 'month', 'week', 'day'].map(type => <option key={type} value={type}>{t(`user_token.expires_${type}`)}</option>)}
                                 </select>
                             </div>
+                        </div>
+                    </section>
+
+                    <section className="space-y-3 border-t border-gray-100 dark:border-base-200 pt-4">
+                        <label className="flex items-center justify-between gap-4 cursor-pointer">
+                            <span>
+                                <span className="text-sm font-medium flex items-center gap-2"><Megaphone size={15} />{t('user_token.announcement')}{lockHint('announcement.enabled')}</span>
+                                <span className="block text-xs text-gray-500 mt-0.5">{t('user_token.announcement_hint')}</span>
+                            </span>
+                            <input type="checkbox" className={toggle} checked={form.announcement.enabled} disabled={locked('announcement.enabled')}
+                                onChange={e => setAnnouncement({ enabled: e.target.checked })} />
+                        </label>
+                        <div className="form-control">
+                            <label className="label py-1" htmlFor="announcement-level"><span className="label-text text-sm">{t('user_token.announcement_level')}</span>{lockHint('announcement.level')}</label>
+                            <select id="announcement-level" className="select select-bordered select-sm w-full" value={form.announcement.level} disabled={locked('announcement.level')}
+                                onChange={e => setAnnouncement({ level: e.target.value as PortalSettings['announcement']['level'] })}>
+                                <option value="info">{t('user_token.announcement_info')}</option>
+                                <option value="warning">{t('user_token.announcement_warning')}</option>
+                            </select>
+                        </div>
+                        <div className="form-control">
+                            <label className="label py-1" htmlFor="announcement-content"><span className="label-text text-sm">{t('user_token.announcement_content')}</span>{lockHint('announcement.content')}</label>
+                            <textarea id="announcement-content" rows={4} maxLength={ANNOUNCEMENT_MAX} className="textarea textarea-bordered w-full text-sm" value={form.announcement.content} disabled={locked('announcement.content')}
+                                onChange={e => setAnnouncement({ content: e.target.value })} placeholder={t('user_token.announcement_placeholder')} />
+                            <p className="text-xs text-gray-500 mt-1 text-right tabular-nums">{form.announcement.content.length} / {ANNOUNCEMENT_MAX}</p>
                         </div>
                     </section>
 
@@ -314,6 +397,52 @@ export default function PortalSettingsModal({ open, onClose }: Props) {
                             </div>
                         </div>
                         <p className="text-xs text-gray-500">{t('topup.admin_limits_hint')}</p>
+                    </section>
+
+                    <section className="space-y-3 border-t border-gray-100 dark:border-base-200 pt-4">
+                        <label className="flex items-center justify-between gap-4 cursor-pointer">
+                            <span>
+                                <span className="text-sm font-medium flex items-center gap-2"><Bell size={15} />{t('user_token.alerts')}{lockHint('alerts.enabled')}</span>
+                                <span className="block text-xs text-gray-500 mt-0.5">{t('user_token.alerts_hint')}</span>
+                            </span>
+                            <input type="checkbox" className={toggle} checked={form.alerts.enabled} disabled={locked('alerts.enabled')}
+                                onChange={e => setAlerts({ enabled: e.target.checked })} />
+                        </label>
+                        {form.alerts.enabled && alertTargets === 0 && <p className="flex gap-2 text-xs text-amber-700 bg-amber-50 dark:bg-amber-900/20 rounded-lg px-3 py-2"><AlertTriangle size={14} className="shrink-0 mt-0.5" />{t('user_token.alerts_needs_target')}</p>}
+                        <div className="form-control">
+                            <label className="label py-1" htmlFor="alert-webhooks"><span className="label-text text-sm">{t('user_token.alert_webhooks')}</span>{lockHint('alerts.webhooks')}</label>
+                            <textarea id="alert-webhooks" rows={2} className="textarea textarea-bordered w-full text-xs font-mono" value={webhooks} disabled={locked('alerts.webhooks')}
+                                onChange={e => setWebhooks(e.target.value)} placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+                            <p className="text-xs text-gray-500 mt-1">{t('user_token.alert_webhooks_hint')}</p>
+                        </div>
+                        <div className="form-control">
+                            <label className="label py-1" htmlFor="alert-emails"><span className="label-text text-sm">{t('user_token.alert_emails')}</span>{lockHint('alerts.emails')}</label>
+                            <textarea id="alert-emails" rows={2} className="textarea textarea-bordered w-full text-sm" value={alertEmails} disabled={locked('alerts.emails')}
+                                onChange={e => setAlertEmails(e.target.value)} placeholder="ops@example.com" />
+                            <p className="text-xs text-gray-500 mt-1">{t('user_token.alert_emails_hint')}</p>
+                            {lines(alertEmails).length > 0 && !view?.smtp_ready && <p className="flex gap-2 text-xs text-amber-700 bg-amber-50 dark:bg-amber-900/20 rounded-lg px-3 py-2 mt-2"><AlertTriangle size={14} className="shrink-0 mt-0.5" />{t('user_token.alert_emails_need_smtp')}</p>}
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <div className="form-control">
+                                <label className="label py-1" htmlFor="alert-threshold"><span className="label-text text-sm">{t('user_token.alert_failure_threshold')}</span>{lockHint('alerts.failure_threshold')}</label>
+                                <input id="alert-threshold" type="number" min="1" max="1000" step="1" className={field} value={form.alerts.failure_threshold} disabled={locked('alerts.failure_threshold')}
+                                    onChange={e => setAlerts({ failure_threshold: parseInt(e.target.value) || 0 })} />
+                            </div>
+                            <div className="form-control">
+                                <label className="label py-1" htmlFor="alert-cooldown"><span className="label-text text-sm">{t('user_token.alert_cooldown')}</span>{lockHint('alerts.cooldown_minutes')}</label>
+                                <input id="alert-cooldown" type="number" min="1" max="1440" step="1" className={field} value={form.alerts.cooldown_minutes} disabled={locked('alerts.cooldown_minutes')}
+                                    onChange={e => setAlerts({ cooldown_minutes: parseInt(e.target.value) || 0 })} />
+                            </div>
+                            <div className="form-control">
+                                <label className="label py-1" htmlFor="alert-credits"><span className="label-text text-sm">{t('user_token.alert_credit_threshold')}</span>{lockHint('alerts.credit_threshold')}</label>
+                                <input id="alert-credits" type="number" min="0" step="1" className={field} value={form.alerts.credit_threshold} disabled={locked('alerts.credit_threshold')}
+                                    onChange={e => setAlerts({ credit_threshold: Math.max(0, parseFloat(e.target.value) || 0) })} />
+                            </div>
+                        </div>
+                        <p className="text-xs text-gray-500">{t('user_token.alert_thresholds_hint')}</p>
+                        <button type="button" onClick={() => void sendTestAlert()} disabled={testingAlert || saving || alertTargets === 0} className="btn btn-sm btn-outline">
+                            {testingAlert && <RefreshCw size={13} className="animate-spin" />}{t('user_token.alert_test')}
+                        </button>
                     </section>
                 </div>}
                 <div className="modal-action">

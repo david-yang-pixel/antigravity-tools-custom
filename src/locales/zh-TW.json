@@ -1741,7 +1741,28 @@
     "account_revoke_done": "已讓 {{email}} 在所有裝置登出",
     "account_reset_done": "重設密碼驗證碼已寄到 {{email}}",
     "delete_registered_title": "刪除註冊使用者",
-    "delete_registered_message": "將同時刪除帳號 {{email}} 和它的 Token，Token 立即失效。刪除後這個信箱可以重新註冊。確定刪除嗎？"
+    "delete_registered_message": "將同時刪除帳號 {{email}} 和它的 Token，Token 立即失效。刪除後這個信箱可以重新註冊。確定刪除嗎？",
+    "announcement": "用量中心公告",
+    "announcement_hint": "顯示在用量中心登入頁和首頁。使用者可以關閉，公告內容變更後會再次顯示。",
+    "announcement_level": "樣式",
+    "announcement_info": "一般通知",
+    "announcement_warning": "重要提醒（醒目顯示）",
+    "announcement_content": "公告內容",
+    "announcement_placeholder": "例如：今晚 22:00-23:00 模型 X 維護，期間請求可能失敗。",
+    "alerts": "維運告警",
+    "alerts_hint": "模型連續呼叫失敗、上游額度耗盡或 WorkBuddy 點數低於門檻時，第一時間推送通知給你。",
+    "alerts_needs_target": "請至少填寫一個 Webhook 或信箱，否則告警無法送達。",
+    "alert_webhooks": "Webhook 位址（每行一個）",
+    "alert_webhooks_hint": "依位址自動識別企業微信、釘釘（安全設定選「自訂關鍵字」，填「告警」）、飛書、Slack、Discord、Server醬 機器人；其他位址（如 Bark、Telegram 的 sendMessage?chat_id=…）會收到包含 title、body、text 的 JSON。",
+    "alert_emails": "告警信箱（每行一個）",
+    "alert_emails_hint": "透過上方的 SMTP 設定寄送。",
+    "alert_emails_need_smtp": "SMTP 尚未設定，告警郵件無法寄送。",
+    "alert_failure_threshold": "連續失敗次數",
+    "alert_cooldown": "重複提醒間隔（分鐘）",
+    "alert_credit_threshold": "WorkBuddy 點數門檻",
+    "alert_thresholds_hint": "同一模型連續上游失敗（401/403/429/5xx）達到次數後告警，恢復成功時再通知一次；上游回傳「額度/點數耗盡」類錯誤會立即告警。同一模型或帳號在間隔內不重複提醒。點數門檻為 0 時僅在點數用完時告警。",
+    "alert_test": "儲存並傳送測試告警",
+    "alert_test_sent": "測試告警已傳送到 {{count}} 個通道"
   },
   "apiKeyFun": {
     "title": "APIKEY.FUN 中轉站",
@@ -1855,6 +1876,8 @@
       "network": "網路錯誤，請檢查連線後再試。",
       "unavailable": "服務暫時無法使用，請稍後再試。",
       "unknown": "操作失敗，請稍後再試。"
-    }
+    },
+    "announcement": "公告",
+    "announcement_dismiss": "關閉公告"
   }
 }

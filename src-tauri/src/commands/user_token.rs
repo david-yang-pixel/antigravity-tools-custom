@@ -272,6 +272,12 @@ pub async fn send_portal_test_email(to: String) -> Result<(), String> {
     portal_mail::send(&settings.smtp, &to, portal_mail::test_mail(&settings.smtp)).await
 }
 
+/// Sends a sample alert to every configured webhook and email.
+#[tauri::command]
+pub async fn send_test_alert() -> Result<Vec<crate::modules::alerts::DeliveryResult>, String> {
+    crate::modules::alerts::send_test().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

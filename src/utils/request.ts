@@ -171,6 +171,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
 
   'save_portal_settings': { url: '/api/portal-settings', method: 'POST' },
   'send_portal_test_email': { url: '/api/portal-settings/test-email', method: 'POST' },
+  'send_test_alert': { url: '/api/portal-settings/test-alert', method: 'POST' },
 
   // Proxy Pool (Web Mode Fix)
   'get_proxy_pool_config': { url: '/api/proxy/pool/config', method: 'GET' },

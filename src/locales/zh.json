@@ -263,7 +263,9 @@
       "network": "网络错误，请检查连接后重试。",
       "unavailable": "服务暂时不可用，请稍后重试。",
       "unknown": "操作失败，请稍后重试。"
-    }
+    },
+    "announcement": "公告",
+    "announcement_dismiss": "关闭公告"
   },
   "portal_guide": {
     "intro": "选择你使用的软件，按步骤填写接入信息。地址随当前网站自动生成。",
@@ -2032,7 +2034,28 @@
     "account_revoke_done": "已让 {{email}} 在所有设备下线",
     "account_reset_done": "重置密码验证码已发送到 {{email}}",
     "delete_registered_title": "删除注册用户",
-    "delete_registered_message": "将同时删除账号 {{email}} 和它的 Token，Token 立即失效。删除后这个邮箱可以重新注册。确定删除吗？"
+    "delete_registered_message": "将同时删除账号 {{email}} 和它的 Token，Token 立即失效。删除后这个邮箱可以重新注册。确定删除吗？",
+    "announcement": "用量中心公告",
+    "announcement_hint": "显示在用量中心登录页和首页。用户可以关闭，公告内容变更后会再次显示。",
+    "announcement_level": "样式",
+    "announcement_info": "普通通知",
+    "announcement_warning": "重要提醒（醒目显示）",
+    "announcement_content": "公告内容",
+    "announcement_placeholder": "例如：今晚 22:00-23:00 模型 X 维护，期间请求可能失败。",
+    "alerts": "运维告警",
+    "alerts_hint": "模型连续调用失败、上游额度耗尽或 WorkBuddy 积分低于阈值时，第一时间推送通知给你。",
+    "alerts_needs_target": "请至少填写一个 Webhook 或邮箱，否则告警无法送达。",
+    "alert_webhooks": "Webhook 地址（每行一个）",
+    "alert_webhooks_hint": "按地址自动识别企业微信、钉钉（安全设置选「自定义关键词」，填“告警”）、飞书、Slack、Discord、Server酱 机器人；其他地址（如 Bark、Telegram 的 sendMessage?chat_id=…）会收到包含 title、body、text 的 JSON。",
+    "alert_emails": "告警邮箱（每行一个）",
+    "alert_emails_hint": "通过上方的 SMTP 配置发送。",
+    "alert_emails_need_smtp": "SMTP 尚未配置，告警邮件无法发送。",
+    "alert_failure_threshold": "连续失败次数",
+    "alert_cooldown": "重复提醒间隔（分钟）",
+    "alert_credit_threshold": "WorkBuddy 积分阈值",
+    "alert_thresholds_hint": "同一模型连续上游失败（401/403/429/5xx）达到次数后告警，恢复成功时再通知一次；上游返回「额度/积分耗尽」类错误会立即告警。同一模型或账号在间隔内不重复提醒。积分阈值为 0 时仅在积分用完时告警。",
+    "alert_test": "保存并发送测试告警",
+    "alert_test_sent": "测试告警已发送到 {{count}} 个通道"
   },
   "apiKeyFun": {
     "title": "APIKEY.FUN 中转站",

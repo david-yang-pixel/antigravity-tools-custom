@@ -1079,6 +1079,7 @@ impl AxumServer {
                 "/portal-settings/test-email",
                 post(admin_send_portal_test_email),
             )
+            .route("/portal-settings/test-alert", post(admin_send_test_alert))
             .route(
                 "/workbuddy-accounts",
                 get(admin_list_workbuddy_accounts).post(admin_import_workbuddy_account),
@@ -2885,6 +2886,13 @@ async fn admin_send_portal_test_email(
         .await
         .map_err(portal_admin_error)?;
     Ok(StatusCode::OK)
+}
+
+async fn admin_send_test_alert() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::user_token::send_test_alert()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
 }
 
 async fn admin_should_check_updates() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>

@@ -263,7 +263,9 @@
       "network": "Network error. Check your connection and try again.",
       "unavailable": "The service is temporarily unavailable. Try again later.",
       "unknown": "Something went wrong. Please try again."
-    }
+    },
+    "announcement": "Announcement",
+    "announcement_dismiss": "Close announcement"
   },
   "portal_guide": {
     "intro": "Choose your app and follow the setup steps. Connection URLs use the site you are visiting.",
@@ -2066,7 +2068,28 @@
     "account_revoke_done": "Signed {{email}} out on all devices",
     "account_reset_done": "Password reset code sent to {{email}}",
     "delete_registered_title": "Delete registered user",
-    "delete_registered_message": "This deletes the account {{email}} and its token, which stops working immediately. The email can sign up again afterwards. Delete?"
+    "delete_registered_message": "This deletes the account {{email}} and its token, which stops working immediately. The email can sign up again afterwards. Delete?",
+    "announcement": "Usage portal announcement",
+    "announcement_hint": "Shown on the usage portal sign-in page and dashboard. Users can close it; it shows again when the text changes.",
+    "announcement_level": "Style",
+    "announcement_info": "Notice",
+    "announcement_warning": "Warning (highlighted)",
+    "announcement_content": "Text",
+    "announcement_placeholder": "e.g. Model X is under maintenance tonight 22:00-23:00; requests may fail.",
+    "alerts": "Admin alerts",
+    "alerts_hint": "Notify you when a model keeps failing, upstream quota runs out, or WorkBuddy credits fall to the threshold.",
+    "alerts_needs_target": "Add at least one webhook or email, or no alert can be delivered.",
+    "alert_webhooks": "Webhooks (one per line)",
+    "alert_webhooks_hint": "WeCom, DingTalk (security setting: custom keyword \"告警\"), Feishu/Lark, Slack, Discord and ServerChan bots are recognized by address. Any other address, such as Bark or Telegram sendMessage?chat_id=…, receives JSON with title, body and text.",
+    "alert_emails": "Alert emails (one per line)",
+    "alert_emails_hint": "Sent through the SMTP settings above.",
+    "alert_emails_need_smtp": "SMTP is not configured yet, so alert emails cannot be sent.",
+    "alert_failure_threshold": "Consecutive failures",
+    "alert_cooldown": "Repeat after (minutes)",
+    "alert_credit_threshold": "WorkBuddy credit threshold",
+    "alert_thresholds_hint": "A model alerts after this many upstream failures in a row (401/403/429/5xx) and again when it recovers; an upstream \"quota or credits exhausted\" error alerts at once. The same model or account is not alerted again within the repeat interval. Credit threshold 0 alerts only when credits run out.",
+    "alert_test": "Save and send test alert",
+    "alert_test_sent": "Test alert sent to {{count}} target(s)"
   },
   "apiKeyFun": {
     "title": "APIKEY.FUN Hub",

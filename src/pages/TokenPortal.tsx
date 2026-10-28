@@ -10,6 +10,7 @@ import { formatYuan, Price } from '../components/user-token/money';
 import PortalModelCatalog from '../components/user-token/PortalModelCatalog';
 import PortalConnectionGuide from '../components/user-token/PortalConnectionGuide';
 import PortalTopup, { takeReturnedOrder, TopupOrder } from '../components/user-token/PortalTopup';
+import PortalAnnouncement from '../components/user-token/PortalAnnouncement';
 
 interface ModelUsage {
     model: string;
@@ -209,6 +210,7 @@ export default function TokenPortal() {
                         <div className="text-right"><button onClick={() => reload()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm disabled:opacity-50"><RefreshCw size={16} className={busy ? 'animate-spin' : ''} />{t('common.refresh')}</button>
                             {updatedAt && <p className="mt-2 text-xs text-slate-400">{t('token_portal.updated')}: {updatedAt.toLocaleTimeString(i18n.language)}</p>}</div>
                     </section>
+                    <PortalAnnouncement announcement={config?.announcement} />
                     <p className="flex items-start gap-2 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-700">
                         <MessageCircle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
                         <span>{t('token_portal.support_hint', { qq: '3133450490' })}</span>

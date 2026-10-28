@@ -430,6 +430,10 @@ async fn portal_config() -> Response {
                 "min_amount_cents": settings.payment.min_amount_cents,
                 "max_amount_cents": settings.payment.max_amount_cents,
             },
+            "announcement": settings.announcement.visible().map(|a| serde_json::json!({
+                "level": a.level,
+                "content": a.content,
+            })),
         })),
         Err(error) => portal_error(PortalError::Unavailable(error)),
     }

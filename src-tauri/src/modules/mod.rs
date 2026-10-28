@@ -1,5 +1,6 @@
 pub mod account;
 pub mod account_service;
+pub mod alerts;
 pub mod billing;
 pub mod cache;
 pub mod config;
