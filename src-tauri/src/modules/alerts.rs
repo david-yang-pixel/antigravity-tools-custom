@@ -179,11 +179,15 @@ fn record(
         Some(mapped) if mapped != model => format!("{model} → {mapped}"),
         _ => model.to_string(),
     };
+    let cooldown_secs = i64::from(settings.alerts.cooldown_minutes) * 60;
     if log.status < 400 {
+        // Cooldowns survive recovery and recovery has its own, so traffic that
+        // alternates between success and failure cannot alert on every request.
         return match state.streaks.remove(model) {
-            Some(streak) if streak.alerted => {
-                state.sent.remove(&format!("failing:{model}"));
-                state.sent.remove(&format!("quota:{model}"));
+            Some(streak)
+                if streak.alerted
+                    && claim(state, &format!("recovered:{model}"), cooldown_secs, at) =>
+            {
                 vec![Alert {
                     key: format!("recovered:{model}"),
                     title: format!("模型已恢复 / Model recovered: {model}"),
@@ -224,7 +228,7 @@ fn record(
     } else {
         return Vec::new();
     };
-    if !claim(state, &key, i64::from(alerts.cooldown_minutes) * 60, at) {
+    if !claim(state, &key, cooldown_secs, at) {
         return Vec::new();
     }
     if let Some(streak) = state.streaks.get_mut(model) {
@@ -539,11 +543,15 @@ mod tests {
         assert!(recovered[0]
             .lines
             .contains(&("恢复前连续失败 / Failures before recovery", "4".into())));
-        // Recovery clears the cooldown, so a new outage is reported at once.
+        // A new outage inside the cooldown stays quiet; after it, it alerts again.
         for _ in 0..3 {
-            record(&mut state, &log("m", 502, None), &settings, at);
+            assert!(record(&mut state, &log("m", 502, None), &settings, at).is_empty());
         }
-        assert!(state.streaks["m"].alerted);
+        at += 30 * 60;
+        assert_eq!(
+            record(&mut state, &log("m", 502, None), &settings, at)[0].key,
+            "failing:m"
+        );
         // A streak that never alerted ends silently.
         assert!(record(&mut state, &log("other", 200, None), &settings, at).is_empty());
     }
@@ -562,6 +570,21 @@ mod tests {
         let mut warmup = log("w", 429, Some("insufficient_quota"));
         warmup.url = "/internal/warmup -> w".into();
         assert!(record(&mut state, &warmup, &settings, 0).is_empty());
+    }
+
+    #[test]
+    fn alerts_flapping_traffic_respects_cooldown() {
+        let settings = settings(5);
+        let mut state = State::default();
+        let quota = log("m", 429, Some("insufficient_quota"));
+        let ok = log("m", 200, None);
+        let mut sent = Vec::new();
+        for i in 0..20 {
+            sent.extend(record(&mut state, &quota, &settings, i));
+            sent.extend(record(&mut state, &ok, &settings, i));
+        }
+        let keys: Vec<_> = sent.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, ["quota:m", "recovered:m"]);
     }
 
     #[test]

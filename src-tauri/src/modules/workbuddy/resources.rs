@@ -139,6 +139,12 @@ pub async fn credits(account: &Account) -> Result<Credits, String> {
             result.available = (result.available * 100.0).round() / 100.0;
             result.updated_at = super::accounts::now();
             result.expiries.sort_by_key(|e| e.at);
+            // Every refresh (maintenance or reward collection) feeds the alerts.
+            let label = [&account.nickname, &account.uid, &account.id]
+                .into_iter()
+                .find(|value| !value.is_empty())
+                .map_or("", |value| value.as_str());
+            crate::modules::alerts::observe_credits(&account.id, label, result.available);
             return Ok(result);
         }
     }

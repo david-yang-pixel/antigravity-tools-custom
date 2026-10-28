@@ -166,12 +166,6 @@ pub async fn run(
     }
     match credits {
         Ok(credits) => {
-            let label = [&account.nickname, &account.uid, &account.id]
-                .into_iter()
-                .find(|value| !value.is_empty())
-                .cloned()
-                .unwrap_or_default();
-            crate::modules::alerts::observe_credits(&account.id, &label, credits.available);
             account.management.credits = Some(credits);
             account.management.credits_error = None;
         }
