@@ -60,8 +60,9 @@ pub(super) async fn request(
             headers.insert(key, value.parse().unwrap());
         }
     }
-    let mut req = client::http()
-        .map_err(|_| Error::unknown("Activity connection unavailable"))?
+    let mut req = client::http_for(account)
+        .await
+        .map_err(|error| Error::unknown(&error))?
         .request(method, format!("{base}{path}"))
         .headers(headers)
         .timeout(Duration::from_secs(15));

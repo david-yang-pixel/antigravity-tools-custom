@@ -31,7 +31,8 @@ fn billing_base(realm: Realm) -> String {
 }
 async fn post(account: &Account, path: &str, body: &Value) -> Result<reqwest::Response, String> {
     let headers = headers(account)?;
-    client::http()?
+    client::http_for(account)
+        .await?
         .post(format!("{}{path}", billing_base(account.realm)))
         .headers(headers)
         .json(body)

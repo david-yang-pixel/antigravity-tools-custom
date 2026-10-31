@@ -28,7 +28,7 @@ pub async fn get_workbuddy_model_verification() -> Result<workbuddy::verificatio
 use serde::Deserialize;
 use workbuddy::{
     accounts::{self, AccountView, Realm},
-    login,
+    egress, login,
 };
 
 #[derive(Deserialize)]
@@ -98,7 +98,9 @@ pub async fn update_workbuddy_account(request: AccountAction) -> Result<AccountV
 }
 #[tauri::command]
 pub async fn delete_workbuddy_account(request: AccountAction) -> Result<(), String> {
-    accounts::remove(&request.id)
+    accounts::remove(&request.id)?;
+    egress::forget(&request.id);
+    Ok(())
 }
 #[tauri::command]
 pub async fn start_workbuddy_login(request: LoginRequest) -> Result<login::Started, String> {
@@ -111,4 +113,35 @@ pub async fn poll_workbuddy_login(request: LoginSession) -> Result<login::Poll, 
 #[tauri::command]
 pub async fn cancel_workbuddy_login(request: LoginSession) -> Result<(), String> {
     login::cancel(&request.id).await
+}
+
+#[derive(Deserialize)]
+pub struct AccountEgress {
+    pub id: String,
+    /// Node name, `DIRECT`, or null to let auto-assignment choose.
+    pub node: Option<String>,
+}
+#[tauri::command]
+pub async fn get_workbuddy_egress() -> Result<egress::View, String> {
+    egress::view().await
+}
+#[tauri::command]
+pub async fn save_workbuddy_egress(request: egress::Update) -> Result<egress::View, String> {
+    egress::save(request).await
+}
+#[tauri::command]
+pub async fn refresh_workbuddy_egress() -> Result<egress::View, String> {
+    egress::refresh().await
+}
+#[tauri::command]
+pub async fn test_workbuddy_egress_nodes() -> Result<egress::View, String> {
+    egress::test_nodes().await
+}
+#[tauri::command]
+pub async fn set_workbuddy_account_egress(request: AccountEgress) -> Result<egress::View, String> {
+    egress::set_account(&request.id, request.node).await
+}
+#[tauri::command]
+pub async fn test_workbuddy_account_egress(request: LoginSession) -> Result<egress::Probe, String> {
+    egress::test_account(&request.id).await
 }

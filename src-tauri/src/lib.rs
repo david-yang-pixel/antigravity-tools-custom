@@ -445,6 +445,7 @@ pub fn run() {
                     // Start smart scheduler for 7-day weekly reset warmup
                     modules::scheduler::start_scheduler(None, proxy_state.clone());
                     modules::workbuddy::maintenance::start();
+                    modules::workbuddy::egress::start();
                     info!("Smart scheduler (7-Day Weekly Reset Warmup) started in headless mode.");
                 }
                 Err(e) => {
@@ -607,6 +608,7 @@ pub fn run() {
             let scheduler_state = app.handle().state::<commands::proxy::ProxyServiceState>();
             modules::scheduler::start_scheduler(Some(app.handle().clone()), scheduler_state.inner().clone());
             modules::workbuddy::maintenance::start();
+            modules::workbuddy::egress::start();
             info!("Smart scheduler (7-Day Weekly Reset Warmup) initialized.");
 
             // [PHASE 1] 已整合至 Axum 端口 (8045)，不再单独启动 19527 端口
@@ -827,6 +829,12 @@ pub fn run() {
             commands::workbuddy::start_workbuddy_login,
             commands::workbuddy::poll_workbuddy_login,
             commands::workbuddy::cancel_workbuddy_login,
+            commands::workbuddy::get_workbuddy_egress,
+            commands::workbuddy::save_workbuddy_egress,
+            commands::workbuddy::refresh_workbuddy_egress,
+            commands::workbuddy::test_workbuddy_egress_nodes,
+            commands::workbuddy::set_workbuddy_account_egress,
+            commands::workbuddy::test_workbuddy_account_egress,
             commands::user_token::save_portal_settings,
             commands::user_token::send_portal_test_email,
             commands::user_token::send_test_alert,
