@@ -86,6 +86,22 @@ RUN apt-get update && apt-get install -y \
     librsvg2-2 \
     && rm -rf /var/lib/apt/lists/*
 
+# mihomo powers per-account WorkBuddy egress through airport subscriptions.
+# Pinned and checksum-verified; bump the version and both checksums together.
+ARG TARGETARCH
+RUN set -eux; \
+    version=v1.19.15; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) asset=amd64-v1; sum=c52a766af250f789fa8e979f8c6a1c279a526bf2c7dd5d6aaedef74db2f8f366 ;; \
+      arm64) asset=arm64; sum=2ca4a3ef560b6a9b77bb5dadfcc6028492faaf20834e031f7ef1f14c1a655333 ;; \
+      *) echo "mihomo: unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${version}/mihomo-linux-${asset}-${version}.gz"; \
+    echo "${sum}  /tmp/mihomo.gz" | sha256sum -c -; \
+    gunzip -c /tmp/mihomo.gz > /usr/local/bin/mihomo; \
+    chmod 0755 /usr/local/bin/mihomo; \
+    rm /tmp/mihomo.gz
+
 # Copy binary from builder
 COPY --from=backend-builder /tmp/antigravity-tools /app/antigravity-tools
 
