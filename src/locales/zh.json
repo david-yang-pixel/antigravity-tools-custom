@@ -2251,6 +2251,36 @@
       "automatic": "自动调度（遵循上方调度模式）",
       "unavailable": "已选账号已删除，请重新选择",
       "hint": "选择账号后，WorkBuddy 请求仅使用该账号；不会影响 Antigravity 账号。缓存优先按上方时长等待，超时返回不可用；平衡模式在后续请求中切换冷却账号。"
+    },
+    "egress": {
+      "title": "出口节点（机场订阅）",
+      "description": "启用后，每个 WorkBuddy 账号的对话、刷新、模型、积分、签到和登录流量都经由机场订阅中的一个节点发出。新账号自动分配一个空闲且健康的节点，也可以在账号列表中手动指定。需要服务器上可用的 mihomo（Docker 镜像已内置）。",
+      "subscription": "订阅链接",
+      "subscription_kept": "已配置（{{host}}），留空保持不变",
+      "link_required": "请先填写订阅链接",
+      "include": "自动分配仅使用（正则，可选）",
+      "include_placeholder": "例如 香港|HK|日本",
+      "exclude": "自动分配排除（正则）",
+      "auto_assign": "新账号或未指定节点的账号自动分配节点",
+      "fail_closed_hint": "节点不可用时，该账号的请求直接失败并切换到其他账号，不会回退直连，避免暴露服务器 IP。需要直连的账号请手动选择「直连」。",
+      "binary": "mihomo：{{path}}",
+      "status_off": "未启用",
+      "status_running": "运行中",
+      "status_stopped": "未运行",
+      "status_error": "异常",
+      "node_summary": "{{total}} 个节点，{{alive}} 个测速可用",
+      "refresh": "更新订阅",
+      "test_nodes": "测试全部节点",
+      "clear_link": "清除订阅链接",
+      "saved": "出口设置已保存",
+      "column": "出口节点",
+      "off": "直连（未启用出口）",
+      "auto": "自动分配",
+      "direct": "直连",
+      "missing": "{{name}}（不在当前订阅中）",
+      "test_account": "测试该账号节点延迟",
+      "latency": "延迟 {{ms}} ms",
+      "timeout": "超时"
     }
   }
 }

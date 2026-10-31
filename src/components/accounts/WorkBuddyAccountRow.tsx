@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useState, type ReactNode } from 'react';
 import { CalendarCheck, ChevronDown, HeartPulse, RefreshCw, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import WorkBuddyActivity, { type ActivityState } from './WorkBuddyActivity';
@@ -23,9 +23,9 @@ const cell = 'px-4 py-4 align-middle';
 const muted = 'mt-1 text-xs font-normal text-gray-500 dark:text-gray-400';
 const actionButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white';
 
-export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDelete }: {
+export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDelete, egress }: {
     account: WorkBuddyAccount; now: number; busy: boolean;
-    onChange: (changes: AccountChanges) => void; onDelete: () => void;
+    onChange: (changes: AccountChanges) => void; onDelete: () => void; egress: ReactNode;
 }) {
     const { t } = useTranslation();
     const [expanded, setExpanded] = useState(false);
@@ -58,6 +58,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                 {!account.models_verified_at && !!account.candidate_model_count && <div className="mt-1 text-xs text-amber-600">{t('workbuddy.models_not_verified')}</div>}
                 {(errors.length > 0 || m.activity?.error) && <button className="mt-1 text-xs text-amber-700 underline dark:text-amber-400" onClick={() => setExpanded(true)} aria-controls={detailId}>{t('workbuddy.accounts.needs_attention')}</button>}
             </th>
+            <td className={cell}>{egress}</td>
             <td className={`${cell} whitespace-nowrap tabular-nums`}>
                 <div className="font-semibold">{m.credits ? m.credits.available.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</div>
                 <div className={muted} title={m.credits ? date(m.credits.updated_at) : undefined}>{m.credits_error && m.credits ? t('workbuddy.accounts.stale_credits') : m.credits ? t('workbuddy.accounts.updated_at', { time: shortTime(m.credits.updated_at) }) : t('workbuddy.accounts.not_queried')}</div>
@@ -93,7 +94,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                 </div>
             </td>
         </tr>
-        {expanded && <tr id={detailId} className="border-b border-gray-100 bg-gray-50/70 dark:border-gray-800 dark:bg-gray-800/30"><td colSpan={7} className="px-5 py-4">
+        {expanded && <tr id={detailId} className="border-b border-gray-100 bg-gray-50/70 dark:border-gray-800 dark:bg-gray-800/30"><td colSpan={8} className="px-5 py-4">
             <dl className="grid grid-cols-2 gap-x-8 gap-y-4 text-xs lg:grid-cols-4">
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.account_id')}</dt><dd className="mt-1 break-all font-mono">{account.uid}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.expires')}</dt><dd className="mt-1">{account.expires_at > 0 ? date(account.expires_at) : t('workbuddy.accounts.unknown_expiry')}</dd></div>
