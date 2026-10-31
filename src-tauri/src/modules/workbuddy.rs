@@ -2,6 +2,7 @@
 pub mod accounts;
 pub mod activity;
 pub mod client;
+pub mod egress;
 pub mod identity;
 pub mod login;
 pub mod maintenance;

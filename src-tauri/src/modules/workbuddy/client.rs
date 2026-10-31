@@ -9,19 +9,28 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
+/// Connection settings shared by direct and egress clients; system proxies are ignored.
+pub fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+}
+/// Direct connection from this server. Account traffic must use [`http_for`].
 pub fn http() -> Result<&'static reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(10))
+            builder()
                 .build()
                 .map_err(|_| "Cannot initialize WorkBuddy connection".into())
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+/// The account's own egress route (its airport node, or direct).
+pub async fn http_for(account: &Account) -> Result<reqwest::Client, String> {
+    super::egress::client_for(account).await
 }
 pub fn base(realm: Realm) -> String {
     #[cfg(test)]
@@ -144,11 +153,24 @@ pub async fn call(
     realm: Realm,
     method: Method,
     path: &str,
+    account: &Account,
+    query: &[(&str, &str)],
+    body: Option<Value>,
+) -> Result<Value, String> {
+    let http = http_for(account).await?;
+    call_with(&http, realm, method, path, Some(account), query, body).await
+}
+/// `call` over an explicit route, for login requests made before an account exists.
+pub async fn call_with(
+    http: &reqwest::Client,
+    realm: Realm,
+    method: Method,
+    path: &str,
     account: Option<&Account>,
     query: &[(&str, &str)],
     body: Option<Value>,
 ) -> Result<Value, String> {
-    let mut request = http()?
+    let mut request = http
         .request(method, format!("{}{path}", base(realm)))
         .headers(headers(realm, account)?)
         .query(query)
@@ -175,7 +197,8 @@ pub async fn refresh(account: &mut Account) -> Result<(), String> {
     if !account.device_token.is_empty() {
         add(&mut h, "x-device-token", &account.device_token)?;
     }
-    let response = http()?
+    let response = http_for(account)
+        .await?
         .post(format!(
             "{}/v2/plugin/auth/token/refresh",
             base(account.realm)
@@ -269,8 +292,7 @@ pub async fn models(account: &Account) -> Result<Vec<Model>, String> {
             &["/console/enterprises/personal/models"]
         };
         for path in paths {
-            if let Ok(data) = call(account.realm, Method::GET, path, Some(account), &[], None).await
-            {
+            if let Ok(data) = call(account.realm, Method::GET, path, account, &[], None).await {
                 return Ok(data);
             }
         }
@@ -278,14 +300,7 @@ pub async fn models(account: &Account) -> Result<Vec<Model>, String> {
     };
     let (ent, v3) = tokio::join!(
         enterprise,
-        call(
-            account.realm,
-            Method::GET,
-            "/v3/config",
-            Some(account),
-            &[],
-            None
-        )
+        call(account.realm, Method::GET, "/v3/config", account, &[], None)
     );
     let mut merged = BTreeMap::new();
     for data in [ent, v3].into_iter().flatten() {
@@ -429,18 +444,17 @@ pub async fn chat(
     if !account.device_token.is_empty() {
         add(&mut h, "x-device-token", &account.device_token)?;
     }
+    let http = http_for(account).await?;
     let send = |path: &str| {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err("WorkBuddy model request timed out".to_owned());
         }
-        http().map(|client| {
-            client
-                .post(format!("{}{path}", base(account.realm)))
-                .headers(h.clone())
-                .timeout(remaining)
-                .json(&payload)
-        })
+        Ok(http
+            .post(format!("{}{path}", base(account.realm)))
+            .headers(h.clone())
+            .timeout(remaining)
+            .json(&payload))
     };
     let response = send("/v2/chat/completions")?
         .send()

@@ -1092,6 +1092,26 @@ impl AxumServer {
                 "/workbuddy-accounts/delete",
                 post(admin_delete_workbuddy_account),
             )
+            .route(
+                "/workbuddy-egress",
+                get(admin_get_workbuddy_egress).post(admin_save_workbuddy_egress),
+            )
+            .route(
+                "/workbuddy-egress/refresh",
+                post(admin_refresh_workbuddy_egress),
+            )
+            .route(
+                "/workbuddy-egress/test-nodes",
+                post(admin_test_workbuddy_egress_nodes),
+            )
+            .route(
+                "/workbuddy-egress/account",
+                post(admin_set_workbuddy_account_egress),
+            )
+            .route(
+                "/workbuddy-egress/account/test",
+                post(admin_test_workbuddy_account_egress),
+            )
             .route("/workbuddy-login/start", post(admin_start_workbuddy_login))
             .route("/workbuddy-login/poll", post(admin_poll_workbuddy_login))
             .route(
@@ -2836,6 +2856,51 @@ async fn admin_delete_workbuddy_account(
     Json(payload): Json<crate::commands::workbuddy::AccountAction>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::workbuddy::delete_workbuddy_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_get_workbuddy_egress() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
+{
+    crate::commands::workbuddy::get_workbuddy_egress()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_save_workbuddy_egress(
+    Json(payload): Json<crate::modules::workbuddy::egress::Update>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::save_workbuddy_egress(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_refresh_workbuddy_egress(
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::refresh_workbuddy_egress()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_test_workbuddy_egress_nodes(
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::test_workbuddy_egress_nodes()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_set_workbuddy_account_egress(
+    Json(payload): Json<crate::commands::workbuddy::AccountEgress>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::set_workbuddy_account_egress(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_test_workbuddy_account_egress(
+    Json(payload): Json<crate::commands::workbuddy::LoginSession>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::test_workbuddy_account_egress(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

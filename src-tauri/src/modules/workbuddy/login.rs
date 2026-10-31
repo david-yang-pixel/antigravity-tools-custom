@@ -1,7 +1,7 @@
 //! Only administrator-initiated, short-lived authorizations can import credentials.
 use super::{
     accounts::{self, AccountView, Realm},
-    client,
+    client, egress,
 };
 use reqwest::Method;
 use serde::Serialize;
@@ -17,6 +17,8 @@ struct Session {
     expires_at: i64,
     completed: Option<String>,
     cancelled: bool,
+    /// Egress node the whole authorization uses; the new account inherits it.
+    node: Option<String>,
 }
 static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Session>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -52,7 +54,9 @@ fn valid_auth_url(value: &str) -> bool {
         })
 }
 pub async fn start(realm: Realm) -> Result<Started, String> {
-    let data = client::call(
+    let route = egress::login_route(None).await?;
+    let data = client::call_with(
+        &route.client,
         realm,
         Method::POST,
         "/v2/plugin/auth/state",
@@ -61,6 +65,8 @@ pub async fn start(realm: Realm) -> Result<Started, String> {
         Some(json!({})),
     )
     .await?;
+    let node = route.node.clone();
+    drop(route);
     let state = data
         .get("state")
         .and_then(Value::as_str)
@@ -97,6 +103,7 @@ pub async fn start(realm: Realm) -> Result<Started, String> {
             expires_at,
             completed: None,
             cancelled: false,
+            node,
         })),
     );
     Ok(Started {
@@ -139,7 +146,9 @@ pub async fn poll(id: &str) -> Result<Poll, String> {
             account: accounts::list()?.into_iter().find(|a| &a.id == id),
         });
     }
-    let auth = match client::call(
+    let route = egress::login_route(session.node.as_deref()).await?;
+    let auth = match client::call_with(
+        &route.client,
         session.realm,
         Method::GET,
         "/v2/plugin/auth/token",
@@ -175,7 +184,8 @@ pub async fn poll(id: &str) -> Result<Poll, String> {
             .parse()
             .map_err(|_| "Invalid WorkBuddy authorization token")?,
     );
-    let response = client::http()?
+    let response = route
+        .client
         .get(format!(
             "{}/v2/plugin/login/account",
             client::base(session.realm)
@@ -187,6 +197,7 @@ pub async fn poll(id: &str) -> Result<Poll, String> {
         .await
         .map_err(|_| "Cannot retrieve WorkBuddy account identity")?;
     let identity = client::json_response(response).await?;
+    drop(route);
     let uid = identity
         .get("uid")
         .and_then(|v| {
@@ -216,6 +227,7 @@ pub async fn poll(id: &str) -> Result<Poll, String> {
         });
     }
     let account = accounts::upsert(accounts::parse_import(value)?)?;
+    egress::adopt(&account.id, session.node.as_deref());
     session.completed = Some(account.id.clone());
     // Keep a completed session until TTL so a lost HTTP response cannot lose the result.
     Ok(Poll {

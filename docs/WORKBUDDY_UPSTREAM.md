@@ -88,6 +88,23 @@ Headless 使用 `gui_config.json` 中 `proxy.scheduling` 和 `circuit_breaker`�
 | `POST /api/workbuddy-login/start` | `{ "realm": "cn" }` 或 global，返回短期授权链接和会话 id |
 | `POST /api/workbuddy-login/poll` | `{ "id": "…" }`，返回 waiting / expired / ready |
 | `POST /api/workbuddy-login/cancel` | `{ "id": "…" }` |
+| `GET /api/workbuddy-egress` | 出口设置、mihomo 状态、节点列表（含最近延迟）和账号绑定；订阅链接只返回域名 |
+| `POST /api/workbuddy-egress` | `{ "enabled": true, "subscription_url": "https://…", "include": "", "exclude": "…", "auto_assign": true }`（字段可单独更新；`subscription_url: ""` 清除） |
+| `POST /api/workbuddy-egress/refresh` | 立即重新拉取订阅 |
+| `POST /api/workbuddy-egress/test-nodes` | 测试全部节点延迟 |
+| `POST /api/workbuddy-egress/account` | `{ "id": "…", "node": "节点名" }` 固定节点；`"DIRECT"` 直连；`null` 交给自动分配 |
+| `POST /api/workbuddy-egress/account/test` | `{ "id": "…" }`，沿该账号实际出口测到其 WorkBuddy 端点的延迟 |
+
+## 账号出口节点（机场订阅）
+
+启用后，每个账号的对话、凭据刷新、模型同步、积分、签到和登录请求都经由机场订阅中的一个节点发出。程序托管一个 mihomo 子进程：订阅作为 proxy-provider 由 mihomo 解析（支持其全部协议与订阅格式），每个账号一个 select 组，通过仅监听 `127.0.0.1` 的认证 SOCKS 入站按用户名（`IN-USER`）分流，其余流量 `REJECT`。
+
+- 新账号或未绑定账号首次使用时自动分配：在符合 `include`、不符合 `exclude` 的节点中选绑定数最少的，测速成功的优先，测速失败的跳过。账号授权全程使用同一节点，授权完成后账号沿用该节点。
+- 账号列表可为每个账号手动选择节点、`直连` 或 `自动分配`，并测试该账号出口到其 WorkBuddy 端点的延迟。
+- 绑定节点不可用时请求直接失败并切换账号，**不会回退直连**。
+- 配置保存在 `workbuddy_egress.json`（含订阅链接和绑定）；mihomo 工作目录为数据目录下 `egress/`（配置、日志 `mihomo.log`、订阅缓存）。
+- 环境变量：`ABV_WORKBUDDY_EGRESS_ENABLED=true|false`、`ABV_WORKBUDDY_EGRESS_SUBSCRIPTION=<订阅链接>`（被覆盖字段在界面锁定）、`ABV_MIHOMO_PATH=<可执行文件>`。
+- mihomo 查找顺序：`ABV_MIHOMO_PATH` / 配置文件 `mihomo_path` → `<数据目录>/egress/bin/mihomo` → 程序同目录 → `PATH`。Docker 镜像已内置固定版本并校验 sha256；管理接口不能修改可执行文件路径。
 
 headless 授权可通过这些接口发起，然后在任意浏览器打开返回的官方链接，完成后轮询并调用账号同步接口。授权会话最多保留 10 分钟；取消后不能继续导入。公开网站请继续使用现有 HTTPS 和管理员鉴权。
 

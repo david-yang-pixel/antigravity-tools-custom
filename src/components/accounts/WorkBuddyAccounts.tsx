@@ -9,6 +9,7 @@ import Pagination from '../common/Pagination';
 import { showToast } from '../common/ToastContainer';
 
 import WorkBuddyAccountRow, { type WorkBuddyAccount as Account, type AccountChanges } from './WorkBuddyAccountRow';
+import WorkBuddyEgressPanel, { WorkBuddyEgressCell, type EgressView } from './WorkBuddyEgress';
 
 interface Login { id: string; auth_url: string; expires_at: number }
 const PAGE_SIZE = 10;
@@ -32,6 +33,7 @@ export default function WorkBuddyAccounts() {
     const [login, setLogin] = useState<Login | null>(null);
     const [now, setNow] = useState(Date.now());
     const [deleting, setDeleting] = useState<Account | null>(null);
+    const [egress, setEgress] = useState<EgressView | null>(null);
     const mounted = useRef(true);
     const translate = useRef(t);
     translate.current = t;
@@ -40,10 +42,14 @@ export default function WorkBuddyAccounts() {
         catch (e) { if (mounted.current) setError(String(e)); }
         finally { if (mounted.current) setLoading(false); }
     }, []);
+    const loadEgress = useCallback(async () => {
+        try { const value = await request<EgressView>('get_workbuddy_egress'); if (mounted.current) setEgress(value); }
+        catch (e) { if (mounted.current) setError(String(e)); }
+    }, []);
     useEffect(() => {
-        mounted.current = true; void load();
+        mounted.current = true; void load(); void loadEgress();
         return () => { mounted.current = false; };
-    }, [load]);
+    }, [load, loadEgress]);
     useEffect(() => {
         const clock = setInterval(() => setNow(Date.now()), 1000);
         const refresh = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 15000);
@@ -110,7 +116,7 @@ export default function WorkBuddyAccounts() {
     }
     async function remove() {
         if (!deleting) return; setBusy(deleting.id); setError('');
-        try { await request('delete_workbuddy_account', { request: { id: deleting.id } }); setDeleting(null); await load(); }
+        try { await request('delete_workbuddy_account', { request: { id: deleting.id } }); setDeleting(null); await load(); void loadEgress(); }
         catch (e) { setError(String(e)); } finally { setBusy(''); }
     }
     const remaining = login ? Math.max(0, Math.ceil((login.expires_at * 1000 - now) / 1000)) : 0;
@@ -119,11 +125,12 @@ export default function WorkBuddyAccounts() {
             <div><h1 className="text-xl font-semibold">{t('workbuddy.accounts.title')}</h1>
                 <p className="mt-2 max-w-2xl text-sm leading-relaxed text-gray-500 dark:text-gray-400">{t('workbuddy.accounts.description')}</p></div>
             <div className="flex flex-wrap gap-2">
-                <button className={button} disabled={!!busy} onClick={() => { setError(''); void load(); }} aria-label={t('common.refresh')}><RefreshCw size={16} /></button>
+                <button className={button} disabled={!!busy} onClick={() => { setError(''); void load(); void loadEgress(); }} aria-label={t('common.refresh')}><RefreshCw size={16} /></button>
                 <button className={button} disabled={!!busy || !!login} onClick={() => { setMode('import'); setError(''); }}><Upload size={16} />{t('workbuddy.accounts.import')}</button>
                 <button className={`${button} !border-blue-600 !bg-blue-600 text-white hover:!bg-blue-700`} disabled={!!busy || !!login} onClick={() => { setMode('login'); setError(''); }}><Plus size={16} />{t('workbuddy.accounts.add')}</button>
             </div>
         </div>
+        <WorkBuddyEgressPanel view={egress} onChange={setEgress} />
         {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{error}</div>}
         {mode && <div className="rounded-2xl border border-blue-200 bg-white p-5 dark:border-blue-900 dark:bg-gray-900">
             <div className="mb-4 flex items-center justify-between"><h2 className="font-medium">{t(mode === 'login' ? 'workbuddy.accounts.add' : 'workbuddy.accounts.import')}</h2>
@@ -148,12 +155,15 @@ export default function WorkBuddyAccounts() {
         {loading ? <p className="py-12 text-center text-sm text-gray-500">{t('common.loading')}</p> : accounts.length === 0 ?
             <div className="rounded-2xl border border-dashed border-gray-300 p-12 text-center dark:border-gray-700"><h2 className="font-medium">{t('workbuddy.accounts.empty')}</h2><p className="mt-2 text-sm text-gray-500">{t('workbuddy.accounts.empty_hint')}</p></div> :
             <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-800" role="region" aria-label={t('workbuddy.accounts.title')} tabIndex={0}>
-                <table className="w-full min-w-[1120px] text-left">
+                <table className="w-full min-w-[1320px] text-left">
                     <thead className="border-b border-gray-200 bg-gray-50 text-xs font-medium text-gray-500 dark:border-gray-800 dark:bg-gray-800 dark:text-gray-400"><tr>
-                        {['account_column', 'credits', 'health', 'expires', 'maintenance_column', 'automation_column'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t(`workbuddy.accounts.${key}`)}</th>)}
+                        <th scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t('workbuddy.accounts.account_column')}</th>
+                        <th scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t('workbuddy.egress.column')}</th>
+                        {['credits', 'health', 'expires', 'maintenance_column', 'automation_column'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t(`workbuddy.accounts.${key}`)}</th>)}
                         <th scope="col" className="sticky right-0 bg-gray-50 px-4 py-3 text-right font-medium shadow-[-12px_0_12px_-12px_rgba(0,0,0,0.12)] dark:bg-gray-800">{t('common.actions')}</th>
                     </tr></thead>
-                    <tbody>{visibleAccounts.map(account => <WorkBuddyAccountRow key={account.id} account={account} now={now} busy={!!busy} onChange={changes => void action(account, changes)} onDelete={() => setDeleting(account)} />)}</tbody>
+                    <tbody>{visibleAccounts.map(account => <WorkBuddyAccountRow key={account.id} account={account} now={now} busy={!!busy} onChange={changes => void action(account, changes)} onDelete={() => setDeleting(account)}
+                        egress={<WorkBuddyEgressCell accountId={account.id} view={egress} disabled={!!busy} onChange={setEgress} />} />)}</tbody>
                 </table>
             </div>}
         {!loading && <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} totalItems={accounts.length} itemsPerPage={PAGE_SIZE} />}

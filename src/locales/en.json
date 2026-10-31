@@ -2285,6 +2285,36 @@
       "automatic": "Automatic (use the scheduling mode above)",
       "unavailable": "Selected account was removed; select another",
       "hint": "Pinning restricts WorkBuddy requests to this account without affecting Antigravity. Cache First waits up to the configured limit; Balance switches away from cooling accounts on subsequent requests."
+    },
+    "egress": {
+      "title": "Egress nodes (airport subscription)",
+      "description": "When enabled, each WorkBuddy account's chat, refresh, model, credit, check-in and login traffic leaves through one node of your airport subscription. New accounts get a free, healthy node automatically; you can also pin a node per account. Requires mihomo on the server (bundled in the Docker image).",
+      "subscription": "Subscription link",
+      "subscription_kept": "Configured ({{host}}); leave empty to keep",
+      "link_required": "Add a subscription link first",
+      "include": "Auto-assign only from (regex, optional)",
+      "include_placeholder": "e.g. HK|Hong Kong|JP",
+      "exclude": "Auto-assign excludes (regex)",
+      "auto_assign": "Auto-assign a node to new or unassigned accounts",
+      "fail_closed_hint": "If a node is unusable, that account's requests fail and move to another account. They never fall back to a direct connection, so the server IP stays hidden. Choose \"Direct\" for accounts that should connect directly.",
+      "binary": "mihomo: {{path}}",
+      "status_off": "Off",
+      "status_running": "Running",
+      "status_stopped": "Stopped",
+      "status_error": "Error",
+      "node_summary": "{{total}} nodes, {{alive}} passed the latency test",
+      "refresh": "Update subscription",
+      "test_nodes": "Test all nodes",
+      "clear_link": "Clear subscription link",
+      "saved": "Egress settings saved",
+      "column": "Egress node",
+      "off": "Direct (egress off)",
+      "auto": "Auto-assign",
+      "direct": "Direct",
+      "missing": "{{name}} (not in the current subscription)",
+      "test_account": "Test this account's node latency",
+      "latency": "{{ms}} ms",
+      "timeout": "timed out"
     }
   }
 }

@@ -168,6 +168,12 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'start_workbuddy_login': { url: '/api/workbuddy-login/start', method: 'POST' },
   'poll_workbuddy_login': { url: '/api/workbuddy-login/poll', method: 'POST' },
   'cancel_workbuddy_login': { url: '/api/workbuddy-login/cancel', method: 'POST' },
+  'get_workbuddy_egress': { url: '/api/workbuddy-egress', method: 'GET' },
+  'save_workbuddy_egress': { url: '/api/workbuddy-egress', method: 'POST' },
+  'refresh_workbuddy_egress': { url: '/api/workbuddy-egress/refresh', method: 'POST' },
+  'test_workbuddy_egress_nodes': { url: '/api/workbuddy-egress/test-nodes', method: 'POST' },
+  'set_workbuddy_account_egress': { url: '/api/workbuddy-egress/account', method: 'POST' },
+  'test_workbuddy_account_egress': { url: '/api/workbuddy-egress/account/test', method: 'POST' },
 
   'save_portal_settings': { url: '/api/portal-settings', method: 'POST' },
   'send_portal_test_email': { url: '/api/portal-settings/test-email', method: 'POST' },
