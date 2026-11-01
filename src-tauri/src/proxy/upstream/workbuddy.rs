@@ -11,18 +11,12 @@ use axum::{
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{json, Value};
-mod codec;
+
+use super::chat_codec as codec;
+use super::{error_response as error, published_request};
 
 use crate::modules::workbuddy::{self, Settings};
 use workbuddy::accounts::scheduling::Policy;
-
-fn error(status: StatusCode, code: &str, message: &str) -> Response {
-    (
-        status,
-        Json(json!({"error": {"type": code, "code": code, "message": message}})),
-    )
-        .into_response()
-}
 
 fn endpoint(path: &str) -> Option<&'static str> {
     match path {
@@ -78,27 +72,6 @@ fn configuration_error() -> Response {
 
 fn is_inference_path(path: &str) -> bool {
     crate::proxy::middleware::model_registry::is_inference_path(path)
-}
-
-async fn published_request(
-    mut request: Request,
-) -> Result<(Request, crate::modules::model_registry::PublishedModel), Response> {
-    if let Some(published) = request
-        .extensions()
-        .get::<crate::modules::model_registry::PublishedModel>()
-        .cloned()
-    {
-        return Ok((request, published));
-    }
-    let (resolved, model) =
-        crate::proxy::middleware::user_token_models::requested_model(request).await?;
-    request = resolved;
-    let published = crate::proxy::middleware::model_registry::resolve_public_model(
-        model.as_deref().unwrap_or(""),
-    )
-    .map_err(|(status, message)| error(status, "model_not_published", &message))?;
-    request.extensions_mut().insert(published.clone());
-    Ok((request, published))
 }
 
 async fn dispatch(
