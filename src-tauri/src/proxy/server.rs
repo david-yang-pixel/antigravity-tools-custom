@@ -767,6 +767,10 @@ impl AxumServer {
             // monitor 需要在 auth 之后执行才能获取 UserTokenIdentity
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
+                crate::proxy::upstream::openai_compat::route,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
                 crate::proxy::upstream::workbuddy::route,
             ))
             .layer(axum::middleware::from_fn_with_state(
@@ -1069,6 +1073,10 @@ impl AxumServer {
             .route(
                 "/workbuddy-settings",
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
+            )
+            .route(
+                "/custom-upstreams",
+                get(admin_get_custom_upstreams).post(admin_save_custom_upstreams),
             )
             .route(
                 "/workbuddy-models/verify",
@@ -2795,6 +2803,23 @@ async fn admin_verify_model_candidates(
     .await
     .map(Json)
     .map_err(registry_admin_error)
+}
+
+async fn admin_get_custom_upstreams() -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)>
+{
+    crate::commands::custom_upstream::get_custom_upstreams()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+
+async fn admin_save_custom_upstreams(
+    Json(payload): Json<crate::modules::custom_upstream::SettingsUpdate>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::custom_upstream::save_custom_upstreams(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
 }
 
 async fn admin_get_workbuddy_settings(

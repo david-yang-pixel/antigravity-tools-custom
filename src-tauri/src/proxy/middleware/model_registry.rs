@@ -54,7 +54,8 @@ pub(crate) fn resolve_public_model(
     if !matches!(
         published.source_id.as_str(),
         ANTIGRAVITY_SOURCE | WORKBUDDY_SOURCE
-    ) {
+    ) && !crate::modules::custom_upstream::is_source(&published.source_id)
+    {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Model source is not integrated.".into(),
@@ -70,7 +71,8 @@ pub(crate) fn antigravity_model(public_id: &str) -> Result<PublishedModel, (Stat
     if published.source_id != ANTIGRAVITY_SOURCE {
         return Err((
             StatusCode::BAD_REQUEST,
-            "This model requires a supported WorkBuddy HTTP endpoint.".into(),
+            "This model's upstream serves Chat Completions, HTTP Responses and Messages only."
+                .into(),
         ));
     }
     Ok(published)

@@ -159,6 +159,8 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'discover_upstream_models': { url: '/api/model-registry/discover', method: 'POST' },
   'get_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'GET' },
   'save_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'POST' },
+  'get_custom_upstreams': { url: '/api/custom-upstreams', method: 'GET' },
+  'save_custom_upstreams': { url: '/api/custom-upstreams', method: 'POST' },
   'start_workbuddy_model_verification': { url: '/api/workbuddy-models/verify', method: 'POST' },
   'get_workbuddy_model_verification': { url: '/api/workbuddy-models/verify', method: 'GET' },
   'list_workbuddy_accounts': { url: '/api/workbuddy-accounts', method: 'GET' },

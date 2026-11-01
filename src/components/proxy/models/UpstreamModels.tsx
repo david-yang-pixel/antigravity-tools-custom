@@ -8,6 +8,8 @@ export interface UpstreamPick { source_id: string; realm: WorkBuddyRealm }
 
 export const realmLabels: Record<WorkBuddyRealm, string> = { cn: '国内版 / China', global: '国际版 / Global' };
 export const hasRealm = (view: ModelRegistryView, sourceId: string) => view.sources.find(s => s.id === sourceId)?.provider_type === 'workbuddy';
+// An OpenAI-compatible upstream is served by one API key rather than an account pool.
+export const isKeySource = (view: ModelRegistryView, sourceId: string) => view.sources.find(s => s.id === sourceId)?.provider_type === 'openai_compatible';
 
 interface Props {
     view: ModelRegistryView;
@@ -46,7 +48,7 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
                 <div className="registry-choices">{view.sources.map(s => <label key={s.id} className="registry-choice">
                     <input type="radio" name="upstream-source" className="sr-only" checked={pick.source_id === s.id} onChange={() => onPick({ ...pick, source_id: s.id })} />
                     <span className="font-semibold">{s.display_name}</span>
-                    <span className="registry-muted">{s.account_count} 账号 / accounts{s.enabled ? '' : ' · 未启用 / Disabled'}</span>
+                    <span className="registry-muted">{s.provider_type === 'openai_compatible' ? 'API Key' : `${s.account_count} 账号 / accounts`}{s.enabled ? '' : ' · 未启用 / Disabled'}</span>
                 </label>)}</div>
             </div>
             {hasRealm(view, pick.source_id) && <div role="radiogroup" aria-label="区域 / Region" className="space-y-2">
@@ -56,7 +58,9 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
                     <span className="font-semibold">{realmLabels[realm]}</span>
                 </label>)}</div>
             </div>}
-            <p className="registry-muted flex items-start gap-2"><Shuffle size={14} className="mt-0.5 shrink-0" aria-hidden />随机抽取一个启用账号读取模型列表（仅元数据，无推理）；该账号失败时最多换 3 个账号。 / Lists models through one random enabled account (metadata only, no inference); falls back to up to 3 accounts.</p>
+            {isKeySource(view, pick.source_id)
+                ? <p className="registry-muted flex items-start gap-2"><Shuffle size={14} className="mt-0.5 shrink-0" aria-hidden />读取该上游的 /models 列表并合并手动声明的模型（仅元数据，无推理）。 / Reads the upstream's /models list plus declared models (metadata only, no inference).</p>
+                : <p className="registry-muted flex items-start gap-2"><Shuffle size={14} className="mt-0.5 shrink-0" aria-hidden />随机抽取一个启用账号读取模型列表（仅元数据，无推理）；该账号失败时最多换 3 个账号。 / Lists models through one random enabled account (metadata only, no inference); falls back to up to 3 accounts.</p>}
             {fetching && <p role="status" className="registry-muted flex items-center gap-2"><Loader2 size={14} className="motion-safe:animate-spin" aria-hidden />正在获取上游模型 / Fetching upstream models…</p>}
         </fieldset>
     </RegistryDialog>;
@@ -66,14 +70,14 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
         <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0 space-y-1">
                 <p className="text-xs break-words"><strong>{sourceName(report.source_id)}</strong>{report.realm && ` · ${realmLabels[report.realm]}`} · {models.length} 个模型 / models</p>
-                <p className="registry-muted break-words">随机账号 / Random account: <code>{report.account_label}</code>{report.attempts > 1 && ` · 尝试 ${report.attempts} 个账号 / ${report.attempts} tried`}</p>
+                {!isKeySource(view, report.source_id) && <p className="registry-muted break-words">随机账号 / Random account: <code>{report.account_label}</code>{report.attempts > 1 && ` · 尝试 ${report.attempts} 个账号 / ${report.attempts} tried`}</p>}
             </div>
             <div className="flex flex-wrap gap-1">
-                <button className="registry-link" disabled={!!busy} onClick={onFetch}>{fetching ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : <RefreshCw size={14} aria-hidden />}换一个账号 / Another account</button>
+                <button className="registry-link" disabled={!!busy} onClick={onFetch}>{fetching ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : <RefreshCw size={14} aria-hidden />}{isKeySource(view, report.source_id) ? '重新获取 / Refetch' : '换一个账号 / Another account'}</button>
                 <button className="registry-link" disabled={!!busy} onClick={onChangeSource}>更改上游 / Change source</button>
             </div>
         </div>
-        <div className="registry-notice registry-notice-warning"><AlertTriangle size={16} aria-hidden /><p>「测试」通过上述账号向上游发起一次真实请求，可能消耗额度或产生费用，仅验证基础文本，最多 30 秒，不自动重试。「添加」后模型才进入已上架并允许调用。 / Test sends one real request through this account (may use quota or cost money), basic text only, up to 30s, no retries. Only Add publishes a model.</p></div>
+        <div className="registry-notice registry-notice-warning"><AlertTriangle size={16} aria-hidden /><p>「测试」通过上述账号（或 API Key）向上游发起一次真实请求，可能消耗额度或产生费用，仅验证基础文本，最多 30 秒，不自动重试。「添加」后模型才进入已上架并允许调用。 / Test sends one real request through this account (may use quota or cost money), basic text only, up to 30s, no retries. Only Add publishes a model.</p></div>
         <label className="relative block"><span className="sr-only">搜索上游模型 / Search upstream models</span><Search size={14} className="absolute left-3 top-3 text-gray-400" aria-hidden /><input className="registry-input pl-9" placeholder="搜索模型 / Search model" value={query} onChange={e => setQuery(e.target.value)} /></label>
         <table className="registry-table registry-upstream-table"><caption className="sr-only">上游模型 / Upstream models</caption><thead><tr><th scope="col">上游模型 / Model</th><th scope="col">测试结果 / Test</th><th scope="col">操作 / Actions</th></tr></thead><tbody>
             {visible.map((c, index) => {

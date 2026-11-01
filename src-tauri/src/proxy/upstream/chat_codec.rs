@@ -1,4 +1,5 @@
-//! Protocol conversion at the native provider boundary; billing remains in shared middleware.
+//! Chat Completions conversion shared by native OpenAI-Chat providers (WorkBuddy and
+//! administrator-defined OpenAI-compatible upstreams). Billing remains in shared middleware.
 use crate::proxy::mappers::openai::namespace::qualify as namespaced_name;
 use crate::proxy::pipeline::usage::CanonicalUsage;
 use serde_json::{json, Value};
@@ -42,7 +43,7 @@ fn required(v: &Value, key: &str) -> Result<String, String> {
 fn reject(v: &Value, keys: &[&str]) -> Result<(), String> {
     for key in keys {
         if v.get(*key).is_some_and(|x| !x.is_null() && x != false) {
-            return Err(format!("WorkBuddy does not support {key}; send complete conversation history and function tools"));
+            return Err(format!("The upstream does not support {key}; send complete conversation history and function tools"));
         }
     }
     Ok(())
@@ -59,7 +60,7 @@ fn response_content(value: &Value) -> Result<Value, String> {
         result.push(match part["type"].as_str().unwrap_or("") {
             "input_text" | "output_text" | "text" => json!({"type":"text","text":required(part,"text")?}),
             "input_image" => json!({"type":"image_url","image_url":{"url":required(part,"image_url")?,"detail":part.get("detail").cloned().unwrap_or(json!("auto"))}}),
-            _ => return Err("Unsupported WorkBuddy Responses content; use text or image URLs".into()),
+            _ => return Err("Unsupported upstream Responses content; use text or image URLs".into()),
         });
     }
     Ok(json!(result))
@@ -76,43 +77,77 @@ fn anthropic_content(part: &Value) -> Result<Value, String> {
                     required(source, "media_type")?,
                     required(source, "data")?
                 ),
-                _ => return Err("Unsupported WorkBuddy image source".into()),
+                _ => return Err("Unsupported upstream image source".into()),
             };
             Ok(json!({"type":"image_url","image_url":{"url":url}}))
         }
-        _ => Err(
-            "Unsupported WorkBuddy Messages content; use text, images and function tools".into(),
-        ),
+        _ => {
+            Err("Unsupported upstream Messages content; use text, images and function tools".into())
+        }
     }
 }
 
+/// Request features a native Chat upstream accepts beyond the shared text/tool subset.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Dialect {
+    /// Chat `response_format` and Responses `text.format` (JSON object / JSON schema).
+    pub structured_output: bool,
+}
+impl Dialect {
+    pub const WORKBUDDY: Self = Self {
+        structured_output: false,
+    };
+    pub const OPENAI_COMPATIBLE: Self = Self {
+        structured_output: true,
+    };
+}
+
 pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
+    request_for(protocol, body, Dialect::WORKBUDDY)
+}
+
+/// Responses `text.format` as a Chat `response_format`; `None` for plain text.
+fn response_format(format: &Value) -> Result<Option<Value>, String> {
+    match format["type"].as_str().unwrap_or("text") {
+        "text" => Ok(None),
+        "json_object" => Ok(Some(json!({"type":"json_object"}))),
+        "json_schema" => {
+            let mut schema = json!({"name":required(format,"name")?,"schema":format.get("schema").cloned().unwrap_or(json!({}))});
+            for key in ["strict", "description"] {
+                if let Some(value) = format.get(key).filter(|v| !v.is_null()) {
+                    schema[key] = value.clone();
+                }
+            }
+            Ok(Some(json!({"type":"json_schema","json_schema":schema})))
+        }
+        _ => Err("Unsupported Responses text format".into()),
+    }
+}
+
+pub fn request_for(protocol: Protocol, body: Value, dialect: Dialect) -> Result<Value, String> {
     if !body.is_object() {
         return Err("Expected a JSON object".into());
     }
     if body.get("n").is_some_and(|n| n.as_u64() != Some(1)) {
-        return Err("WorkBuddy supports n=1 only".into());
+        return Err("The upstream supports n=1 only".into());
     }
     reject(
         &body,
-        &[
-            "audio",
-            "modalities",
-            "response_format",
-            "functions",
-            "function_call",
-        ],
+        &["audio", "modalities", "functions", "function_call"],
     )?;
+    if !dialect.structured_output {
+        reject(&body, &["response_format"])?;
+    }
     if protocol == Protocol::Chat {
         if array(&body, "messages")?.is_empty() {
             return Err("messages cannot be empty".into());
         }
-        // Native WorkBuddy names a forced tool by string only; reject other object
+        // Native Chat upstreams name a forced tool by function name; reject other object
         // choices here so they surface as request errors instead of account failures.
         if body.get("tool_choice").is_some_and(|c| {
             c.is_object() && c.pointer("/function/name").is_none_or(|n| !n.is_string())
         }) {
-            return Err("Unsupported WorkBuddy tool choice".into());
+            return Err("Unsupported upstream tool choice".into());
         }
         return Ok(body);
     }
@@ -136,12 +171,15 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
             &body,
             &["previous_response_id", "conversation", "background"],
         )?;
-        if body
-            .get("text")
-            .and_then(|v| v.get("format"))
-            .is_some_and(|f| f["type"] != "text")
-        {
-            return Err("WorkBuddy does not support structured Responses text formats".into());
+        if let Some(format) = body.get("text").and_then(|v| v.get("format")) {
+            if let Some(converted) = response_format(format)? {
+                if !dialect.structured_output {
+                    return Err(
+                        "The upstream does not support structured Responses text formats".into(),
+                    );
+                }
+                out["response_format"] = converted;
+            }
         }
         if let Some(instructions) = body.get("instructions").filter(|v| !v.is_null()) {
             messages.push(json!({"role":"system","content":instructions}));
@@ -163,7 +201,7 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
                     // dropped hosted calls split a turn's call group.
                     "reasoning" => continue,
                     _ if drop_hosted_web_search(item, "input item") => continue,
-                    _ => return Err("Unsupported WorkBuddy Responses input item; provide message or function call history".into()),
+                    _ => return Err("Unsupported upstream Responses input item; provide message or function call history".into()),
                     };
                     // A message or tool result closes the group, so later turns never merge.
                     flush_calls(&mut messages, &mut calls);
@@ -210,7 +248,7 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
             } else if drop_hosted_web_search(choice, "tool_choice") {
                 json!("auto")
             } else {
-                return Err("Unsupported WorkBuddy tool choice".into());
+                return Err("Unsupported upstream tool choice".into());
             };
         }
     } else {
@@ -272,7 +310,7 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
         }
         if let Some(tools) = body.get("tools") {
             out["tools"] = json!(tools.as_array().ok_or("tools must be an array")?.iter().map(|tool| {
-                if tool.get("type").is_some_and(|v| v != "custom") { return Err("WorkBuddy supports function tools only".to_owned()); }
+                if tool.get("type").is_some_and(|v| v != "custom") { return Err("The upstream supports function tools only".to_owned()); }
                 Ok(json!({"type":"function","function":{"name":required(tool,"name")?,"description":tool.get("description").cloned().unwrap_or(json!("")),"parameters":tool["input_schema"]}}))
             }).collect::<Result<Vec<_>,String>>()?);
         }
@@ -282,7 +320,7 @@ pub fn request(protocol: Protocol, body: Value) -> Result<Value, String> {
                 "any" => json!("required"),
                 "none" => json!("none"),
                 "tool" => json!({"type":"function","function":{"name":required(choice,"name")?}}),
-                _ => return Err("Unsupported WorkBuddy tool choice".into()),
+                _ => return Err("Unsupported upstream tool choice".into()),
             };
             if let Some(disabled) = choice
                 .get("disable_parallel_tool_use")
@@ -307,13 +345,13 @@ fn flush_calls(messages: &mut Vec<Value>, calls: &mut Vec<Value>) {
     }
 }
 
-/// WorkBuddy upstreams have no hosted web search, so Responses `web_search*`
+/// Native Chat upstreams have no hosted web search, so Responses `web_search*`
 /// tools (and their replayed calls) are dropped instead of failing the request.
 fn drop_hosted_web_search(value: &Value, kind: &str) -> bool {
     let kind_name = value["type"].as_str().unwrap_or("");
     let dropped = kind_name.starts_with("web_search");
     if dropped {
-        tracing::warn!("[WorkBuddy] Dropping unsupported hosted {kind} `{kind_name}`");
+        tracing::warn!("[ChatCodec] Dropping unsupported hosted {kind} `{kind_name}`");
     }
     dropped
 }
@@ -324,7 +362,7 @@ fn responses_tool(tool: &Value) -> Result<Value, String> {
         return Ok(custom_tool_as_function(tool));
     }
     if tool["type"] != "function" {
-        return Err("WorkBuddy supports function, custom and namespace tools only".to_owned());
+        return Err("The upstream supports function, custom and namespace tools only".to_owned());
     }
     let mut function = tool.clone();
     function.as_object_mut().unwrap().remove("type");
@@ -436,6 +474,22 @@ impl Output {
             || !self.tools.is_empty()
             || self.finish.is_some()
     }
+    /// The finish chunk for an upstream that ended cleanly (explicit `[DONE]` or a complete
+    /// JSON answer) without naming a finish reason. `None` once a reason was given, or when
+    /// nothing was generated, which stays an incomplete response.
+    pub fn implicit_finish(&self) -> Option<Value> {
+        if self.finish.is_some()
+            || (self.text.is_empty() && self.reasoning.is_empty() && self.tools.is_empty())
+        {
+            return None;
+        }
+        let reason = if self.tools.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        };
+        Some(json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]}))
+    }
     pub fn start(&mut self) -> Vec<String> {
         match self.protocol {
             Protocol::Chat => vec![],
@@ -492,11 +546,17 @@ impl Output {
     pub fn push(&mut self, mut chunk: Value) -> Result<Vec<String>, String> {
         self.size += chunk.to_string().len();
         if self.size > 32 * 1024 * 1024 {
-            return Err("WorkBuddy response exceeds size limit".into());
+            return Err("Upstream response exceeds size limit".into());
         }
-        if chunk.get("error").is_some() || chunk.get("code").is_some_and(|v| v.as_i64() != Some(0))
+        if chunk.get("error").is_some_and(|v| !v.is_null())
+            || chunk
+                .get("code")
+                .is_some_and(|v| !v.is_null() && v.as_i64() != Some(0) && v.as_str() != Some("0"))
         {
-            return Err("WorkBuddy rejected the model request; check account authorization and model availability".into());
+            return Err(
+                "Upstream rejected the model request; check credentials and model availability"
+                    .into(),
+            );
         }
         if let Some(usage) = chunk.get("usage").filter(|v| v.is_object()) {
             if usage.get("prompt_tokens").is_some() || usage.get("completion_tokens").is_some() {
@@ -518,10 +578,10 @@ impl Output {
         let choices = chunk
             .get_mut("choices")
             .and_then(Value::as_array_mut)
-            .ok_or("WorkBuddy returned an invalid completion event")?;
+            .ok_or("Upstream returned an invalid completion event")?;
         for choice in choices {
             if choice.get("index").and_then(Value::as_u64).unwrap_or(0) != 0 {
-                return Err("WorkBuddy returned multiple choices".into());
+                return Err("Upstream returned multiple choices".into());
             }
             if let Some(reason) = choice
                 .get("finish_reason")
@@ -571,7 +631,7 @@ impl Output {
                 for call in calls {
                     let index = call.get("index").and_then(Value::as_u64).unwrap_or(0);
                     if index > 255 {
-                        return Err("Too many WorkBuddy tool calls".into());
+                        return Err("Too many upstream tool calls".into());
                     }
                     let tool = self.tools.entry(index).or_default();
                     let id = text(call, "id");
@@ -585,7 +645,7 @@ impl Output {
                         call["type"] = json!("function");
                     } else {
                         if !id.is_empty() && id != tool.id {
-                            return Err("WorkBuddy changed a tool call identity mid-stream".into());
+                            return Err("Upstream changed a tool call identity mid-stream".into());
                         }
                         call.as_object_mut()
                             .ok_or("Invalid tool call")?
@@ -603,7 +663,7 @@ impl Output {
                                 .ok_or("Invalid tool function")?
                                 .remove("name");
                         } else {
-                            return Err("WorkBuddy changed a tool name mid-stream".into());
+                            return Err("Upstream changed a tool name mid-stream".into());
                         }
                     }
                     let args = text(function, "arguments");
@@ -672,10 +732,10 @@ impl Output {
     }
     pub fn end(&mut self) -> Result<(Value, Vec<String>), String> {
         if self.finish.is_none() {
-            return Err("WorkBuddy stream ended before completion".into());
+            return Err("Upstream stream ended before completion".into());
         }
         if self.tools.values().any(|t| t.name.is_empty()) {
-            return Err("WorkBuddy returned an incomplete tool call".into());
+            return Err("Upstream returned an incomplete tool call".into());
         }
         let mut events = Vec::new();
         let response = match self.protocol {
@@ -696,7 +756,7 @@ impl Output {
                 }
                 for tool in self.tools.values() {
                     let input: Value = serde_json::from_str(&tool.arguments)
-                        .map_err(|_| "WorkBuddy returned invalid tool arguments")?;
+                        .map_err(|_| "Upstream returned invalid tool arguments")?;
                     let index = self.blocks.len();
                     let block =
                         json!({"type":"tool_use","id":tool.id,"name":tool.name,"input":input});

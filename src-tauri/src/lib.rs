@@ -820,6 +820,8 @@ pub fn run() {
             commands::model_registry::verify_model_candidates,
             commands::workbuddy::get_workbuddy_settings,
             commands::workbuddy::save_workbuddy_settings,
+            commands::custom_upstream::get_custom_upstreams,
+            commands::custom_upstream::save_custom_upstreams,
             commands::workbuddy::start_workbuddy_model_verification,
             commands::workbuddy::get_workbuddy_model_verification,
             commands::workbuddy::list_workbuddy_accounts,
