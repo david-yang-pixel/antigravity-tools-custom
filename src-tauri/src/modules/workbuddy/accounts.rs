@@ -247,6 +247,9 @@ fn runtime_key(id: &str) -> Result<String, String> {
 pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
     // The draw journal is persisted for retry safety, not exposed in the admin UI.
     account.management.activity.pending_draw = None;
+    if !account.management.auto_checkin_chosen {
+        account.management.auto_checkin = false;
+    }
     let runtime = RUNTIME.lock().map_err(|_| "WorkBuddy pool unavailable")?;
     let entry = runtime.get(&runtime_key(&account.id)?);
     let status = if !account.enabled {
@@ -374,6 +377,10 @@ pub fn ensure_identities() -> Result<(), String> {
     let mut dirty = false;
     for account in &mut accounts {
         dirty |= super::identity::ensure(account);
+        if !account.management.auto_checkin_chosen && account.management.auto_checkin {
+            account.management.auto_checkin = false;
+            dirty = true;
+        }
     }
     if dirty {
         write(&accounts)?;
@@ -670,6 +677,7 @@ pub fn configure(
         }
         if let Some(value) = auto_checkin {
             m.auto_checkin = value;
+            m.auto_checkin_chosen = true;
         }
         if let Some(value) = keepalive {
             m.keepalive = value;
@@ -696,6 +704,7 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.enabled = old.enabled;
     account.management.managed = old.management.managed;
     account.management.auto_checkin = old.management.auto_checkin;
+    account.management.auto_checkin_chosen = old.management.auto_checkin_chosen;
     account.management.keepalive = old.management.keepalive;
     account.management.auto_rewards = old.management.auto_rewards;
     account.management.auto_lottery = old.management.auto_lottery;

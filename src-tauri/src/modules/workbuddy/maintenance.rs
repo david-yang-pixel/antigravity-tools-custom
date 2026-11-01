@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct Management {
     pub managed: bool,
     pub auto_checkin: bool,
+    /// Background check-in runs only after an administrator saves the switch.
+    /// Older files that inherited the previous default do not count as that choice.
+    pub auto_checkin_chosen: bool,
     pub keepalive: bool,
     pub auto_rewards: bool,
     pub auto_lottery: bool,
@@ -33,7 +36,8 @@ impl Default for Management {
     fn default() -> Self {
         Self {
             managed: true,
-            auto_checkin: true,
+            auto_checkin: false,
+            auto_checkin_chosen: false,
             keepalive: true,
             auto_rewards: false,
             auto_lottery: false,
@@ -71,6 +75,7 @@ fn sync_delay(account_id: &str) -> i64 {
 fn checkin_due(a: &Account, now: i64) -> bool {
     if a.realm != Realm::Cn
         || !a.management.auto_checkin
+        || !a.management.auto_checkin_chosen
         || a.management.checkin_date.as_deref() == Some(day(now).as_str())
     {
         return false;
@@ -88,11 +93,11 @@ fn checkin_due(a: &Account, now: i64) -> bool {
     mins >= super::identity::checkin_minute(&a.id) || mins >= 22 * 60 + 30
 }
 fn keepalive_due(a: &Account, now: i64) -> bool {
-    // Renew inside the proactive window so inference rarely hits a blocking refresh.
+    // Renew only inside the proactive window. A daily refresh is not required
+    // to keep a still-valid token usable.
     a.management.keepalive
         && now - a.management.keepalive_attempt_at >= 300
-        && (a.expires_at <= now + accounts::PROACTIVE_REFRESH_SECS
-            || now - a.management.last_keepalive_at >= 86400)
+        && a.expires_at <= now + accounts::PROACTIVE_REFRESH_SECS
 }
 fn due(a: &Account, now: i64) -> bool {
     if a.management.keepalive_error.is_some() && now - a.management.keepalive_attempt_at < 300 {
@@ -221,6 +226,11 @@ mod tests {
             json!({"uid":"test","accessToken":"secret","expiresAt":2000000000}),
         )
         .unwrap();
+        assert!(!a.management.auto_checkin);
+        assert!(!a.management.auto_checkin_chosen);
+        assert!(!checkin_due(&a, 1792425600 + 23 * 3600));
+        a.management.auto_checkin = true;
+        a.management.auto_checkin_chosen = true;
         // Beijing 2026-10-20 00:00 — sync is due, but check-in waits for the habit slot.
         let midnight = 1792425600;
         let evening = midnight + 23 * 3600; // past the 22:30 same-day fallback
@@ -242,6 +252,7 @@ mod tests {
         assert!(keepalive_due(&a, evening + 60));
         assert!(due(&a, evening + 60));
         a.expires_at = evening + 60 + accounts::PROACTIVE_REFRESH_SECS + 60;
+        a.management.last_keepalive_at = 0;
         assert!(!keepalive_due(&a, evening + 60));
         a.expires_at = evening + 100;
         assert!(due(&a, evening + 60));
@@ -256,6 +267,8 @@ mod tests {
         old.as_object_mut().unwrap().remove("management");
         let restored: Account = serde_json::from_value(old).unwrap();
         assert!(restored.management.managed);
+        assert!(!restored.management.auto_checkin);
+        assert!(!restored.management.auto_checkin_chosen);
         assert!(restored.management.keepalive);
         assert!(restored.management.credits.is_none());
     }

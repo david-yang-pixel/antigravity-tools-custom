@@ -418,12 +418,13 @@ pub async fn verify(
                     candidate.native_model,
                     crate::proxy::upstream::client::sanitize_error_for_log(&error)
                 );
-                (
-                    "failed".to_string(),
+                let message = if candidate.source_id == model_registry::WORKBUDDY_SOURCE {
+                    error
+                } else {
                     "基础文本验证未完成：账号、网络或服务暂不可用；未判定模型永久不可用。"
-                        .to_string(),
-                    None,
-                )
+                        .to_string()
+                };
+                ("failed".to_string(), message, None)
             }
             Err(_) => {
                 tracing::warn!("Model probe for {} timed out", candidate.native_model);
@@ -461,36 +462,17 @@ async fn probe(
     account_id: Option<&str>,
 ) -> Result<(String, String, Option<String>), String> {
     match candidate.source_id.as_str() {
-        model_registry::WORKBUDDY_SOURCE => {
-            let (account_id, outcome) = super::workbuddy::verification::verify_selected_model(
+        model_registry::WORKBUDDY_SOURCE => Err(
+            match super::workbuddy::verification::verify_selected_model(
                 &candidate.native_model,
                 account_id,
             )
-            .await?;
-            use super::workbuddy::verification::Outcome;
-            let (status, message) = match outcome {
-                Outcome::Available => (
-                    "verified",
-                    "一个启用账号的基础文本调用通过；其他能力未验证。",
-                ),
-                Outcome::Unavailable => (
-                    "unavailable",
-                    "抽样账号明确无此模型权限；不代表其他账号均不可用。",
-                ),
-                Outcome::Failed => {
-                    tracing::warn!(
-                        "Model probe for {} on WorkBuddy account {} failed",
-                        candidate.native_model,
-                        account_id
-                    );
-                    (
-                        "failed",
-                        "抽样调用失败或暂不可用；未撤销其他账号的成功证据。",
-                    )
-                }
-            };
-            Ok((status.into(), message.into(), Some(account_id)))
-        }
+            .await
+            {
+                Err(message) => message,
+                Ok(()) => super::workbuddy::verification::PROBE_DISABLED.into(),
+            },
+        ),
         model_registry::ANTIGRAVITY_SOURCE => {
             probe_antigravity(manager, upstream, candidate, account_id).await
         }

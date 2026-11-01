@@ -1,5 +1,7 @@
 //! Stable per-account client identity and schedule salt.
-//! User-Agent / machine / session / device stay fixed for one account and differ across accounts.
+//! Machine, session and device ids are random values stored with the account.
+//! They are not derived from a published salt, and every account uses one pinned
+//! product version instead of a hash-spread version range.
 use super::accounts::{Account, Realm};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,12 +31,14 @@ fn hex_id(seed: &str) -> String {
         .collect()
 }
 
-/// Same derivation as `ensure`; headers use this before backfill persists the fields.
-pub fn machine_id(account_id: &str) -> String {
+fn legacy_machine(account_id: &str) -> String {
     hex_id(&format!("wb2a:machine:{account_id}"))
 }
-pub fn session_id(account_id: &str) -> String {
+fn legacy_session(account_id: &str) -> String {
     hex_id(&format!("wb2a:session:{account_id}"))
+}
+fn legacy_device(account_id: &str) -> String {
+    uuid_from(&format!("wb2a:device:{account_id}"))
 }
 
 fn uuid_from(seed: &str) -> String {
@@ -61,12 +65,11 @@ fn uuid_from(seed: &str) -> String {
     )
 }
 
-fn versions(account_id: &str) -> (String, String) {
-    let n = hash_u64(&format!("wb2a:ua:{account_id}"));
-    let patch = 1 + (n % 9) as u32; // 5.5.1 .. 5.5.9
-    let cli_minor = 120 + ((n >> 8) % 31) as u32; // 2.120.x .. 2.150.x
-    let cli_patch = ((n >> 16) % 20) as u32;
-    (format!("5.5.{patch}"), format!("2.{cli_minor}.{cli_patch}"))
+pub const PRODUCT_VERSION: &str = "5.5.4";
+pub const CLI_VERSION: &str = "2.137.1";
+
+pub fn pinned_user_agent(realm: Realm) -> String {
+    user_agent(realm, PRODUCT_VERSION, CLI_VERSION)
 }
 
 fn user_agent(realm: Realm, product: &str, cli: &str) -> String {
@@ -76,36 +79,39 @@ fn user_agent(realm: Realm, product: &str, cli: &str) -> String {
     }
 }
 
-/// Fill missing identity fields. Never rotates an already-persisted version pair / ids.
+fn random_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// Fill missing identity fields. Replaces ids that still match the old published
+/// derivation. A random id, once stored, is kept across restarts and reauthorization.
 pub fn ensure(account: &mut Account) -> bool {
     let mut changed = false;
-    if account.client.machine_id.is_empty() {
-        account.client.machine_id = machine_id(&account.id);
+    if account.client.machine_id.is_empty()
+        || account.client.machine_id == legacy_machine(&account.id)
+    {
+        account.client.machine_id = random_id();
         changed = true;
     }
-    if account.client.session_id.is_empty() {
-        account.client.session_id = session_id(&account.id);
+    if account.client.session_id.is_empty()
+        || account.client.session_id == legacy_session(&account.id)
+    {
+        account.client.session_id = random_id();
         changed = true;
     }
-    if account.device_token.is_empty() {
-        account.device_token = uuid_from(&format!("wb2a:device:{}", account.id));
+    if account.device_token.is_empty() || account.device_token == legacy_device(&account.id) {
+        account.device_token = uuid::Uuid::new_v4().to_string();
         changed = true;
     }
-    if account.client.product_version.is_empty() || account.client.cli_version.is_empty() {
-        let (product, cli) = versions(&account.id);
-        if account.client.product_version.is_empty() {
-            account.client.product_version = product;
-        }
-        if account.client.cli_version.is_empty() {
-            account.client.cli_version = cli;
-        }
+    if account.client.product_version != PRODUCT_VERSION {
+        account.client.product_version = PRODUCT_VERSION.into();
         changed = true;
     }
-    let expected = user_agent(
-        account.realm,
-        &account.client.product_version,
-        &account.client.cli_version,
-    );
+    if account.client.cli_version != CLI_VERSION {
+        account.client.cli_version = CLI_VERSION.into();
+        changed = true;
+    }
+    let expected = pinned_user_agent(account.realm);
     if account.client.user_agent != expected {
         account.client.user_agent = expected;
         changed = true;
@@ -153,17 +159,23 @@ mod tests {
         assert!(ensure(&mut a));
         assert!(ensure(&mut b));
         assert!(!ensure(&mut a));
-        assert_ne!(a.client.user_agent, b.client.user_agent);
+        assert_eq!(a.client.user_agent, b.client.user_agent);
+        assert_eq!(a.client.user_agent, pinned_user_agent(a.realm));
         assert_ne!(a.client.machine_id, b.client.machine_id);
         assert_ne!(a.device_token, b.device_token);
-        assert_eq!(a.client.machine_id, machine_id(&a.id));
-        assert_eq!(a.client.session_id, session_id(&a.id));
+        assert_eq!(a.client.machine_id.len(), 32);
+        assert_ne!(a.client.machine_id, legacy_machine(&a.id));
+        assert_ne!(a.device_token, legacy_device(&a.id));
         let ua = a.client.user_agent.clone();
+        a.client.machine_id = legacy_machine(&a.id);
+        a.client.session_id = legacy_session(&a.id);
+        a.device_token = legacy_device(&a.id);
+        assert!(ensure(&mut a));
+        assert_ne!(a.client.machine_id, legacy_machine(&a.id));
         let machine = a.client.machine_id.clone();
         assert!(!ensure(&mut a));
-        assert_eq!(a.client.user_agent, ua);
         assert_eq!(a.client.machine_id, machine);
-        assert!(a.client.user_agent.contains("WorkBuddy/"));
+        assert_eq!(a.client.user_agent, ua);
         assert!(checkin_minute(&a.id) >= 9 * 60 && checkin_minute(&a.id) < 21 * 60);
         assert!(activity_interval_secs(&a.id, 0) >= 7200);
         assert!(activity_interval_secs(&a.id, 2) <= 12 * 3600);

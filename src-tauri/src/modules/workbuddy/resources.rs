@@ -45,6 +45,19 @@ pub(super) fn headers(account: &Account) -> Result<reqwest::header::HeaderMap, S
     // Keep the per-account UA from client::headers; do not collapse every account
     // onto one shared WorkBuddy build string for billing/activity calls.
     let mut headers = client::headers(account.realm, Some(account))?;
+    // Billing and check-in use the single-segment product token. The chat
+    // User-Agent, including its CLI segment, stays on inference requests.
+    let version = if account.client.product_version.is_empty() {
+        super::identity::PRODUCT_VERSION
+    } else {
+        account.client.product_version.as_str()
+    };
+    headers.insert(
+        "user-agent",
+        format!("WorkBuddy/{version}")
+            .parse()
+            .map_err(|_| "Invalid WorkBuddy resource header")?,
+    );
     for (key, value) in [
         ("x-enterprise-id", account.enterprise_id.as_str()),
         ("x-tenant-id", account.enterprise_id.as_str()),

@@ -50,21 +50,15 @@ fn add(headers: &mut HeaderMap, key: &'static str, value: &str) -> Result<(), St
     );
     Ok(())
 }
-fn default_user_agent(realm: Realm) -> &'static str {
-    match realm {
-        Realm::Cn => "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1",
-        Realm::Global => "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1",
-    }
-}
 pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, String> {
     let origin = match realm {
         Realm::Cn => "https://www.codebuddy.cn",
         Realm::Global => "https://www.workbuddy.ai",
     };
     let ua = account
-        .map(|a| a.client.user_agent.as_str())
+        .map(|a| a.client.user_agent.clone())
         .filter(|ua| !ua.is_empty())
-        .unwrap_or_else(|| default_user_agent(realm));
+        .unwrap_or_else(|| super::identity::pinned_user_agent(realm));
     let mut h = HeaderMap::new();
     for (key, value) in [
         ("content-type", "application/json"),
@@ -72,7 +66,7 @@ pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, Str
         ("x-requested-with", "XMLHttpRequest"),
         ("x-codebuddy-request", "1"),
         ("origin", origin),
-        ("user-agent", ua),
+        ("user-agent", &ua),
         (
             "accept-language",
             if realm == Realm::Cn { "zh-CN" } else { "en-US" },
@@ -88,20 +82,13 @@ pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, Str
             &format!("Bearer {}", account.access_token),
         )?;
         add(&mut h, "x-user-id", &account.uid)?;
-        // Match identity::ensure seeds (account.id), never uid — otherwise the first
-        // pre-backfill request and later persisted headers disagree.
-        let machine = if account.client.machine_id.is_empty() {
-            super::identity::machine_id(&account.id)
-        } else {
-            account.client.machine_id.clone()
-        };
-        let session = if account.client.session_id.is_empty() {
-            super::identity::session_id(&account.id)
-        } else {
-            account.client.session_id.clone()
-        };
-        add(&mut h, "x-machine-id", &machine)?;
-        add(&mut h, "x-session-id", &session)?;
+        // Empty ids stay omitted. Do not derive the published wb2a fingerprint here.
+        if !account.client.machine_id.is_empty() {
+            add(&mut h, "x-machine-id", &account.client.machine_id)?;
+        }
+        if !account.client.session_id.is_empty() {
+            add(&mut h, "x-session-id", &account.client.session_id)?;
+        }
     }
     Ok(h)
 }
@@ -327,6 +314,79 @@ pub fn session_key(scope: &str, payload: &Value) -> String {
     format!("{:x}", Sha256::digest(format!("{scope}:{first}")))
 }
 
+#[derive(Debug)]
+pub enum ChatError {
+    /// The TCP/TLS request never received an HTTP response. One other account may try.
+    Connection(String),
+    /// The request was not sent, or a response must not be replayed on another account.
+    Local(String),
+}
+struct Conversation {
+    id: String,
+    touched: i64,
+}
+fn conversations() -> &'static std::sync::Mutex<std::collections::HashMap<String, Conversation>> {
+    static CONVERSATIONS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Conversation>>,
+    > = std::sync::OnceLock::new();
+    CONVERSATIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+/// 32-hex id stable for one downstream session. Not a hash of the prompt.
+fn upstream_conversation_id(session: &str) -> String {
+    let Ok(mut map) = conversations().lock() else {
+        return uuid::Uuid::new_v4().simple().to_string();
+    };
+    let now = super::accounts::now();
+    map.retain(|_, entry| now.saturating_sub(entry.touched) < 3600);
+    if let Some(entry) = map.get_mut(session) {
+        entry.touched = now;
+        return entry.id.clone();
+    }
+    if map.len() >= 10000 {
+        if let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, entry)| entry.touched)
+            .map(|(key, _)| key.clone())
+        {
+            map.remove(&oldest);
+        }
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    map.insert(
+        session.to_owned(),
+        Conversation {
+            id: id.clone(),
+            touched: now,
+        },
+    );
+    id
+}
+
+fn require_leading_system(payload: &mut Value) -> Result<(), ChatError> {
+    let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Err(ChatError::Local(
+            "WorkBuddy requires a leading system message from the caller".into(),
+        ));
+    };
+    if messages
+        .first()
+        .is_some_and(|message| message["role"] == "system")
+    {
+        return Ok(());
+    }
+    if let Some(index) = messages
+        .iter()
+        .position(|message| message["role"] == "system")
+    {
+        let system = messages.remove(index);
+        messages.insert(0, system);
+        return Ok(());
+    }
+    Err(ChatError::Local(
+        "WorkBuddy requires a leading system message from the caller".into(),
+    ))
+}
+
 pub(super) fn error_code(value: &Value) -> Option<i64> {
     let code = value.get("code").or_else(|| value.pointer("/error/code"))?;
     code.as_i64().or_else(|| {
@@ -345,7 +405,7 @@ pub async fn chat(
     mut payload: Value,
     scope: &str,
     deadline: tokio::time::Instant,
-) -> Result<reqwest::Response, String> {
+) -> Result<reqwest::Response, ChatError> {
     payload["model"] = json!(model);
     payload["stream"] = json!(true);
     payload["stream_options"] = json!({"include_usage":true});
@@ -366,11 +426,13 @@ pub async fn chat(
         if let Some(name) = choice.pointer("/function/name").and_then(Value::as_str) {
             payload["tool_choice"] = json!(name);
         } else {
-            return Err("Unsupported WorkBuddy tool_choice".into());
+            return Err(ChatError::Local("Unsupported WorkBuddy tool_choice".into()));
         }
     }
     if payload["tool_choice"] == "none" {
-        let obj = payload.as_object_mut().ok_or("Invalid request")?;
+        let obj = payload
+            .as_object_mut()
+            .ok_or_else(|| ChatError::Local("Invalid request".into()))?;
         obj.remove("tools");
         obj.remove("tool_choice");
     }
@@ -392,25 +454,12 @@ pub async fn chat(
             }
         }
     }
-    if let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) {
-        // Native WorkBuddy requires a leading system message, even for an ordinary
-        // user-only request. Keep an existing system/developer prompt unchanged.
-        if messages
-            .first()
-            .is_none_or(|message| message["role"] != "system")
-        {
-            messages.insert(
-                0,
-                json!({"role":"system","content":"You are a helpful assistant."}),
-            );
-        }
-    }
-    let conversation = session_key(scope, &payload);
-    let request_id = uuid::Uuid::new_v4().simple().to_string();
-    let mut h = headers(account.realm, Some(account))?;
-    add(&mut h, "accept", "text/event-stream")?;
+    require_leading_system(&mut payload)?;
+    let conversation = upstream_conversation_id(&session_key(scope, &payload));
+    let mut h = headers(account.realm, Some(account)).map_err(ChatError::Local)?;
+    add(&mut h, "accept", "application/json, text/event-stream").map_err(ChatError::Local)?;
     let product_version = if account.client.product_version.is_empty() {
-        "5.5.4"
+        super::identity::PRODUCT_VERSION
     } else {
         account.client.product_version.as_str()
     };
@@ -421,50 +470,60 @@ pub async fn chat(
         ("x-ide-version", product_version),
         ("x-product", "WorkBuddy"),
     ] {
-        add(&mut h, name, value)?;
+        add(&mut h, name, value).map_err(ChatError::Local)?;
     }
-    add(&mut h, "x-conversation-id", &conversation)?;
-    add(&mut h, "x-conversation-request-id", &request_id)?;
-    add(&mut h, "x-conversation-message-id", &request_id)?;
-    add(&mut h, "x-request-id", &request_id)?;
-    add(&mut h, "x-root-request-id", &request_id)?;
-    add(&mut h, "x-trace-id", &request_id)?;
+    for (name, value) in [
+        ("x-conversation-id", conversation),
+        (
+            "x-conversation-request-id",
+            uuid::Uuid::new_v4().simple().to_string(),
+        ),
+        (
+            "x-conversation-message-id",
+            uuid::Uuid::new_v4().simple().to_string(),
+        ),
+        ("x-request-id", uuid::Uuid::new_v4().simple().to_string()),
+        (
+            "x-root-request-id",
+            uuid::Uuid::new_v4().simple().to_string(),
+        ),
+        ("x-trace-id", uuid::Uuid::new_v4().simple().to_string()),
+    ] {
+        add(&mut h, name, &value).map_err(ChatError::Local)?;
+    }
     if account.enterprise_id.is_empty() || account.realm == Realm::Global {
-        add(&mut h, "x-no-enterprise-id", "1")?;
+        add(&mut h, "x-no-enterprise-id", "1").map_err(ChatError::Local)?;
     } else {
-        add(&mut h, "x-enterprise-id", &account.enterprise_id)?;
+        add(&mut h, "x-enterprise-id", &account.enterprise_id).map_err(ChatError::Local)?;
     }
     if account.realm == Realm::Global {
-        add(&mut h, "x-domain", "www.workbuddy.ai")?;
+        add(&mut h, "x-domain", "www.workbuddy.ai").map_err(ChatError::Local)?;
     } else if !account.domain.is_empty() {
-        add(&mut h, "x-domain", &account.domain)?;
+        add(&mut h, "x-domain", &account.domain).map_err(ChatError::Local)?;
     } else {
-        add(&mut h, "x-no-department-info", "1")?;
+        add(&mut h, "x-no-department-info", "1").map_err(ChatError::Local)?;
     }
     if !account.device_token.is_empty() {
-        add(&mut h, "x-device-token", &account.device_token)?;
+        add(&mut h, "x-device-token", &account.device_token).map_err(ChatError::Local)?;
     }
-    let http = http_for(account).await?;
-    let send = |path: &str| {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err("WorkBuddy model request timed out".to_owned());
-        }
-        Ok(http
-            .post(format!("{}{path}", base(account.realm)))
-            .headers(h.clone())
-            .timeout(remaining)
-            .json(&payload))
-    };
-    let response = send("/v2/chat/completions")?
+    let http = http_for(account).await.map_err(ChatError::Connection)?;
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(ChatError::Local("WorkBuddy model request timed out".into()));
+    }
+    // A channel rejection stays on this account. Replaying the same body to
+    // /console or to another account spreads one failure across the pool.
+    let response = http
+        .post(format!("{}/v2/chat/completions", base(account.realm)))
+        .headers(h)
+        .timeout(remaining)
+        .json(&payload)
         .send()
         .await
-        .map_err(|_| "WorkBuddy model request failed or timed out")?;
+        .map_err(|_| ChatError::Connection("WorkBuddy model request failed or timed out".into()))?;
     if response.status().is_success() {
         return Ok(response);
     }
-    // Tencent has two official chat paths. Only an explicit, pre-generation channel
-    // rejection permits the console path; never replay a stream or a network failure.
     let status = response.status();
     let response_headers = response.headers().clone();
     let bytes = axum::body::to_bytes(
@@ -472,16 +531,12 @@ pub async fn chat(
         64 * 1024,
     )
     .await
-    .map_err(|_| "WorkBuddy error response was interrupted or too large")?;
+    .map_err(|_| {
+        ChatError::Local("WorkBuddy error response was interrupted or too large".into())
+    })?;
     let code = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|value| error_code(&value));
-    if code == Some(11128) {
-        return send("/console/chat/completions")?
-            .send()
-            .await
-            .map_err(|_| "WorkBuddy model request failed or timed out".into());
-    }
     let mut rejected = axum::http::Response::builder()
         .status(status)
         // Preserve only the numeric result code for model-availability decisions.
@@ -490,7 +545,7 @@ pub async fn chat(
             code.map(|code| json!({"code":code}).to_string().into_bytes())
                 .unwrap_or_default(),
         )
-        .map_err(|_| "Invalid upstream response")?;
+        .map_err(|_| ChatError::Local("Invalid upstream response".into()))?;
     *rejected.headers_mut() = response_headers;
     rejected
         .headers_mut()
@@ -641,7 +696,7 @@ mod tests {
         let result = chat(
             &account,
             "test",
-            json!({"messages":[]}),
+            json!({"messages":[{"role":"system","content":"stay"},{"role":"user","content":"hi"}]}),
             "test",
             started + Duration::from_millis(40),
         )
@@ -703,7 +758,7 @@ mod tests {
         assert!(super::super::login::poll(&started.id).await.is_err());
     }
     #[tokio::test]
-    async fn workbuddy_leading_system_is_added_without_replacing_caller_instructions() {
+    async fn workbuddy_caller_system_is_kept_and_a_missing_one_is_not_invented() {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         std::env::set_var(
@@ -724,8 +779,19 @@ mod tests {
         let account =
             super::super::accounts::parse_import(json!({"uid":"test","accessToken":"secret"}))
                 .unwrap();
-        for role in ["user", "system", "developer"] {
-            let payload = json!({"messages":[{"role":role,"content":"original content"}]});
+        let user_only = chat(
+            &account,
+            "test",
+            json!({"messages":[{"role":"user","content":"original content"}]}),
+            "user-only",
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+        assert!(matches!(user_only, Err(ChatError::Local(_))));
+        for payload in [
+            json!({"messages":[{"role":"system","content":"original content"}]}),
+            json!({"messages":[{"role":"user","content":"later"},{"role":"developer","content":"original content"}]}),
+        ] {
             let response = chat(
                 &account,
                 "test",
@@ -737,21 +803,13 @@ mod tests {
             .unwrap();
             let body: Value = response.json().await.unwrap();
             assert_eq!(body["messages"][0]["role"], "system");
-            if role == "user" {
-                assert_eq!(body["messages"].as_array().unwrap().len(), 2);
-                assert_eq!(
-                    body["messages"][1],
-                    json!({"role":"user","content":"original content"})
-                );
-            } else {
-                assert_eq!(body["messages"].as_array().unwrap().len(), 1);
-                assert_eq!(body["messages"][0]["content"], "original content");
-            }
+            assert_eq!(body["messages"][0]["content"], "original content");
+            assert!(!body.to_string().contains("You are a helpful assistant."));
         }
     }
 
     #[tokio::test]
-    async fn workbuddy_only_explicit_channel_rejection_uses_console_path() {
+    async fn workbuddy_channel_rejection_stays_on_the_first_response() {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
         let calls = Arc::new(AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -762,7 +820,25 @@ mod tests {
         let app = Router::new()
             .route(
                 "/v2/chat/completions",
-                post(|Json(body): Json<Value>| async move {
+                post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                    let ids = [
+                        "x-conversation-id",
+                        "x-conversation-request-id",
+                        "x-conversation-message-id",
+                        "x-request-id",
+                        "x-root-request-id",
+                        "x-trace-id",
+                    ]
+                    .map(|name| headers[name].to_str().unwrap().to_owned());
+                    assert_eq!(
+                        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+                        6
+                    );
+                    assert_eq!(ids[0].len(), 32);
+                    assert_eq!(
+                        headers["accept"].to_str().unwrap(),
+                        "application/json, text/event-stream"
+                    );
                     (
                         axum::http::StatusCode::FORBIDDEN,
                         Json(
@@ -785,14 +861,14 @@ mod tests {
         let account =
             super::super::accounts::parse_import(json!({"uid":"test","accessToken":"secret"}))
                 .unwrap();
-        let payload = json!({"messages":[{"role":"user","content":"hi"}]});
+        let payload = json!({"messages":[{"role":"system","content":"caller"},{"role":"user","content":"hi"}]});
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        assert!(
+        assert_eq!(
             chat(&account, "channel-model", payload.clone(), "test", deadline)
                 .await
                 .unwrap()
-                .status()
-                .is_success()
+                .status(),
+            403
         );
         assert_eq!(
             chat(&account, "other-model", payload, "test", deadline)
@@ -801,6 +877,6 @@ mod tests {
                 .status(),
             403
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
