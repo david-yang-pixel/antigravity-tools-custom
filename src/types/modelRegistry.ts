@@ -90,3 +90,30 @@ export interface RegistryCatalogModel extends PublishedModel {
     protocols: RegistryProtocol[];
     image_generation: boolean;
 }
+
+// Administrator-defined OpenAI-compatible upstreams. API keys are write-only: the view
+// reports only whether one is set and its last characters.
+export interface CustomUpstream {
+    id: string;
+    source_id: string;
+    name: string;
+    base_url: string;
+    enabled: boolean;
+    models: string[];
+    api_key_set: boolean;
+    api_key_hint: string;
+    catalog_count: number;
+}
+export interface CustomUpstreamSettings {
+    upstreams: CustomUpstream[];
+    env_locked: boolean;
+}
+export interface CustomUpstreamUpdate {
+    id: string;
+    name: string;
+    base_url: string;
+    enabled: boolean;
+    models: string[];
+    /** Omit to keep the stored key; an empty string clears it. */
+    api_key?: string;
+}

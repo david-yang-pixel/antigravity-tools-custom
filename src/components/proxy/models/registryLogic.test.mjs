@@ -38,6 +38,15 @@ test('protocol selection follows native target and source, not image-like public
     assert.equal(models[2].image_generation, true);
 });
 
+test('OpenAI-compatible upstreams serve OpenAI and Anthropic endpoints only', () => {
+    const custom = { ...ag, id: 'openai-compatible:relay', provider_type: 'openai_compatible', display_name: 'Relay' };
+    const registry = view({ sources: [custom], candidates: [candidate('relay-c', custom.id, 'gpt-x')], published_models: [publication('relay-p', custom.id, 'gpt-x', 'relay-gpt')] });
+    const [model] = logic.registryCatalog(registry);
+    assert.deepEqual(model.protocols, ['openai', 'anthropic']);
+    assert.equal(model.source_name, 'Relay');
+    assert.equal(model.image_generation, false);
+});
+
 test('future providers remain visible without guessing protocol compatibility; explicit capabilities win', () => {
     const extra = { ...ag, id: 'future:one', provider_type: 'future', display_name: 'Future' };
     const c = candidate('future-c', extra.id, 'm');

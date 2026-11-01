@@ -44,7 +44,8 @@ export function registryCatalog(view: ModelRegistryView): RegistryCatalogModel[]
             const declared = candidate?.capabilities.find(c => c.key === `protocol_${protocol}` || c.key === `${protocol}_protocol`);
             if (declared) return declared.status === 'supported' || declared.status === 'conditional';
             if (source.provider_type === 'antigravity') return protocol !== 'anthropic' || !image;
-            if (source.provider_type === 'workbuddy') return protocol !== 'gemini';
+            // Native Chat sources serve the OpenAI and Anthropic endpoints, never native Gemini.
+            if (source.provider_type === 'workbuddy' || source.provider_type === 'openai_compatible') return protocol !== 'gemini';
             return false;
         });
         return [{ ...model, provider_type: source.provider_type, source_name: source.display_name, protocols, image_generation: image }];
