@@ -1,7 +1,7 @@
 //! Tencent's native WorkBuddy wire protocol. Endpoint/header references are recorded
 //! in docs/WORKBUDDY_UPSTREAM.md; never send downstream credentials to these hosts.
 use super::accounts::{Account, Model, Realm};
-use reqwest::{
+use rquest::{
     header::{HeaderMap, HeaderValue},
     Method,
 };
@@ -9,16 +9,25 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
-/// Connection settings shared by direct and egress clients; system proxies are ignored.
-pub fn builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+/// Connection settings shared by direct and egress clients.
+/// System and Antigravity proxies are ignored. TLS and HTTP/2 follow Chrome 123,
+/// without that profile's browser headers, so each request keeps the WorkBuddy
+/// User-Agent and identity headers supplied by the caller.
+pub fn builder() -> rquest::ClientBuilder {
+    rquest::Client::builder()
+        .emulation(
+            rquest_util::EmulationOption::builder()
+                .emulation(rquest_util::Emulation::Chrome123)
+                .skip_headers(true)
+                .build(),
+        )
         .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(rquest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
 }
 /// Direct connection from this server. Account traffic must use [`http_for`].
-pub fn http() -> Result<&'static reqwest::Client, String> {
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+pub fn http() -> Result<&'static rquest::Client, String> {
+    static CLIENT: OnceLock<Result<rquest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
             builder()
@@ -29,7 +38,7 @@ pub fn http() -> Result<&'static reqwest::Client, String> {
         .map_err(Clone::clone)
 }
 /// The account's own egress route (its airport node, or direct).
-pub async fn http_for(account: &Account) -> Result<reqwest::Client, String> {
+pub async fn http_for(account: &Account) -> Result<rquest::Client, String> {
     super::egress::client_for(account).await
 }
 pub fn base(realm: Realm) -> String {
@@ -92,7 +101,7 @@ pub fn headers(realm: Realm, account: Option<&Account>) -> Result<HeaderMap, Str
     }
     Ok(h)
 }
-pub async fn raw_json_response(response: reqwest::Response) -> Result<Value, String> {
+pub async fn raw_json_response(response: rquest::Response) -> Result<Value, String> {
     let status = response.status();
     if !status.is_success() {
         return Err(format!(
@@ -105,7 +114,7 @@ pub async fn raw_json_response(response: reqwest::Response) -> Result<Value, Str
 
 /// Bounded parsing for endpoints that must inspect a non-2xx business result.
 /// Callers are responsible for interpreting the HTTP status before accepting it.
-pub(super) async fn read_json_body(response: reqwest::Response) -> Result<Value, String> {
+pub(super) async fn read_json_body(response: rquest::Response) -> Result<Value, String> {
     use futures::StreamExt;
     let mut stream = response.bytes_stream();
     let mut data = Vec::new();
@@ -120,7 +129,7 @@ pub(super) async fn read_json_body(response: reqwest::Response) -> Result<Value,
         serde_json::from_slice(&data).map_err(|_| "WorkBuddy returned invalid JSON")?;
     Ok(value)
 }
-pub async fn json_response(response: reqwest::Response) -> Result<Value, String> {
+pub async fn json_response(response: rquest::Response) -> Result<Value, String> {
     let value = raw_json_response(response).await?;
     if let Some(code) = value.get("code") {
         if code.as_i64() != Some(0) && code.as_str() != Some("0") {
@@ -149,7 +158,7 @@ pub async fn call(
 }
 /// `call` over an explicit route, for login requests made before an account exists.
 pub async fn call_with(
-    http: &reqwest::Client,
+    http: &rquest::Client,
     realm: Realm,
     method: Method,
     path: &str,
@@ -405,7 +414,7 @@ pub async fn chat(
     mut payload: Value,
     scope: &str,
     deadline: tokio::time::Instant,
-) -> Result<reqwest::Response, ChatError> {
+) -> Result<rquest::Response, ChatError> {
     payload["model"] = json!(model);
     payload["stream"] = json!(true);
     payload["stream_options"] = json!({"include_usage":true});
@@ -549,11 +558,11 @@ pub async fn chat(
     *rejected.headers_mut() = response_headers;
     rejected
         .headers_mut()
-        .remove(reqwest::header::CONTENT_LENGTH);
+        .remove(rquest::header::CONTENT_LENGTH);
     rejected
         .headers_mut()
-        .remove(reqwest::header::CONTENT_ENCODING);
-    Ok(reqwest::Response::from(rejected))
+        .remove(rquest::header::CONTENT_ENCODING);
+    Ok(rquest::Response::from(rejected))
 }
 
 #[cfg(test)]
@@ -839,6 +848,11 @@ mod tests {
                         headers["accept"].to_str().unwrap(),
                         "application/json, text/event-stream"
                     );
+                    assert!(headers["user-agent"]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("WorkBuddy/"));
+                    assert!(!headers.contains_key("sec-ch-ua"));
                     (
                         axum::http::StatusCode::FORBIDDEN,
                         Json(

@@ -197,7 +197,7 @@ fn retryable_status(status: StatusCode) -> bool {
 
 /// Reads a bounded, redacted prefix of a rejected response so the upstream's reason
 /// reaches the log; the client error stays generic.
-async fn rejection_detail(upstream: reqwest::Response, deadline: tokio::time::Instant) -> String {
+async fn rejection_detail(upstream: rquest::Response, deadline: tokio::time::Instant) -> String {
     let read = async {
         let mut body = Vec::new();
         let mut chunks = upstream.bytes_stream();

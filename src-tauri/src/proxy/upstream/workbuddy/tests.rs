@@ -94,9 +94,11 @@ async fn upstream(headers: axum::http::HeaderMap, Json(body): Json<Value>) -> Re
 }
 fn request(path: &str, model: &str, stream: bool) -> Request {
     let mut payload = if path == "/v1/responses" || path == "/responses" {
-        json!({"input":"hello"})
+        json!({"instructions":"caller","input":"hello"})
+    } else if path == "/v1/messages" {
+        json!({"system":"caller","messages":[{"role":"user","content":"hello"}],"max_tokens":1024})
     } else {
-        json!({"messages":[{"role":"user","content":"hello"}],"max_tokens":1024})
+        json!({"messages":[{"role":"system","content":"caller"},{"role":"user","content":"hello"}],"max_tokens":1024})
     };
     payload["model"] = json!(model);
     payload["stream"] = json!(stream);
@@ -839,7 +841,7 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
         .unwrap()
         .balance_micros;
     let rejected = client.post(format!("{base}/v1/chat/completions")).bearer_auth(&token.token)
-        .json(&json!({"model":"customer-sonnet","stream":true,"messages":[{"role":"user","content":"reject-before-generation"}]}))
+        .json(&json!({"model":"customer-sonnet","stream":true,"messages":[{"role":"system","content":"caller"},{"role":"user","content":"reject-before-generation"}]}))
         .send().await.unwrap();
     assert_eq!(rejected.status(), StatusCode::BAD_GATEWAY);
     assert!(!rejected
@@ -858,10 +860,13 @@ async fn workbuddy_full_gateway_starts_without_google_and_settles_http_and_sse()
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
         for mode in ["reject-after-generation", "incomplete-after-generation"] {
             let payload = if path == "/v1/responses" {
-                json!({"model":"customer-sonnet", "stream":true, "input":mode})
+                json!({"model":"customer-sonnet", "stream":true, "instructions":"caller", "input":mode})
+            } else if path == "/v1/messages" {
+                json!({"model":"customer-sonnet", "stream":true, "max_tokens":1024,
+                    "system":"caller","messages":[{"role":"user","content":mode}]})
             } else {
                 json!({"model":"customer-sonnet", "stream":true, "max_tokens":1024,
-                    "messages":[{"role":"user","content":mode}]})
+                    "messages":[{"role":"system","content":"caller"},{"role":"user","content":mode}]})
             };
             let failed = client
                 .post(format!("{base}{path}"))
@@ -1170,7 +1175,7 @@ async fn scripted_pool(
     (mock, script)
 }
 async fn send(streaming: bool, policy: Policy) -> Response {
-    let payload = json!({"messages":[{"role":"user","content":"hello"}],"stream":streaming});
+    let payload = json!({"messages":[{"role":"system","content":"caller"},{"role":"user","content":"hello"}],"stream":streaming});
     forward(
         5,
         payload,
@@ -1189,28 +1194,17 @@ fn hits(script: &Script) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn workbuddy_pre_generation_failure_fails_over_and_rebinds_session() {
+async fn workbuddy_http_rejection_does_not_fail_over() {
     let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
-    let (_mock, script) = scripted_pool(2, &["429"]).await;
-    // Without the breaker a failed account stays schedulable, so only exclusion
-    // and the session rebind keep the retry and the next request off it.
+    let (_mock, script) = scripted_pool(2, &["429", "429"]).await;
     let mut policy = Policy::default();
     policy.breaker.enabled = false;
     for streaming in [true, false] {
         let response = send(streaming, policy.clone()).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let data = to_bytes(response.into_body(), 100_000).await.unwrap();
-        assert!(String::from_utf8_lossy(&data).contains("served"));
-        let served = hits(&script);
-        assert_eq!(served.len(), 2);
-        assert_ne!(served[0], served[1]);
-        // The session follows the account that served it.
-        let response = send(streaming, policy.clone()).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        to_bytes(response.into_body(), 100_000).await.unwrap();
-        assert_eq!(hits(&script), vec![served[1].clone()]);
-        // Next round: the newly bound account fails first and the request moves back.
-        script.outcomes.lock().unwrap().extend(["empty"]);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        // The other account is idle and would have answered, but an HTTP 429
+        // stays on the account that received it.
+        assert_eq!(hits(&script).len(), 1);
     }
     let observed = workbuddy::accounts::list().unwrap();
     assert!(observed.iter().all(|a| a.in_flight == 0));
@@ -1255,19 +1249,18 @@ async fn workbuddy_bad_request_does_not_cool_the_account_down() {
 }
 
 #[tokio::test]
-async fn workbuddy_all_accounts_failing_returns_last_status_within_attempt_cap() {
+async fn workbuddy_http_rejection_does_not_walk_the_pool() {
     let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
     let (_mock, script) = scripted_pool(4, &["503", "empty", "429"]).await;
     let response = send(true, Policy::default()).await;
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     assert_eq!(body["error"]["code"], "workbuddy_upstream_rejected");
-    let tried = hits(&script);
-    assert_eq!(tried.len(), 3);
+    assert_eq!(hits(&script).len(), 1);
     assert_eq!(
-        tried.iter().collect::<std::collections::HashSet<_>>().len(),
-        3
+        script.outcomes.lock().unwrap().make_contiguous(),
+        ["empty", "429"]
     );
     // A fixed account has no alternative, so its failure is returned as is.
     workbuddy::accounts::scheduling::clear_cooldowns(None);

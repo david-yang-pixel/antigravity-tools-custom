@@ -95,7 +95,7 @@ static STORED: Mutex<Option<(crate::utils::fs::FileStamp, Settings)>> = Mutex::n
 static ASSIGN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
 /// Login runs before an account exists and shares one selector; one login at a time.
 static LOGIN_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(Default::default);
-static CLIENTS: LazyLock<Mutex<HashMap<String, reqwest::Client>>> = LazyLock::new(Default::default);
+static CLIENTS: LazyLock<Mutex<HashMap<String, rquest::Client>>> = LazyLock::new(Default::default);
 
 fn path() -> Result<PathBuf, String> {
     Ok(crate::modules::account::get_data_dir()?.join("workbuddy_egress.json"))
@@ -212,17 +212,17 @@ fn choose(nodes: &[Node], settings: &Settings) -> Option<String> {
         .map(|(_, n)| n.name.clone())
 }
 
-fn direct() -> Result<reqwest::Client, String> {
+fn direct() -> Result<rquest::Client, String> {
     super::client::http().cloned()
 }
-fn proxied(proxy_url: &str) -> Result<reqwest::Client, String> {
+fn proxied(proxy_url: &str) -> Result<rquest::Client, String> {
     let mut clients = CLIENTS
         .lock()
         .map_err(|_| "Egress client cache unavailable")?;
     if let Some(client) = clients.get(proxy_url) {
         return Ok(client.clone());
     }
-    let proxy = reqwest::Proxy::all(proxy_url).map_err(|_| "Invalid egress route")?;
+    let proxy = rquest::Proxy::all(proxy_url).map_err(|_| "Invalid egress route")?;
     let client = super::client::builder()
         .proxy(proxy)
         .build()
@@ -256,7 +256,7 @@ async fn binding(settings: &Settings, account_id: &str) -> Result<String, String
 }
 
 /// HTTP client for one account's upstream calls.
-pub async fn client_for(account: &Account) -> Result<reqwest::Client, String> {
+pub async fn client_for(account: &Account) -> Result<rquest::Client, String> {
     let settings = load()?;
     if !settings.enabled {
         return direct();
@@ -271,7 +271,7 @@ pub async fn client_for(account: &Account) -> Result<reqwest::Client, String> {
 
 /// A login request's route; holding it keeps the shared login selector on `node`.
 pub struct LoginRoute {
-    pub client: reqwest::Client,
+    pub client: rquest::Client,
     pub node: Option<String>,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
