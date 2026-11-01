@@ -244,10 +244,7 @@ fn provider(source: &str) -> Result<&'static str, String> {
 pub fn provider_type(source: &str) -> &'static str {
     provider(source).unwrap_or("unknown")
 }
-/// Sources that serve only the OpenAI-Chat-backed HTTP endpoints (no native Gemini path).
-pub fn is_native_chat_source(source: &str) -> bool {
-    source == WORKBUDDY_SOURCE || custom_upstream::is_source(source)
-}
+
 fn normalized_public_id(value: &str) -> &str {
     value.strip_prefix("models/").unwrap_or(value)
 }

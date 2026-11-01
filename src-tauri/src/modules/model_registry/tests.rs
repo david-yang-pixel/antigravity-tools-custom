@@ -994,7 +994,6 @@ fn custom_openai_upstream_is_a_source_whose_bindings_survive_and_guard_removal()
         source
     );
     assert_eq!(publication_count(&source).unwrap(), 1);
-    assert!(is_native_chat_source(&source));
 
     // A bound upstream cannot be removed; its binding stays valid while it exists.
     let error = custom_upstream::save(custom_upstream::SettingsUpdate { upstreams: vec![] })
