@@ -4,6 +4,7 @@ pub mod alerts;
 pub mod billing;
 pub mod cache;
 pub mod config;
+pub mod custom_upstream;
 pub mod db;
 pub mod device;
 pub mod epay;

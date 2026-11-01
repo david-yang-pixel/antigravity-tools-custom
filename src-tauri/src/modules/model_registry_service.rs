@@ -133,6 +133,29 @@ pub async fn refresh(
             }
         }
     }
+    for upstream in super::custom_upstream::load()?
+        .upstreams
+        .into_iter()
+        .filter(|u| u.enabled && selected(&u.source_id()))
+    {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            failed += 1;
+            break;
+        }
+        let result = tokio::time::timeout(
+            remaining.min(Duration::from_secs(20)),
+            super::custom_upstream::fetch_models(&upstream),
+        )
+        .await;
+        match result {
+            Ok(Ok(models)) => {
+                super::custom_upstream::record_catalog(&upstream.id, &models)?;
+                refreshed += 1;
+            }
+            _ => failed += 1,
+        }
+    }
     let mut registry = view(manager).await?;
     registry.notices.push(format!("目录同步完成：{refreshed} 个账号成功，{failed} 个失败或超时。未发起模型推理，未自动上架新模型。"));
     Ok(registry)
@@ -169,6 +192,8 @@ pub async fn discover(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let sampled = if request.source_id == model_registry::ANTIGRAVITY_SOURCE {
         discover_antigravity(manager, deadline).await?
+    } else if let Some(id) = super::custom_upstream::upstream_id(&request.source_id) {
+        discover_custom(id).await?
     } else {
         discover_workbuddy(request.realm, deadline).await?
     };
@@ -247,6 +272,30 @@ async fn discover_antigravity(
         account_label: account.email,
         models,
         attempts,
+    })
+}
+
+/// A custom upstream has one credential, so "sampling" is a single `/models` call; declared
+/// model IDs are listed even when the upstream has no model list.
+async fn discover_custom(id: &str) -> Result<Sampled, String> {
+    let upstream = super::custom_upstream::get(id)?.ok_or("Unknown custom upstream")?;
+    let fetched = super::custom_upstream::fetch_models(&upstream).await;
+    let fetched = match fetched {
+        Ok(models) => {
+            super::custom_upstream::record_catalog(&upstream.id, &models)?;
+            models
+        }
+        // Declared models keep the upstream usable without a /models endpoint.
+        Err(_) if !upstream.models.is_empty() => Vec::new(),
+        Err(message) => return Err(message),
+    };
+    let mut models = upstream.models.clone();
+    models.extend(fetched.into_iter().filter(|m| !upstream.models.contains(m)));
+    Ok(Sampled {
+        account_id: upstream.id.clone(),
+        account_label: upstream.display_name().to_string(),
+        models,
+        attempts: 1,
     })
 }
 
@@ -445,8 +494,36 @@ async fn probe(
         model_registry::ANTIGRAVITY_SOURCE => {
             probe_antigravity(manager, upstream, candidate, account_id).await
         }
+        source if super::custom_upstream::is_source(source) => probe_custom(candidate).await,
         _ => Err("This source has no basic-text verification adapter".into()),
     }
+}
+
+async fn probe_custom(
+    candidate: &CandidateModel,
+) -> Result<(String, String, Option<String>), String> {
+    let id = super::custom_upstream::upstream_id(&candidate.source_id)
+        .ok_or("Unknown custom upstream")?;
+    let upstream = super::custom_upstream::get(id)?.ok_or("Unknown custom upstream")?;
+    if !upstream.enabled {
+        return Err("Enable the upstream before verifying its models".into());
+    }
+    use super::custom_upstream::Probe;
+    let (status, message) =
+        match super::custom_upstream::probe(&upstream, &candidate.native_model).await? {
+            Probe::Verified => ("verified", "上游基础文本调用通过；其他能力未验证。"),
+            Probe::Unavailable => ("unavailable", "上游明确返回模型不存在。"),
+            Probe::Failed(detail) => {
+                tracing::warn!(
+                    "Model probe for {} on custom upstream {} failed: {}",
+                    candidate.native_model,
+                    upstream.id,
+                    detail
+                );
+                ("failed", "上游调用失败或暂不可用；未判定模型永久不可用。")
+            }
+        };
+    Ok((status.into(), message.into(), Some(upstream.id)))
 }
 
 /// Logs at most this much of a probe response; enough to see the upstream's reason.

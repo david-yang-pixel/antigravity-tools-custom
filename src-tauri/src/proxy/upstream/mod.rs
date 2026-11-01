@@ -3,6 +3,7 @@
 
 pub mod chat_codec;
 pub mod client;
+pub mod openai_compat;
 pub mod retry;
 pub mod workbuddy;
 

@@ -956,3 +956,66 @@ fn model_registry_legacy_wildcard_rules_never_become_public_model_names() {
     assert_eq!(reloaded.revision, registry.revision);
     assert!(save(request(&reloaded), &legacy, &mapping).is_ok());
 }
+
+#[test]
+fn custom_openai_upstream_is_a_source_whose_bindings_survive_and_guard_removal() {
+    let _dir = Sandbox::new();
+    let update = |models: Vec<&str>| custom_upstream::SettingsUpdate {
+        upstreams: vec![custom_upstream::UpstreamUpdate {
+            id: "relay".into(),
+            name: "Relay".into(),
+            base_url: "https://relay.example/v1".into(),
+            enabled: true,
+            models: models.into_iter().map(Into::into).collect(),
+            api_key: Some("sk-relay".into()),
+        }],
+    };
+    custom_upstream::save(update(vec!["gpt-x"])).unwrap();
+    let source = custom_upstream::source_id("relay");
+    let registry = view(&[], &HashMap::new()).unwrap();
+    let relay = registry.sources.iter().find(|s| s.id == source).unwrap();
+    assert_eq!(relay.provider_type, "openai_compatible");
+    assert_eq!(relay.display_name, "Relay");
+    let candidate = find(&registry, &source, "gpt-x");
+    assert_eq!(candidate.account_count, 1);
+    assert!(candidate
+        .capabilities
+        .iter()
+        .any(|c| c.key == "gemini_protocol" && c.status == "unsupported"));
+
+    let mut draft = request(&registry);
+    draft.allow_unverified = true;
+    draft
+        .published_models
+        .push(publication("relay-gpt", &source, "gpt-x"));
+    save(draft, &[], &HashMap::new()).unwrap();
+    assert_eq!(
+        resolve_existing("relay-gpt").unwrap().unwrap().source_id,
+        source
+    );
+    assert_eq!(publication_count(&source).unwrap(), 1);
+    assert!(is_native_chat_source(&source));
+
+    // A bound upstream cannot be removed; its binding stays valid while it exists.
+    let error = custom_upstream::save(custom_upstream::SettingsUpdate { upstreams: vec![] })
+        .err()
+        .unwrap();
+    assert!(error.contains("published"), "{error}");
+    // Stored bindings stay loadable even if the settings file loses the upstream.
+    std::fs::remove_file(
+        account::get_data_dir()
+            .unwrap()
+            .join("custom_upstreams.json"),
+    )
+    .unwrap();
+    *CACHE.lock().unwrap() = None;
+    assert_eq!(
+        resolve_existing("relay-gpt").unwrap().unwrap().source_id,
+        source
+    );
+    assert!(view(&[], &HashMap::new())
+        .unwrap()
+        .sources
+        .iter()
+        .all(|s| s.id != source));
+}

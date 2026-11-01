@@ -4987,13 +4987,15 @@ pub async fn handle_list_models(State(state): State<AppState>) -> impl IntoRespo
     let data: Vec<_> = model_ids
         .into_iter()
         .filter_map(|id| {
-            let published = crate::modules::model_registry::resolve_existing(&id).ok().flatten()
+            let published = crate::modules::model_registry::resolve_existing(&id)
+                .ok()
+                .flatten()
                 .filter(|model| model.enabled)?;
             Some(json!({
                 "id": id,
                 "object": "model",
                 "created": 1706745600,
-                "owned_by": if published.source_id == crate::modules::model_registry::WORKBUDDY_SOURCE { "workbuddy" } else { "antigravity" },
+                "owned_by": crate::modules::model_registry::provider_type(&published.source_id),
                 "source_id": published.source_id
             }))
         })
@@ -5033,7 +5035,7 @@ pub async fn handle_retrieve_model(
                 "id": matched_id,
                 "object": "model",
                 "created": 1706745600,
-                "owned_by": if published.source_id == crate::modules::model_registry::WORKBUDDY_SOURCE { "workbuddy" } else { "antigravity" },
+                "owned_by": crate::modules::model_registry::provider_type(&published.source_id),
                 "source_id": published.source_id
             })),
         )

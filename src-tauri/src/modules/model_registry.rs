@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::modules::{account, workbuddy};
+use crate::modules::{account, custom_upstream, workbuddy};
 use crate::utils::fs::{file_stamp, write_atomic, FileStamp};
 
 pub const ANTIGRAVITY_SOURCE: &str = "antigravity:default";
@@ -235,8 +235,18 @@ fn provider(source: &str) -> Result<&'static str, String> {
     match source {
         ANTIGRAVITY_SOURCE => Ok("antigravity"),
         WORKBUDDY_SOURCE => Ok("workbuddy"),
+        // Syntactic only: a removed custom upstream must not invalidate stored bindings.
+        _ if custom_upstream::is_source(source) => Ok(custom_upstream::PROVIDER),
         _ => Err("Unknown model source".into()),
     }
+}
+/// Provider family of a source (`antigravity`, `workbuddy`, `openai_compatible`).
+pub fn provider_type(source: &str) -> &'static str {
+    provider(source).unwrap_or("unknown")
+}
+/// Sources that serve only the OpenAI-Chat-backed HTTP endpoints (no native Gemini path).
+pub fn is_native_chat_source(source: &str) -> bool {
+    source == WORKBUDDY_SOURCE || custom_upstream::is_source(source)
 }
 fn normalized_public_id(value: &str) -> &str {
     value.strip_prefix("models/").unwrap_or(value)
@@ -463,6 +473,9 @@ fn discover() -> Result<Discovery, String> {
         workbuddy::load().map_err(|_| "Invalid or unreadable WorkBuddy configuration")?;
     let ag = account::list_accounts().map_err(|_| "Cannot read Antigravity account metadata")?;
     let wb = workbuddy::accounts::list().map_err(|_| "Cannot read WorkBuddy account metadata")?;
+    let custom = custom_upstream::load()
+        .map_err(|_| "Invalid or unreadable custom upstream configuration")?
+        .upstreams;
     if ag.len() > MAX_CANDIDATES || wb.len() > MAX_CANDIDATES {
         return Err("Model discovery account limit exceeded".into());
     }
@@ -604,6 +617,53 @@ fn discover() -> Result<Discovery, String> {
     let configured: Vec<_> = discovery.settings.models.values().cloned().collect();
     for native in configured {
         discovery.record(WORKBUDDY_SOURCE, &native)?;
+    }
+    // Each custom upstream is one source served by one credential; the upstream ID stands
+    // in for the account in verification evidence.
+    for upstream in custom {
+        let source = upstream.source_id();
+        discovery.sources.push(ModelSource {
+            id: source.clone(),
+            provider_type: custom_upstream::PROVIDER.into(),
+            display_name: upstream.display_name().to_string(),
+            enabled: upstream.enabled,
+            account_count: 1,
+        });
+        discovery
+            .all_accounts
+            .entry(source.clone())
+            .or_default()
+            .insert(upstream.id.clone());
+        if upstream.enabled {
+            discovery
+                .eligible_accounts
+                .entry(source.clone())
+                .or_default()
+                .insert(upstream.id.clone());
+        }
+        let known = custom_upstream::known_models(&upstream);
+        if known.len() > MAX_CANDIDATES {
+            return Err("Model discovery metadata limit exceeded".into());
+        }
+        for native in known {
+            let Some(id) = discovery.record(&source, &native)? else {
+                continue;
+            };
+            if upstream.enabled {
+                discovery
+                    .observations
+                    .entry(id)
+                    .or_default()
+                    .accounts
+                    .insert(
+                        upstream.id.clone(),
+                        Evidence {
+                            declared: true,
+                            ..Evidence::default()
+                        },
+                    );
+            }
+        }
     }
     Ok(discovery)
 }
@@ -894,7 +954,7 @@ fn capabilities(
                 },
             );
         } else {
-            add(key, label, "not_integrated", "Not wired into WorkBuddy; this does not establish absence of native upstream support. Gemini thought signatures must not be replayed here.");
+            add(key, label, "not_integrated", "Not wired into this native Chat upstream; this does not establish absence of native upstream support. Gemini thought signatures must not be replayed here.");
         }
     }
     add(
@@ -915,7 +975,7 @@ fn capabilities(
         if source == ANTIGRAVITY_SOURCE {
             "Gateway Gemini adapter is integrated; the native model's supported request fields remain model-dependent."
         } else {
-            "WorkBuddy has no native Gemini endpoint adapter in this gateway."
+            "This upstream has no native Gemini endpoint adapter in this gateway."
         },
     );
     add(
@@ -929,7 +989,7 @@ fn capabilities(
         if source == ANTIGRAVITY_SOURCE {
             "Separate image-generation verification is required; basic text does not prove image output."
         } else {
-            "WorkBuddy image-generation endpoints are not integrated; this is not a statement about the upstream's native capabilities."
+            "This upstream's image-generation endpoints are not integrated; this is not a statement about its native capabilities."
         },
     );
     result
@@ -1186,6 +1246,20 @@ pub fn resolve_existing(public_id: &str) -> Result<Option<PublishedModel>, Strin
         .map(|index| &snapshot.store.published_models[*index])
         .filter(|model| model.enabled)
         .cloned())
+}
+
+/// Publications (enabled or not) bound to a source; 0 before the registry exists.
+pub fn publication_count(source_id: &str) -> Result<usize, String> {
+    let path = registry_path()?;
+    let mut cache = CACHE.lock().map_err(|_| "Model registry unavailable")?;
+    Ok(load(&path, &mut cache)?.map_or(0, |snapshot| {
+        snapshot
+            .store
+            .published_models
+            .iter()
+            .filter(|model| model.source_id == source_id)
+            .count()
+    }))
 }
 
 pub fn published_ids() -> Result<Vec<String>, String> {
