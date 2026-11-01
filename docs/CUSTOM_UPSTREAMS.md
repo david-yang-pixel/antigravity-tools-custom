@@ -20,7 +20,7 @@
 - 上游请求固定为流式并带 `stream_options.include_usage`，非流式客户端得到聚合结果；若上游忽略流式直接返回 JSON，也会被正确转换。
 - 支持文本、图片 URL / base64、函数工具（含 Responses `custom` / `namespace` 工具），以及 Chat `response_format` 和 Responses `text.format`（JSON object / JSON schema）。`developer` 角色转为 `system`，Claude `thinking` 参数不转发。
 - 用量按上游返回的 `usage` 计入统一计费；Token 统计中按 `<id>@openai-compatible` 归属到每个上游。
-- 出站请求遵循全局「上游代理」设置；不跟随重定向，避免把 API Key 发往其他主机。
+- 出站请求只遵循全局「上游代理」设置（不读取 `HTTP(S)_PROXY` 环境变量）；不跟随重定向，避免把 API Key 发往其他主机。
 - 上游的 401/403 返回 502（不回显上游原文），429 原样返回 429，400/404/413/422 原样返回状态码并附带经脱敏的上游错误信息。
 
 ## Headless / Docker

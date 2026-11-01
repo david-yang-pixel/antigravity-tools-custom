@@ -422,7 +422,7 @@ pub fn known_models(upstream: &Upstream) -> BTreeSet<String> {
 
 // ---- HTTP ----
 
-/// One client per outbound proxy setting. No overall timeout: callers bound each request
+/// One client per outbound proxy setting (environment proxies are ignored). No overall timeout: callers bound each request
 /// by its own deadline, which also covers long streams. Redirects are never followed so
 /// the API key cannot be replayed to another host.
 pub fn http(proxy: &crate::proxy::config::UpstreamProxyConfig) -> Result<reqwest::Client, String> {
@@ -439,10 +439,14 @@ pub fn http(proxy: &crate::proxy::config::UpstreamProxyConfig) -> Result<reqwest
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15));
-    if !key.is_empty() {
+    // The gateway's upstream proxy setting is the only proxy source: never fall back to
+    // HTTP(S)_PROXY, which would send the API key through a proxy nobody configured.
+    builder = if key.is_empty() {
+        builder.no_proxy()
+    } else {
         let proxy = reqwest::Proxy::all(&key).map_err(|_| "Invalid upstream proxy URL")?;
-        builder = builder.proxy(proxy);
-    }
+        builder.proxy(proxy)
+    };
     let client = builder
         .build()
         .map_err(|_| "Cannot initialize custom upstream connection")?;

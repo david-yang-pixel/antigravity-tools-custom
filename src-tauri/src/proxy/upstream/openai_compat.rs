@@ -176,7 +176,7 @@ pub(crate) fn prepare(mut payload: Value, model: &str) -> Value {
 }
 
 /// A non-streaming completion re-expressed as one stream chunk, for upstreams that ignore
-/// `stream: true`.
+/// `stream: true`. It is followed by `[DONE]`, so a missing `finish_reason` is implied.
 pub(crate) fn completion_chunk(mut value: Value) -> Value {
     if let Some(choices) = value.get_mut("choices").and_then(Value::as_array_mut) {
         for choice in choices {
@@ -411,7 +411,15 @@ impl Exchange {
                 for frame in initial { yield bytes::Bytes::from(frame); }
                 while let Some(data) = events.next().await {
                     let data = data.map_err(std::io::Error::other)?;
-                    if data == "[DONE]" { break; }
+                    if data == "[DONE]" {
+                        // A clean end may omit finish_reason; a dropped connection stays incomplete.
+                        if let Some(chunk) = output.implicit_finish() {
+                            for frame in output.push(chunk).map_err(std::io::Error::other)? {
+                                yield bytes::Bytes::from(frame);
+                            }
+                        }
+                        break;
+                    }
                     if data.trim().is_empty() { continue; }
                     let value: Value = serde_json::from_str(&data)
                         .map_err(|_| std::io::Error::other("Invalid upstream stream event"))?;
@@ -438,6 +446,11 @@ impl Exchange {
                 Err(message) => return self.failed(&message),
             };
             if data == "[DONE]" {
+                if let Some(chunk) = output.implicit_finish() {
+                    if let Err(message) = output.push(chunk) {
+                        return self.failed(&message);
+                    }
+                }
                 break;
             }
             if data.trim().is_empty() {

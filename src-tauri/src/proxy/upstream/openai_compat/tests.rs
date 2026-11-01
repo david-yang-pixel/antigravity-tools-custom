@@ -67,6 +67,21 @@ async fn completions(headers: axum::http::HeaderMap, Json(body): Json<Value>) ->
         )
             .into_response(),
         "stream-error" => sse(&[json!({"error": {"message": "overloaded"}})]),
+        // Servers that never name a finish reason, as a JSON answer and as a clean stream.
+        "no-finish-json" => Json(json!({
+            "choices": [{"index": 0, "finish_reason": null,
+                "message": {"role": "assistant", "content": "done"}}]
+        }))
+        .into_response(),
+        "no-finish-stream" => sse(&[json!({"choices":[{"index":0,"delta":{"content":"done"}}]})]),
+        // Content, then the connection closes without [DONE] or a finish reason.
+        "truncated" => Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(format!(
+                "data: {}\n\n",
+                json!({"choices":[{"index":0,"delta":{"content":"partial"}}]})
+            )))
+            .unwrap(),
         _ => {
             assert_eq!(last, "hello");
             sse(&[
@@ -263,4 +278,33 @@ fn prepare_keeps_portable_chat_fields_only() {
         "https://x/y.png"
     );
     assert_eq!(prepared["temperature"], 0.2);
+}
+
+#[tokio::test]
+async fn openai_compatible_upstream_implies_finish_only_on_a_clean_end() {
+    let mock = mock().await;
+    for content in ["no-finish-json", "no-finish-stream"] {
+        for path in ["/v1/chat/completions", "/v1/messages"] {
+            for stream in [false, true] {
+                let (status, _, body) = send(&mock.base, request(path, content, stream)).await;
+                assert_eq!(status, StatusCode::OK, "{content} {path} {stream}: {body}");
+                assert!(body.contains("done"), "{body}");
+                if !stream {
+                    let value: Value = serde_json::from_str(&body).unwrap();
+                    if path == "/v1/messages" {
+                        assert_eq!(value["stop_reason"], "end_turn");
+                    } else {
+                        assert_eq!(value["choices"][0]["finish_reason"], "stop");
+                    }
+                }
+            }
+        }
+    }
+    // Without [DONE] the answer may be cut off: still an incomplete response.
+    let (status, _, _) = send(
+        &mock.base,
+        request("/v1/chat/completions", "truncated", false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
 }

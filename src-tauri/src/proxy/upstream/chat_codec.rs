@@ -474,6 +474,22 @@ impl Output {
             || !self.tools.is_empty()
             || self.finish.is_some()
     }
+    /// The finish chunk for an upstream that ended cleanly (explicit `[DONE]` or a complete
+    /// JSON answer) without naming a finish reason. `None` once a reason was given, or when
+    /// nothing was generated, which stays an incomplete response.
+    pub fn implicit_finish(&self) -> Option<Value> {
+        if self.finish.is_some()
+            || (self.text.is_empty() && self.reasoning.is_empty() && self.tools.is_empty())
+        {
+            return None;
+        }
+        let reason = if self.tools.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        };
+        Some(json!({"choices":[{"index":0,"delta":{},"finish_reason":reason}]}))
+    }
     pub fn start(&mut self) -> Vec<String> {
         match self.protocol {
             Protocol::Chat => vec![],
