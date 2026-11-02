@@ -1019,6 +1019,11 @@ fn candidate_view(
         .iter()
         .filter(|p| p.candidate_id == record.id)
     {
+        // A failed WorkBuddy test says nothing about the model, and failures left
+        // by the retired fixed-sentence probe would otherwise read as a verdict.
+        if record.source_id == WORKBUDDY_SOURCE && probe.status == "failed" {
+            continue;
+        }
         if let Some(id) = &probe.account_id {
             if !eligible.is_some_and(|ids| ids.contains(id))
                 || (record.source_id == WORKBUDDY_SOURCE && !accounts.contains_key(id))

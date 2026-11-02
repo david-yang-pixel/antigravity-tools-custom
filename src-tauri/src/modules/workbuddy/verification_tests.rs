@@ -257,3 +257,55 @@ fn model_registry_withdrawn_wb_catalog_does_not_reactivate_historical_probe() {
     assert_eq!(candidate.verification_status, "unverified");
     assert!(after.published_models.is_empty());
 }
+
+#[test]
+fn model_registry_hides_failed_workbuddy_tests_including_legacy_records() {
+    use crate::modules::model_registry as registry;
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let mut seeded = account("legacy-failure");
+    seeded.models.push(accounts::Model {
+        id: "native".into(),
+        name: "Native".into(),
+    });
+    let id = accounts::upsert(seeded).unwrap().id;
+    let candidate_id = registry::candidate_id(registry::WORKBUDDY_SOURCE, "native");
+    registry::view(&[], &Default::default()).unwrap();
+    // The retired fixed-sentence probe stored failures with and without an account.
+    for account_id in [None, Some(id.clone())] {
+        registry::record_verification(registry::ModelVerificationResult {
+            candidate_id: candidate_id.clone(),
+            status: "failed".into(),
+            message: String::new(),
+            checked_at: accounts::now(),
+            account_id,
+        })
+        .unwrap();
+    }
+    let status = |view: &registry::ModelRegistryView| {
+        view.candidates
+            .iter()
+            .find(|c| c.id == candidate_id)
+            .unwrap()
+            .verification_status
+            .clone()
+    };
+    assert_eq!(
+        status(&registry::view(&[], &Default::default()).unwrap()),
+        "unverified"
+    );
+    // A real result from an administrator-written test still counts.
+    let current = accounts::get(&id).unwrap();
+    accounts::record_model_verification(&current, "native", true).unwrap();
+    registry::record_verification(registry::ModelVerificationResult {
+        candidate_id: candidate_id.clone(),
+        status: "verified".into(),
+        message: String::new(),
+        checked_at: accounts::now() + 1,
+        account_id: Some(id),
+    })
+    .unwrap();
+    assert_eq!(
+        status(&registry::view(&[], &Default::default()).unwrap()),
+        "verified"
+    );
+}
