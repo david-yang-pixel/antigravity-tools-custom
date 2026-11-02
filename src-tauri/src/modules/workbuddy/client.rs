@@ -458,6 +458,11 @@ fn neutralize_with(payload: &mut Value, lead: &str) {
     }
 }
 
+/// The numeric result code in an upstream error body, for callers outside this module.
+pub fn upstream_error_code(value: &Value) -> Option<i64> {
+    error_code(value)
+}
+
 pub(super) fn error_code(value: &Value) -> Option<i64> {
     let code = value.get("code").or_else(|| value.pointer("/error/code"))?;
     code.as_i64().or_else(|| {

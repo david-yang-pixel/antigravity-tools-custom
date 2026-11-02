@@ -195,9 +195,18 @@ fn retryable_status(status: StatusCode) -> bool {
     !matches!(status.as_u16(), 400 | 413 | 422)
 }
 
+/// Tencent's channel check: the request content (in practice the opening of a system
+/// message) matched its list of third-party agent prompts. Retrying elsewhere or
+/// refreshing the account cannot change it.
+const CHANNEL_REJECTED_CODE: i64 = 11128;
+const CHANNEL_REJECTED_MESSAGE: &str = "WorkBuddy rejected this request with code 11128 (channel check). The upstream flags system messages that open like a known third-party agent prompt; the gateway already adds a neutral first line to common agent openings. Change how the system prompt begins and retry. This is not an account, quota or network problem, and another account would give the same result.";
+
 /// Reads a bounded, redacted prefix of a rejected response so the upstream's reason
-/// reaches the log; the client error stays generic.
-async fn rejection_detail(upstream: rquest::Response, deadline: tokio::time::Instant) -> String {
+/// reaches the log, plus the result code `client::chat` keeps in the body.
+async fn rejection_detail(
+    upstream: rquest::Response,
+    deadline: tokio::time::Instant,
+) -> (String, Option<i64>) {
     let read = async {
         let mut body = Vec::new();
         let mut chunks = upstream.bytes_stream();
@@ -213,11 +222,16 @@ async fn rejection_detail(upstream: rquest::Response, deadline: tokio::time::Ins
         .saturating_duration_since(tokio::time::Instant::now())
         .min(std::time::Duration::from_secs(2));
     match tokio::time::timeout(wait, read).await {
-        Ok(body) if body.is_empty() => "<empty body>".into(),
-        Ok(body) => crate::proxy::upstream::client::sanitize_error_for_log(
-            String::from_utf8_lossy(&body).trim(),
+        Ok(body) if body.is_empty() => ("<empty body>".into(), None),
+        Ok(body) => (
+            crate::proxy::upstream::client::sanitize_error_for_log(
+                String::from_utf8_lossy(&body).trim(),
+            ),
+            serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|value| workbuddy::client::upstream_error_code(&value)),
         ),
-        Err(_) => "<body not received>".into(),
+        Err(_) => ("<body not received>".into(), None),
     }
 }
 
@@ -365,23 +379,32 @@ async fn attempt(
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i64>().ok());
-        let cool_account = retryable_status(status);
-        // A request rejected for its own shape says nothing about the account, so it
-        // must not cool the account down for every other caller. Any HTTP response
-        // stays on this account either way.
-        if cool_account {
-            lease.failure(
-                &format!("Upstream HTTP {}", status.as_u16()),
-                retry_after.unwrap_or(if status.as_u16() == 429 { 60 } else { 15 }),
-            );
-        }
+        let (detail, code) = rejection_detail(upstream, deadline).await;
         tracing::warn!(
             "WorkBuddy rejected model {} on account {} with HTTP {}: {}",
             target,
             lease.account.id,
             status.as_u16(),
-            rejection_detail(upstream, deadline).await
+            detail
         );
+        // A channel rejection is about the request content, whatever HTTP status
+        // carries it: it must not cool the account for every other caller.
+        if code == Some(CHANNEL_REJECTED_CODE) {
+            return Err(fatal(
+                StatusCode::BAD_REQUEST,
+                "workbuddy_channel_rejected",
+                CHANNEL_REJECTED_MESSAGE,
+            ));
+        }
+        // A request rejected for its own shape says nothing about the account, so it
+        // must not cool the account down for every other caller. Any HTTP response
+        // stays on this account either way.
+        if retryable_status(status) {
+            lease.failure(
+                &format!("Upstream HTTP {}", status.as_u16()),
+                retry_after.unwrap_or(if status.as_u16() == 429 { 60 } else { 15 }),
+            );
+        }
         return Err(Failure {
             response: error(if status.as_u16() == 429 { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::BAD_GATEWAY },
                 "workbuddy_upstream_rejected", &format!("WorkBuddy returned HTTP {}; refresh account authorization or check model availability",status.as_u16())),

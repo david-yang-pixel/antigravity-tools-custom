@@ -1138,6 +1138,7 @@ async fn scripted(
             json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}})
         ))),
         "empty" => sse(Body::from("data: [DONE]\n\n")),
+        "channel" => (StatusCode::FORBIDDEN, Json(json!({"code":11128}))).into_response(),
         "partial-error" => sse(Body::from_stream(async_stream::stream! {
             yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("data: {}\n\n",
                 json!({"choices":[{"delta":{"content":"partial"}}]}))));
@@ -1246,6 +1247,29 @@ async fn workbuddy_bad_request_does_not_cool_the_account_down() {
     // The only account keeps serving other requests right away.
     assert_eq!(send(false, policy).await.status(), StatusCode::OK);
     assert_eq!(hits(&script).len(), 4);
+}
+
+#[tokio::test]
+async fn workbuddy_channel_rejection_explains_itself_and_does_not_cool_the_account() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(2, &["channel"]).await;
+    let mut policy = Policy::default();
+    policy.breaker.enabled = true;
+    let response = send(false, policy.clone()).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["code"], "workbuddy_channel_rejected");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("11128") && message.contains("system"));
+    assert!(!message.contains("refresh account authorization"));
+    // Not replayed on the other account, and no account is cooled for it.
+    assert_eq!(hits(&script).len(), 1);
+    let accounts = workbuddy::accounts::list().unwrap();
+    assert!(accounts
+        .iter()
+        .all(|a| a.health.failures == 0 && a.cooldown_until == 0));
+    assert_eq!(send(false, policy).await.status(), StatusCode::OK);
 }
 
 #[tokio::test]
