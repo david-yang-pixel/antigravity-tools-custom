@@ -22,17 +22,10 @@ pub fn start() -> Result<Progress, String> {
     Err("Bulk verification was retired. Select 1–5 candidates in model management and explicitly confirm upstream usage.".into())
 }
 
+/// WorkBuddy availability is not checked with a canned prompt. Model management
+/// refuses WorkBuddy candidates with this text and records nothing.
 pub(crate) const PROBE_DISABLED: &str =
-    "不再向上游发送生成的验证短句。模型列表只来自目录同步；是否可调用以下游真实请求为准。";
-
-/// WorkBuddy availability is not checked with a canned prompt.
-pub(crate) async fn verify_selected_model(
-    model: &str,
-    account_id: Option<&str>,
-) -> Result<(), String> {
-    let _ = (model, account_id);
-    Err(PROBE_DISABLED.into())
-}
+    "WorkBuddy 模型不做测试：不再向上游发送生成的验证短句。模型列表只来自目录同步；是否可调用以下游真实请求为准。";
 
 #[cfg(test)]
 #[path = "verification_tests.rs"]

@@ -52,8 +52,8 @@ async fn workbuddy_verification_does_not_send_a_generated_prompt() {
         }),
     ))
     .await;
-    let error = verify_selected_model("any-model", None).await.unwrap_err();
-    assert!(error.contains("不再向上游发送生成的验证短句"));
+    assert!(PROBE_DISABLED.contains("不再向上游发送生成的验证短句"));
+    assert!(start().is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -134,10 +134,6 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
             .unwrap();
     };
     select(&a);
-    assert!(verify_selected_model("shared", None)
-        .await
-        .unwrap_err()
-        .contains("不再向上游发送生成的验证短句"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let current = accounts::get(&a).unwrap();
     accounts::record_model_verification(&current, "denied", false).unwrap();

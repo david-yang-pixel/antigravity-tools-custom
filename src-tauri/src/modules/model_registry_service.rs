@@ -397,6 +397,14 @@ pub async fn verify(
                 .ok_or_else(|| "Unknown model candidate; refresh the directory".to_string())
         })
         .collect::<Result<_, _>>()?;
+    // WorkBuddy is never probed with a canned prompt. Refuse before anything is
+    // recorded, so the registry does not show a failure that never happened.
+    if selected
+        .iter()
+        .any(|candidate| candidate.source_id == model_registry::WORKBUDDY_SOURCE)
+    {
+        return Err(super::workbuddy::verification::PROBE_DISABLED.into());
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut results = Vec::new();
     for candidate in selected {
@@ -418,13 +426,12 @@ pub async fn verify(
                     candidate.native_model,
                     crate::proxy::upstream::client::sanitize_error_for_log(&error)
                 );
-                let message = if candidate.source_id == model_registry::WORKBUDDY_SOURCE {
-                    error
-                } else {
+                (
+                    "failed".to_string(),
                     "基础文本验证未完成：账号、网络或服务暂不可用；未判定模型永久不可用。"
-                        .to_string()
-                };
-                ("failed".to_string(), message, None)
+                        .to_string(),
+                    None,
+                )
             }
             Err(_) => {
                 tracing::warn!("Model probe for {} timed out", candidate.native_model);
@@ -462,17 +469,10 @@ async fn probe(
     account_id: Option<&str>,
 ) -> Result<(String, String, Option<String>), String> {
     match candidate.source_id.as_str() {
-        model_registry::WORKBUDDY_SOURCE => Err(
-            match super::workbuddy::verification::verify_selected_model(
-                &candidate.native_model,
-                account_id,
-            )
-            .await
-            {
-                Err(message) => message,
-                Ok(()) => super::workbuddy::verification::PROBE_DISABLED.into(),
-            },
-        ),
+        // `verify` refuses WorkBuddy candidates before probing.
+        model_registry::WORKBUDDY_SOURCE => {
+            Err(super::workbuddy::verification::PROBE_DISABLED.into())
+        }
         model_registry::ANTIGRAVITY_SOURCE => {
             probe_antigravity(manager, upstream, candidate, account_id).await
         }

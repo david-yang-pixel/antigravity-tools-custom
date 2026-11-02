@@ -83,6 +83,7 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
             {visible.map((c, index) => {
                 const result = tested[c.id];
                 const unavailable = c.verification_status === 'unavailable';
+                const untestable = view.sources.find(s => s.id === c.source_id)?.provider_type === 'workbuddy';
                 const published = aliases(c);
                 return <tr key={c.id} style={{ '--registry-order': Math.min(index, 6) } as React.CSSProperties}>
                     <td data-label="上游模型 / Model"><code className="font-semibold">{c.native_model}</code>{c.display_name && c.display_name !== c.native_model && <p className="registry-muted mt-1">{c.display_name}</p>}
@@ -90,7 +91,7 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
                     <td data-label="测试结果 / Test"><span className={`registry-badge registry-${result?.status ?? c.verification_status}`}>{verificationLabels[result?.status ?? c.verification_status]}</span>
                         {result ? <p className="registry-muted mt-1 break-words">{result.message} · {formatCheckedAt(result.checked_at)}</p> : c.last_verified_at && <p className="registry-muted mt-1">{formatCheckedAt(c.last_verified_at)}</p>}</td>
                     <td data-label="操作 / Actions"><div className="registry-row-actions">
-                        <button className="registry-btn" disabled={!!busy} onClick={() => onTest(c)}>{testing === c.id ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : <ShieldCheck size={14} aria-hidden />}{testing === c.id ? '测试中 / Testing' : '测试 / Test'}</button>
+                        <button className="registry-btn" disabled={!!busy || untestable} title={untestable ? 'WorkBuddy 模型不做测试：不向上游发送验证短句，以真实请求为准。 / WorkBuddy models are not tested with a canned prompt; real requests decide.' : undefined} onClick={() => onTest(c)}>{testing === c.id ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : <ShieldCheck size={14} aria-hidden />}{testing === c.id ? '测试中 / Testing' : '测试 / Test'}</button>
                         <button className="registry-btn registry-primary" disabled={!!busy || unavailable || !sourceEnabled} title={unavailable ? '测试确认不可用，不能添加 / Unavailable models cannot be added' : !sourceEnabled ? '来源未启用 / Source disabled' : published.length ? '用新的公开 ID 再上架一次 / Publish under another public ID' : undefined} onClick={() => onAdd(c)}><Plus size={14} aria-hidden />{published.length ? '添加别名 / Add alias' : '添加 / Add'}</button>
                     </div></td>
                 </tr>;
