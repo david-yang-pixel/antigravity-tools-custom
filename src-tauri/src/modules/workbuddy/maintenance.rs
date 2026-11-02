@@ -131,9 +131,16 @@ pub async fn run(
     if automatic && !due(&initial, now) {
         return accounts::view(initial);
     }
-    // Persist the attempt before network I/O so a restart cannot cause a tight retry loop.
-    // Per-account jitter keeps the pool from syncing in lockstep.
-    accounts::edit_management(id, |m| m.next_sync_at = now + sync_delay(id))?;
+    // Manual sync still refreshes the catalog. Automatic polls only follow a
+    // real generation, so an idle pool does not heartbeat the upstream. A run
+    // that only renews the token or checks in leaves the sync schedule alone,
+    // so the first poll after the account becomes active is not pushed back.
+    let polls_catalog = !automatic || recently_active(&initial, now);
+    if polls_catalog {
+        // Persist the attempt before network I/O so a restart cannot cause a tight retry loop.
+        // Per-account jitter keeps the pool from syncing in lockstep.
+        accounts::edit_management(id, |m| m.next_sync_at = now + sync_delay(id))?;
+    }
     let refresh = force_refresh || (automatic && keepalive_due(&initial, now));
     let mut account = match accounts::fresh(id, refresh).await {
         Ok(account) => account,
@@ -167,9 +174,7 @@ pub async fn run(
     if account.realm == Realm::Global {
         account.management.checkin_status = "unsupported".into();
     }
-    // Manual sync still refreshes the catalog. Automatic polls only follow a
-    // real generation, so an idle pool does not heartbeat the upstream.
-    if !automatic || recently_active(&account, now) {
+    if polls_catalog {
         let (models, credits) = tokio::join!(
             super::client::models(&account),
             super::resources::credits(&account)
@@ -188,9 +193,9 @@ pub async fn run(
             }
             Err(e) => account.management.credits_error = Some(e),
         }
+        account.management.last_sync_at = accounts::now();
+        account.management.next_sync_at = accounts::now() + sync_delay(id);
     }
-    account.management.last_sync_at = accounts::now();
-    account.management.next_sync_at = accounts::now() + sync_delay(id);
     accounts::save_observation(&mut account)?;
     super::register_models(&account.available_models())?;
     accounts::view(account)
@@ -395,5 +400,24 @@ mod tests {
             "unsupported"
         );
         assert_eq!(checkins.load(Ordering::SeqCst), 1);
+        // An idle account whose token is near expiry renews it without polling
+        // the catalog, and its sync schedule stays where it was.
+        accounts::set_enabled(&id, true).unwrap();
+        let mut expiring = accounts::get(&id).unwrap();
+        expiring.realm = Realm::Cn;
+        expiring.expires_at = accounts::now() + 60;
+        accounts::upsert(expiring).unwrap();
+        accounts::edit_management(&id, |m| m.keepalive_attempt_at = 0).unwrap();
+        let before = accounts::get(&id).unwrap().management;
+        let (refreshed, polled) = (
+            refreshes.load(Ordering::SeqCst),
+            resource_calls.load(Ordering::SeqCst),
+        );
+        run(&id, false, false, true).await.unwrap();
+        let after = accounts::get(&id).unwrap().management;
+        assert_eq!(refreshes.load(Ordering::SeqCst), refreshed + 1);
+        assert_eq!(resource_calls.load(Ordering::SeqCst), polled);
+        assert_eq!(after.last_sync_at, before.last_sync_at);
+        assert_eq!(after.next_sync_at, before.next_sync_at);
     }
 }
