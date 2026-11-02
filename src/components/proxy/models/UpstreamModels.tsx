@@ -1,6 +1,6 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { AlertTriangle, Loader2, Plus, RefreshCw, Search, ShieldCheck, Shuffle } from 'lucide-react';
-import type { CandidateModel, ModelRegistryView, ModelVerificationResult, UpstreamDiscoveryReport, WorkBuddyRealm } from '../../../types/modelRegistry';
+import { Fragment, useMemo, useState, type ReactNode } from 'react';
+import { AlertTriangle, Loader2, Plus, RefreshCw, Search, Send, ShieldCheck, Shuffle } from 'lucide-react';
+import type { CandidateModel, ModelRegistryView, ModelVerificationResult, UpstreamDiscoveryReport, VerificationPrompt, WorkBuddyRealm } from '../../../types/modelRegistry';
 import { filterCandidates, formatCheckedAt, verificationLabels } from './registryLogic';
 import RegistryDialog from './RegistryDialog';
 
@@ -10,6 +10,21 @@ export const realmLabels: Record<WorkBuddyRealm, string> = { cn: '国内版 / Ch
 export const hasRealm = (view: ModelRegistryView, sourceId: string) => view.sources.find(s => s.id === sourceId)?.provider_type === 'workbuddy';
 // An OpenAI-compatible upstream is served by one API key rather than an account pool.
 export const isKeySource = (view: ModelRegistryView, sourceId: string) => view.sources.find(s => s.id === sourceId)?.provider_type === 'openai_compatible';
+
+// The last WorkBuddy test content stays in this browser only, so the next test does not
+// start from a blank form. It is never sent anywhere except with an explicit test.
+const PROMPT_KEY = 'model-registry.workbuddy-test-prompt';
+const PROMPT_MAX = 16 * 1024;
+function loadPrompt(): VerificationPrompt {
+    try {
+        const saved = JSON.parse(localStorage.getItem(PROMPT_KEY) || 'null') as Partial<VerificationPrompt> | null;
+        return { system: typeof saved?.system === 'string' ? saved.system : '', user: typeof saved?.user === 'string' ? saved.user : '' };
+    } catch { return { system: '', user: '' }; }
+}
+function savePrompt(prompt: VerificationPrompt) {
+    try { localStorage.setItem(PROMPT_KEY, JSON.stringify(prompt)); } catch { /* storage unavailable */ }
+}
+const bytes = (value: string) => new TextEncoder().encode(value).length;
 
 interface Props {
     view: ModelRegistryView;
@@ -22,7 +37,7 @@ interface Props {
     onPick: (pick: UpstreamPick) => void;
     onFetch: () => void;
     onChangeSource: () => void;
-    onTest: (candidate: CandidateModel) => void;
+    onTest: (candidate: CandidateModel, prompt?: VerificationPrompt) => void;
     onAdd: (candidate: CandidateModel) => void;
     onClose: () => void;
 }
@@ -39,6 +54,13 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
     // A published model can take more aliases; public IDs stay unique, which the publish dialog enforces.
     const aliases = (c: CandidateModel) => view.published_models.filter(p => p.source_id === c.source_id && p.native_model === c.native_model).map(p => p.public_id);
     const sourceEnabled = !!view.sources.find(s => s.id === report?.source_id)?.enabled;
+    // WorkBuddy tests send content the administrator writes; nothing is pre-filled.
+    const workbuddy = !!report && hasRealm(view, report.source_id);
+    const [editing, setEditing] = useState<string | null>(null);
+    const [prompt, setPrompt] = useState<VerificationPrompt>(loadPrompt);
+    const promptReady = !!prompt.system.trim() && !!prompt.user.trim() && bytes(prompt.system) <= PROMPT_MAX && bytes(prompt.user) <= PROMPT_MAX;
+    const updatePrompt = (change: Partial<VerificationPrompt>) => setPrompt(previous => { const next = { ...previous, ...change }; savePrompt(next); return next; });
+    const sendTest = (c: CandidateModel) => { if (!promptReady) return; setEditing(null); onTest(c, { system: prompt.system, user: prompt.user }); };
 
     if (!report) return <RegistryDialog title="获取上游模型 / Fetch upstream models" confirmText={fetching ? '获取中 / Fetching' : '获取 / Fetch'} onConfirm={onFetch} onCancel={onClose} busy={!!busy} blocked={!pick.source_id}>
         {notice}
@@ -77,24 +99,39 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
                 <button className="registry-link" disabled={!!busy} onClick={onChangeSource}>更改上游 / Change source</button>
             </div>
         </div>
-        <div className="registry-notice registry-notice-warning"><AlertTriangle size={16} aria-hidden /><p>「测试」通过上述账号（或 API Key）向上游发起一次真实请求，可能消耗额度或产生费用，仅验证基础文本，最多 30 秒，不自动重试。「添加」后模型才进入已上架并允许调用。 / Test sends one real request through this account (may use quota or cost money), basic text only, up to 30s, no retries. Only Add publishes a model.</p></div>
+        <div className="registry-notice registry-notice-warning"><AlertTriangle size={16} aria-hidden />{workbuddy
+            ? <p>WorkBuddy 不发送固定的验证短句：「测试」用你填写的系统提示和用户消息，通过上述账号向上游发起一次真实请求，可能消耗额度，最多 30 秒，不自动重试。测试失败只在这里显示，不会记录成「验证失败」。「添加」后模型才进入已上架并允许调用。 / WorkBuddy sends no fixed probe sentence: Test sends your own system prompt and user message once through this account (may use quota), up to 30s, no retries. A failed test is shown here only and not recorded. Only Add publishes a model.</p>
+            : <p>「测试」通过上述账号（或 API Key）向上游发起一次真实请求，可能消耗额度或产生费用，仅验证基础文本，最多 30 秒，不自动重试。「添加」后模型才进入已上架并允许调用。 / Test sends one real request through this account (may use quota or cost money), basic text only, up to 30s, no retries. Only Add publishes a model.</p>}</div>
         <label className="relative block"><span className="sr-only">搜索上游模型 / Search upstream models</span><Search size={14} className="absolute left-3 top-3 text-gray-400" aria-hidden /><input className="registry-input pl-9" placeholder="搜索模型 / Search model" value={query} onChange={e => setQuery(e.target.value)} /></label>
         <table className="registry-table registry-upstream-table"><caption className="sr-only">上游模型 / Upstream models</caption><thead><tr><th scope="col">上游模型 / Model</th><th scope="col">测试结果 / Test</th><th scope="col">操作 / Actions</th></tr></thead><tbody>
             {visible.map((c, index) => {
                 const result = tested[c.id];
                 const unavailable = c.verification_status === 'unavailable';
-                const untestable = view.sources.find(s => s.id === c.source_id)?.provider_type === 'workbuddy';
                 const published = aliases(c);
-                return <tr key={c.id} style={{ '--registry-order': Math.min(index, 6) } as React.CSSProperties}>
+                return <Fragment key={c.id}><tr style={{ '--registry-order': Math.min(index, 6) } as React.CSSProperties}>
                     <td data-label="上游模型 / Model"><code className="font-semibold">{c.native_model}</code>{c.display_name && c.display_name !== c.native_model && <p className="registry-muted mt-1">{c.display_name}</p>}
                         {published.length > 0 && <p className="registry-muted mt-1 break-words"><span className="registry-badge registry-verified mr-1">已上架 / Published</span>{published.join(', ')}</p>}</td>
                     <td data-label="测试结果 / Test"><span className={`registry-badge registry-${result?.status ?? c.verification_status}`}>{verificationLabels[result?.status ?? c.verification_status]}</span>
                         {result ? <p className="registry-muted mt-1 break-words">{result.message} · {formatCheckedAt(result.checked_at)}</p> : c.last_verified_at && <p className="registry-muted mt-1">{formatCheckedAt(c.last_verified_at)}</p>}</td>
                     <td data-label="操作 / Actions"><div className="registry-row-actions">
-                        <button className="registry-btn" disabled={!!busy || untestable} title={untestable ? 'WorkBuddy 模型不做测试：不向上游发送验证短句，以真实请求为准。 / WorkBuddy models are not tested with a canned prompt; real requests decide.' : undefined} onClick={() => onTest(c)}>{testing === c.id ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : <ShieldCheck size={14} aria-hidden />}{testing === c.id ? '测试中 / Testing' : '测试 / Test'}</button>
+                        <button className="registry-btn" disabled={!!busy} aria-expanded={workbuddy ? editing === c.id : undefined} onClick={() => workbuddy ? setEditing(editing === c.id ? null : c.id) : onTest(c)}>{testing === c.id ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : <ShieldCheck size={14} aria-hidden />}{testing === c.id ? '测试中 / Testing' : '测试 / Test'}</button>
                         <button className="registry-btn registry-primary" disabled={!!busy || unavailable || !sourceEnabled} title={unavailable ? '测试确认不可用，不能添加 / Unavailable models cannot be added' : !sourceEnabled ? '来源未启用 / Source disabled' : published.length ? '用新的公开 ID 再上架一次 / Publish under another public ID' : undefined} onClick={() => onAdd(c)}><Plus size={14} aria-hidden />{published.length ? '添加别名 / Add alias' : '添加 / Add'}</button>
                     </div></td>
-                </tr>;
+                </tr>
+                {workbuddy && editing === c.id && <tr><td colSpan={3}>
+                    <div className="space-y-2">
+                        <label className="block text-xs font-medium">系统提示 / System prompt
+                            <textarea className="registry-input mt-1 min-h-[3.5rem]" spellCheck={false} value={prompt.system} onChange={e => updatePrompt({ system: e.target.value })} placeholder="WorkBuddy 需要一条系统消息，网关不会代写 / WorkBuddy needs a system message; the gateway never writes one" /></label>
+                        <label className="block text-xs font-medium">用户消息 / User message
+                            <textarea className="registry-input mt-1 min-h-[3.5rem]" spellCheck={false} value={prompt.user} onChange={e => updatePrompt({ user: e.target.value })} placeholder="你想发给这个模型的内容 / What you want to send to this model" /></label>
+                        <p className="registry-muted">只随这一次测试发送，服务端不保存；本浏览器会记住上次填写的内容。每项最多 16 KiB。 / Sent with this test only and not stored on the server; this browser remembers your last entry. Up to 16 KiB each.</p>
+                        <div className="registry-row-actions">
+                            <button className="registry-btn registry-primary" disabled={!!busy || !promptReady} onClick={() => sendTest(c)}><Send size={14} aria-hidden />发送测试 / Send test</button>
+                            <button className="registry-btn" disabled={!!busy} onClick={() => setEditing(null)}>取消 / Cancel</button>
+                        </div>
+                    </div>
+                </td></tr>}
+                </Fragment>;
             })}
         </tbody></table>
         {!visible.length && <p className="registry-empty">{models.length ? '没有匹配的上游模型。 / No matching upstream models.' : '该账号未返回可用模型，请换一个账号。 / This account listed no models; try another account.'}</p>}

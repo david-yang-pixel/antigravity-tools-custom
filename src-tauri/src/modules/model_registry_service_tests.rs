@@ -82,6 +82,7 @@ async fn model_registry_selected_probe_is_single_attempt_scoped_and_never_publis
         candidate_ids: vec![id.clone()],
         confirm_upstream_usage: confirm,
         account_id: None,
+        prompt: None,
     };
     assert!(verify(&manager, &upstream, request(false)).await.is_err());
     assert_eq!(count.load(Ordering::SeqCst), 0);

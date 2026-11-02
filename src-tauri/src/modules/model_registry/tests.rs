@@ -666,6 +666,7 @@ fn verification_consent_selection_and_limits_are_enforced_without_io() {
         candidate_ids: ids(&["0"]),
         confirm_upstream_usage: false,
         account_id: None,
+        prompt: None,
     };
     assert!(validate_verification_request(&request, &registry).is_err());
     request.confirm_upstream_usage = true;
