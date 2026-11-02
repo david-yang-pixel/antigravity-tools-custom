@@ -56,6 +56,32 @@ static RE_WAF_TRIGGER_HEADERS: Lazy<Regex> = Lazy::new(|| {
 /// 连续多余空行收拢正则（剥离元数据后若产生 3 个及以上连续换行，收拢为 2 个换行以保持自然段落）
 static RE_MULTI_NEWLINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\n{3,}").unwrap());
 
+// ====================== 开头轨：第三方 Agent 提示词开头识别 ======================
+//
+// 部分上游（如 WorkBuddy 国内网关，错误码 11128）会扫描每条 system 消息的**开头**，
+// 命中其「已知第三方 agent 系统提示」清单即整单拒绝。清单不公开、会变化，无法逐条复刻，
+// 因此识别必须广谱：开头窗口内任一行以「自我介绍 / 角色设定」开场，或出现客户端计费伪 Header，
+// 即视为 agent 提示词开头。处置由调用方决定且必须收窄（只在最前面补一行中性文本），
+// 识别本身不修改任何文本。
+
+/// 开头识别窗口（字符数）。计费伪 Header 可能占据第一行，身份句随后出现，故按字符而非句子计。
+const AGENT_OPENING_SCAN_CHARS: usize = 512;
+
+/// 开头窗口内的 agent 提示词特征（逐行匹配行首）：
+/// 1) 自我介绍 / 角色设定开场：`You are …`、`You're …`、`Act as …`、`你是…`、`您是…`、`你现在是…`；
+/// 2) 客户端注入的计费伪 Header 行（`x-…billing…:`）或 Claude Code 计费签名（`cc_version=` / `cc_entrypoint=`）。
+static RE_AGENT_OPENING: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(concat!(
+        r"(?im)^[\s>*#_\-]*(?:(?:you\s+are|you're|act\s+as)\b|你是|您是|你现在是)",
+        r"|^\s*x-[a-z0-9_-]*billing[a-z0-9_-]*:",
+        r"|\bcc_(?:version|entrypoint)=",
+    ))
+    .unwrap()
+});
+
+/// 上游自家客户端的身份名：自家提示词不在第三方清单里，开头保持原样。
+const FIRST_PARTY_OPENING_NAMES: [&str; 2] = ["workbuddy", "codebuddy"];
+
 // ============================ System 轨：身份声明归一化 ============================
 //
 // 触发上游 WAF 伪限流（虚假 429 RESOURCE_EXHAUSTED）的是**身份归属声明**，而非模型能力或请求体量：
@@ -284,6 +310,21 @@ impl PromptSanitizer {
         }
     }
 
+    /// 开头轨：system 文本的开头窗口是否像第三方 agent 提示词（见 `RE_AGENT_OPENING`）。
+    /// 只做识别、不改文本；点名上游自家客户端（WorkBuddy / CodeBuddy）的开头返回 `false`。
+    pub fn opens_like_agent_prompt(text: &str) -> bool {
+        let head: String = text
+            .trim_start()
+            .chars()
+            .take(AGENT_OPENING_SCAN_CHARS)
+            .collect();
+        let lower = head.to_lowercase();
+        !FIRST_PARTY_OPENING_NAMES
+            .iter()
+            .any(|name| lower.contains(name))
+            && RE_AGENT_OPENING.is_match(&head)
+    }
+
     /// 是否为客户端注入的单行计费元数据（issue #3452：与大量工具组合会触发上游 429）。
     /// **不区分 model** —— 风险元数据来自客户端注入，任何模型 / 协议下命中即视为风险。
     pub fn is_billing_metadata(text: &str) -> bool {
@@ -484,6 +525,50 @@ impl PromptSanitizer {
         }
 
         cleaned_count
+    }
+}
+
+#[cfg(test)]
+mod agent_opening_tests {
+    use super::PromptSanitizer;
+
+    #[test]
+    fn agent_openings_are_recognized_broadly() {
+        for text in [
+            "x-anthropic-billing-header: cc_version=2.1.3.abc; cc_entrypoint=cli;\nYou are Claude Code, Anthropic's official CLI for Claude.",
+            "You are Claude Code, Anthropic's official CLI for Claude.",
+            "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
+            "You are opencode, an interactive CLI tool that helps users with software engineering tasks.",
+            "You are an interactive CLI agent specializing in software engineering tasks.",
+            "  You're Cline, a highly skilled software engineer.",
+            "Act as an expert software developer.",
+            "# Identity\nYou are Kilo Code, a highly skilled software engineer.",
+            "你是一个资深的编程助手，帮助用户完成任务。",
+            "您是专业的代码审查智能体。",
+            "You are a helpful assistant.",
+        ] {
+            assert!(PromptSanitizer::opens_like_agent_prompt(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn other_openings_and_first_party_prompts_are_left_alone() {
+        let late = format!(
+            "{}\nYou are Claude Code.",
+            "Rules for this session.\n".repeat(40)
+        );
+        for text in [
+            "Answer in Chinese and keep replies short.",
+            "# Project rules\n- Use tabs.\n- Never commit secrets.",
+            "Today is 2026-11-02. The user works on a Rust gateway.",
+            "Reply as you are told by the user.",
+            "You are WorkBuddy, Tencent's AI work assistant.",
+            "你是 CodeBuddy 编程助手。",
+            late.as_str(),
+            "",
+        ] {
+            assert!(!PromptSanitizer::opens_like_agent_prompt(text), "{text}");
+        }
     }
 }
 
