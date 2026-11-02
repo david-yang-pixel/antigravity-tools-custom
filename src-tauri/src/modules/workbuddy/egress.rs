@@ -2,7 +2,11 @@
 //! traffic (inference, refresh, models, resources, activity, login) leaves through
 //! one node of an airport subscription, served by a managed mihomo process. An
 //! account bound to a node fails closed when that node is unusable: it never falls
-//! back to the server's own address. `DIRECT` is an explicit per-account choice.
+//! back to the server's own address, and it is never moved onto another node.
+//! Auto-assignment and manual assignment both refuse a node another account
+//! already holds. The exit address is whatever that node currently uses; this
+//! process does not allocate public addresses. `DIRECT` is an explicit
+//! per-account choice and shares this server's address.
 mod mihomo;
 
 pub use mihomo::Node;
@@ -10,7 +14,7 @@ pub use mihomo::Node;
 use super::accounts::{self, Account, Realm};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, LazyLock, Mutex},
 };
@@ -29,7 +33,7 @@ pub struct Settings {
     /// Auto-assignment only considers nodes matching `include` and not `exclude`.
     pub include: String,
     pub exclude: String,
-    /// New or unbound accounts get the least-used healthy node on first use.
+    /// New or unbound accounts take one unused healthy node on first use.
     pub auto_assign: bool,
     /// Executable to run. Config file / `ABV_MIHOMO_PATH` only: the admin API can
     /// never choose what the server executes.
@@ -91,8 +95,10 @@ pub struct Probe {
 
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 static STORED: Mutex<Option<(crate::utils::fs::FileStamp, Settings)>> = Mutex::new(None);
-/// Serializes auto-assignment so simultaneous first requests spread across nodes.
+/// Serializes auto-assignment so two first requests cannot take the same node.
 static ASSIGN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
+/// Node reserved by an in-progress authorization, released when that login ends.
+static HOLDS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 /// Login runs before an account exists and shares one selector; one login at a time.
 static LOGIN_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(Default::default);
 static CLIENTS: LazyLock<Mutex<HashMap<String, rquest::Client>>> = LazyLock::new(Default::default);
@@ -193,27 +199,83 @@ fn eligible(name: &str, include: &Option<regex::Regex>, exclude: &Option<regex::
     include.as_ref().is_none_or(|r| r.is_match(name))
         && exclude.as_ref().is_none_or(|r| !r.is_match(name))
 }
-/// Least-used eligible node; among equals prefer tested-alive, then lower delay.
-/// Nodes whose last test failed are skipped.
+fn held_nodes() -> HashSet<String> {
+    HOLDS
+        .lock()
+        .map(|holds| holds.values().cloned().collect())
+        .unwrap_or_default()
+}
+/// `true` when another saved account already has this node.
+/// `DIRECT` is not a subscription node and may be selected for more than one account.
+fn bound_elsewhere(settings: &Settings, node: &str, except_account: Option<&str>) -> bool {
+    if node == DIRECT {
+        return false;
+    }
+    settings
+        .bindings
+        .iter()
+        .any(|(id, bound)| bound == node && Some(id.as_str()) != except_account)
+}
+/// `true` when another account or an in-progress login already has this node.
+fn node_in_use(settings: &Settings, node: &str, except_account: Option<&str>) -> bool {
+    bound_elsewhere(settings, node, except_account) || held_nodes().contains(node)
+}
+/// One unused eligible node. Tested-alive nodes win, then lower delay.
+/// Nodes whose last test failed are skipped. A node already given to an account
+/// is never handed out again.
 fn choose(nodes: &[Node], settings: &Settings) -> Option<String> {
     let (include, exclude) = filters(settings);
-    let mut load: HashMap<&str, usize> = HashMap::new();
-    for node in settings.bindings.values() {
-        *load.entry(node.as_str()).or_default() += 1;
-    }
+    let held = held_nodes();
+    let used: HashSet<&str> = settings
+        .bindings
+        .values()
+        .filter(|name| name.as_str() != DIRECT)
+        .map(String::as_str)
+        .collect();
     nodes
         .iter()
         .enumerate()
-        .filter(|(_, n)| n.alive != Some(false) && eligible(&n.name, &include, &exclude))
-        .min_by_key(|(index, n)| {
-            (
-                load.get(n.name.as_str()).copied().unwrap_or(0),
-                n.alive != Some(true),
-                n.delay.unwrap_or(u64::MAX),
-                *index,
-            )
+        .filter(|(_, n)| {
+            n.alive != Some(false)
+                && eligible(&n.name, &include, &exclude)
+                && !used.contains(n.name.as_str())
+                && !held.contains(&n.name)
         })
+        .min_by_key(|(index, n)| (n.alive != Some(true), n.delay.unwrap_or(u64::MAX), *index))
         .map(|(_, n)| n.name.clone())
+}
+
+/// Keeps a subscription node off the free list until authorization finishes.
+pub struct LoginHold {
+    token: String,
+    active: bool,
+}
+impl LoginHold {
+    fn reserve(node: &str) -> Result<Self, String> {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        HOLDS
+            .lock()
+            .map_err(|_| "Egress reservation unavailable")?
+            .insert(token.clone(), node.to_owned());
+        Ok(Self {
+            token,
+            active: true,
+        })
+    }
+    pub fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        if let Ok(mut holds) = HOLDS.lock() {
+            holds.remove(&self.token);
+        }
+    }
+}
+impl Drop for LoginHold {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 fn direct() -> Result<rquest::Client, String> {
@@ -272,9 +334,18 @@ async fn binding(settings: &Settings, account_id: &str) -> Result<String, String
         return Ok(node.clone());
     }
     let nodes = mihomo::nodes(&settings).await?;
-    let node = choose(&nodes, &settings).ok_or("No usable egress node in the subscription")?;
+    let node =
+        choose(&nodes, &settings).ok_or("No free egress node is left in the subscription")?;
     let id = account_id.to_owned();
-    edit(|s| Ok(s.bindings.entry(id).or_insert(node).clone()))
+    edit(|s| {
+        if let Some(existing) = s.bindings.get(&id) {
+            return Ok(existing.clone());
+        }
+        if node_in_use(s, &node, None) {
+            return Err("No free egress node is left in the subscription".into());
+        }
+        Ok(s.bindings.entry(id).or_insert(node).clone())
+    })
 }
 
 /// HTTP client for one account's upstream calls.
@@ -295,6 +366,9 @@ pub async fn client_for(account: &Account) -> Result<rquest::Client, String> {
 pub struct LoginRoute {
     pub client: rquest::Client,
     pub node: Option<String>,
+    /// Set when this login claimed a free subscription node. Move it into the
+    /// authorization session so the node stays reserved until the account is bound.
+    pub hold: Option<LoginHold>,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 /// Login runs before the account exists: it uses `preferred` (the node chosen when
@@ -307,20 +381,27 @@ pub async fn login_route(preferred: Option<&str>) -> Result<LoginRoute, String> 
         return Ok(LoginRoute {
             client: direct()?,
             node: None,
+            hold: None,
             _guard: guard,
         });
     }
-    let node = match preferred {
-        Some(node) => node.to_owned(),
+    let (node, hold) = match preferred {
+        Some(node) => (node.to_owned(), None),
         None => {
+            let _assign = ASSIGN_LOCK.lock().await;
+            let settings = load()?;
             let nodes = mihomo::nodes(&settings).await?;
-            choose(&nodes, &settings).ok_or("No usable egress node in the subscription")?
+            let node = choose(&nodes, &settings)
+                .ok_or("No free egress node is left in the subscription")?;
+            let hold = LoginHold::reserve(&node)?;
+            (node, Some(hold))
         }
     };
     if node == DIRECT {
         return Ok(LoginRoute {
             client: direct()?,
             node: Some(DIRECT.to_owned()),
+            hold: None,
             _guard: guard,
         });
     }
@@ -328,16 +409,21 @@ pub async fn login_route(preferred: Option<&str>) -> Result<LoginRoute, String> 
     Ok(LoginRoute {
         client: proxied(&route.proxy_url)?,
         node: Some(node),
+        hold,
         _guard: guard,
     })
 }
 /// Keeps an authorized account on its login node unless it already has a binding.
+/// A node already given to a different account is left untouched.
 pub fn adopt(account_id: &str, node: Option<&str>) {
     let Some(node) = node else { return };
     let id = account_id.to_owned();
     let node = node.to_owned();
     if let Err(error) = edit(|s| {
-        s.bindings.entry(id).or_insert(node);
+        if s.bindings.contains_key(&id) || bound_elsewhere(s, &node, Some(&id)) {
+            return Ok(());
+        }
+        s.bindings.insert(id, node);
         Ok(())
     }) {
         tracing::warn!("WorkBuddy egress binding: {error}");
@@ -451,11 +537,21 @@ pub async fn set_account(account_id: &str, node: Option<String>) -> Result<View,
         }
     }
     let id = account_id.to_owned();
+    let assigned = node.clone();
     edit(|s| {
-        match node {
-            Some(node) => s.bindings.insert(id, node),
-            None => s.bindings.remove(&id),
-        };
+        if let Some(name) = assigned.as_deref().filter(|name| *name != DIRECT) {
+            if node_in_use(s, name, Some(&id)) {
+                return Err("This egress node is already in use".into());
+            }
+        }
+        match assigned {
+            Some(node) => {
+                s.bindings.insert(id, node);
+            }
+            None => {
+                s.bindings.remove(&id);
+            }
+        }
         Ok(())
     })?;
     mihomo::forget_selection(account_id).await;
@@ -553,12 +649,44 @@ mod tests {
         settings.bindings.insert("a".into(), "JP 02".into());
         assert_eq!(choose(&nodes, &settings).as_deref(), Some("HK 01"));
         settings.bindings.insert("b".into(), "HK 01".into());
-        // Every eligible node is used once: share the fastest rather than fail.
-        assert_eq!(choose(&nodes, &settings).as_deref(), Some("JP 02"));
+        assert_eq!(choose(&nodes, &settings), None);
         settings.include = "^HK".into();
+        assert_eq!(choose(&nodes, &settings), None);
+        settings.bindings.remove("b");
         assert_eq!(choose(&nodes, &settings).as_deref(), Some("HK 01"));
         settings.include = "^SG".into();
         assert_eq!(choose(&nodes, &settings), None);
+    }
+
+    #[test]
+    fn direct_bindings_do_not_occupy_a_subscription_node() {
+        let nodes = [node("JP 02", Some(40), Some(true))];
+        let mut settings = Settings::default();
+        settings.bindings.insert("a".into(), DIRECT.into());
+        assert!(!node_in_use(&settings, DIRECT, Some("b")));
+        assert_eq!(choose(&nodes, &settings).as_deref(), Some("JP 02"));
+        settings.bindings.insert("b".into(), "JP 02".into());
+        assert!(node_in_use(&settings, "JP 02", Some("c")));
+        assert!(!node_in_use(&settings, "JP 02", Some("b")));
+    }
+
+    #[test]
+    fn an_authorization_hold_keeps_its_node_off_the_free_list() {
+        let nodes = [
+            node("hold-fast", Some(10), Some(true)),
+            node("hold-slow", Some(90), Some(true)),
+        ];
+        let mut hold = LoginHold::reserve("hold-fast").unwrap();
+        assert_eq!(
+            choose(&nodes, &Settings::default()).as_deref(),
+            Some("hold-slow")
+        );
+        assert!(node_in_use(&Settings::default(), "hold-fast", None));
+        hold.release();
+        assert_eq!(
+            choose(&nodes, &Settings::default()).as_deref(),
+            Some("hold-fast")
+        );
     }
 
     #[test]
@@ -590,6 +718,11 @@ mod tests {
         assert_eq!(load().unwrap().bindings["acct"], "HK 01");
         forget("acct");
         assert!(load().unwrap().bindings.is_empty());
+        adopt("one", Some("node-a"));
+        adopt("two", Some("node-a"));
+        let bindings = load().unwrap().bindings;
+        assert_eq!(bindings.get("one").map(String::as_str), Some("node-a"));
+        assert!(bindings.get("two").is_none());
     }
 
     #[tokio::test]

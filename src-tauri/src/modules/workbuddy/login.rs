@@ -19,6 +19,8 @@ struct Session {
     cancelled: bool,
     /// Egress node the whole authorization uses; the new account inherits it.
     node: Option<String>,
+    /// Keeps that node off the free list until the account is bound or this session ends.
+    hold: Option<egress::LoginHold>,
 }
 static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Session>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -54,7 +56,8 @@ fn valid_auth_url(value: &str) -> bool {
         })
 }
 pub async fn start(realm: Realm) -> Result<Started, String> {
-    let route = egress::login_route(None).await?;
+    let mut route = egress::login_route(None).await?;
+    let hold = route.hold.take();
     let data = client::call_with(
         &route.client,
         realm,
@@ -104,6 +107,7 @@ pub async fn start(realm: Realm) -> Result<Started, String> {
             completed: None,
             cancelled: false,
             node,
+            hold,
         })),
     );
     Ok(Started {
@@ -228,6 +232,9 @@ pub async fn poll(id: &str) -> Result<Poll, String> {
     }
     let account = accounts::upsert(accounts::parse_import(value)?)?;
     egress::adopt(&account.id, session.node.as_deref());
+    if let Some(hold) = session.hold.as_mut() {
+        hold.release();
+    }
     session.completed = Some(account.id.clone());
     // Keep a completed session until TTL so a lost HTTP response cannot lose the result.
     Ok(Poll {
