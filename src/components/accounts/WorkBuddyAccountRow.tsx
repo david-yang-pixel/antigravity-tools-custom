@@ -1,5 +1,5 @@
 import { Fragment, useState, type ReactNode } from 'react';
-import { CalendarCheck, ChevronDown, HeartPulse, RefreshCw, Trash2 } from 'lucide-react';
+import { CalendarCheck, ChevronDown, HeartPulse, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import WorkBuddyActivity, { type ActivityState } from './WorkBuddyActivity';
 
@@ -23,9 +23,9 @@ const cell = 'px-4 py-4 align-middle';
 const muted = 'mt-1 text-xs font-normal text-gray-500 dark:text-gray-400';
 const actionButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white';
 
-export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDelete, egress }: {
+export default function WorkBuddyAccountRow({ account, now, busy, onChange, onReauthorize, onDelete, egress }: {
     account: WorkBuddyAccount; now: number; busy: boolean;
-    onChange: (changes: AccountChanges) => void; onDelete: () => void; egress: ReactNode;
+    onChange: (changes: AccountChanges) => void; onReauthorize: () => void; onDelete: () => void; egress: ReactNode;
 }) {
     const { t } = useTranslation();
     const [expanded, setExpanded] = useState(false);
@@ -88,6 +88,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onDe
                     <label className="mr-2 flex items-center gap-1.5 whitespace-nowrap text-xs"><input type="checkbox" className="accent-blue-600" checked={account.enabled} disabled={busy} onChange={e => onChange({ enabled: e.target.checked })} />{t('workbuddy.enable')}</label>
                     <button className={actionButton} disabled={busy} title={t('workbuddy.accounts.sync')} aria-label={t('workbuddy.accounts.sync')} onClick={() => onChange({})}><RefreshCw size={15} /></button>
                     <button className={actionButton} disabled={busy} title={t('workbuddy.accounts.refresh')} aria-label={t('workbuddy.accounts.refresh')} onClick={() => onChange({ refresh: true })}><HeartPulse size={15} /></button>
+                    <button className={actionButton} disabled={busy} title={t('workbuddy.accounts.reauthorize')} aria-label={`${t('workbuddy.accounts.reauthorize')} ${account.nickname || account.uid}`} onClick={onReauthorize}><KeyRound size={15} /></button>
                     {account.realm === 'cn' && <button className={actionButton} disabled={busy} title={t('workbuddy.accounts.checkin_now')} aria-label={t('workbuddy.accounts.checkin_now')} onClick={() => onChange({ checkin: true })}><CalendarCheck size={15} /></button>}
                     <button className={actionButton} title={t('common.details')} aria-label={`${t('common.details')} ${account.nickname || account.uid}`} aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(!expanded)}><ChevronDown size={16} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} /></button>
                     <button className={`${actionButton} hover:!text-red-600`} disabled={busy} title={t('common.delete')} aria-label={`${t('common.delete')} ${account.nickname || account.uid}`} onClick={onDelete}><Trash2 size={15} /></button>

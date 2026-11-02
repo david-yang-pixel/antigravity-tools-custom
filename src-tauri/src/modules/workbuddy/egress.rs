@@ -97,8 +97,12 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 static STORED: Mutex<Option<(crate::utils::fs::FileStamp, Settings)>> = Mutex::new(None);
 /// Serializes auto-assignment so two first requests cannot take the same node.
 static ASSIGN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
-/// Node reserved by an in-progress authorization, released when that login ends.
-static HOLDS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
+/// Node reserved by an in-progress authorization, keyed by hold token, with the
+/// time the reservation lapses. Released when the login ends; a hold whose login
+/// was abandoned stops counting at that time even if nothing drops it.
+static HOLDS: LazyLock<Mutex<HashMap<String, (String, i64)>>> = LazyLock::new(Default::default);
+/// Covers the authorization-state request before the session sets its own expiry.
+const HOLD_GRACE_SECS: i64 = 120;
 /// Login runs before an account exists and shares one selector; one login at a time.
 static LOGIN_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(Default::default);
 static CLIENTS: LazyLock<Mutex<HashMap<String, rquest::Client>>> = LazyLock::new(Default::default);
@@ -200,9 +204,13 @@ fn eligible(name: &str, include: &Option<regex::Regex>, exclude: &Option<regex::
         && exclude.as_ref().is_none_or(|r| !r.is_match(name))
 }
 fn held_nodes() -> HashSet<String> {
+    let now = accounts::now();
     HOLDS
         .lock()
-        .map(|holds| holds.values().cloned().collect())
+        .map(|mut holds| {
+            holds.retain(|_, (_, until)| *until > now);
+            holds.values().map(|(node, _)| node.clone()).collect()
+        })
         .unwrap_or_default()
 }
 /// `true` when another saved account already has this node.
@@ -256,11 +264,25 @@ impl LoginHold {
         HOLDS
             .lock()
             .map_err(|_| "Egress reservation unavailable")?
-            .insert(token.clone(), node.to_owned());
+            .insert(
+                token.clone(),
+                (node.to_owned(), accounts::now() + HOLD_GRACE_SECS),
+            );
         Ok(Self {
             token,
             active: true,
         })
+    }
+    /// Keeps the reservation until `at`, the end of the authorization session.
+    pub fn hold_until(&mut self, at: i64) {
+        if !self.active {
+            return;
+        }
+        if let Ok(mut holds) = HOLDS.lock() {
+            if let Some((_, until)) = holds.get_mut(&self.token) {
+                *until = at;
+            }
+        }
     }
     pub fn release(&mut self) {
         if !self.active {
@@ -412,6 +434,16 @@ pub async fn login_route(preferred: Option<&str>) -> Result<LoginRoute, String> 
         hold,
         _guard: guard,
     })
+}
+/// The node an existing account must reauthorize through: its own binding, so the
+/// new token is issued to the address that already carries this account. `None`
+/// when egress is off or the account has no binding yet.
+pub fn bound_node(account_id: &str) -> Result<Option<String>, String> {
+    let settings = load()?;
+    if !settings.enabled {
+        return Ok(None);
+    }
+    Ok(settings.bindings.get(account_id).cloned())
 }
 /// Keeps an authorized account on its login node unless it already has a binding.
 /// A node already given to a different account is left untouched.
@@ -687,6 +719,20 @@ mod tests {
             choose(&nodes, &Settings::default()).as_deref(),
             Some("hold-fast")
         );
+    }
+
+    #[test]
+    fn an_abandoned_authorization_hold_lapses_at_its_deadline() {
+        let nodes = [node("lapse-only", Some(10), Some(true))];
+        let mut hold = LoginHold::reserve("lapse-only").unwrap();
+        assert_eq!(choose(&nodes, &Settings::default()), None);
+        // The session ended without release (e.g. the admin closed the dialog).
+        hold.hold_until(accounts::now() - 1);
+        assert_eq!(
+            choose(&nodes, &Settings::default()).as_deref(),
+            Some("lapse-only")
+        );
+        std::mem::forget(hold);
     }
 
     #[test]

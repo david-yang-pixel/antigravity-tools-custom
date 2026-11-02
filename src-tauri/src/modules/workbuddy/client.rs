@@ -742,7 +742,7 @@ mod tests {
         let _mock = Mock(tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         }));
-        let started = super::super::login::start(Realm::Cn).await.unwrap();
+        let started = super::super::login::start(Realm::Cn, None).await.unwrap();
         let logged = super::super::login::poll(&started.id).await.unwrap();
         let id = logged.account.unwrap().id;
         assert_eq!(logged.status, "ready");
@@ -767,6 +767,31 @@ mod tests {
         let settings = super::super::load().unwrap();
         assert!(settings.enabled);
         assert_eq!(settings.models["native-model"], "native-model");
+        // Reauthorizing one saved account refuses a sign-in by another account.
+        let other = super::super::accounts::upsert(
+            super::super::accounts::parse_import(json!({"uid":"other","accessToken":"secret"}))
+                .unwrap(),
+        )
+        .unwrap();
+        let reauth = super::super::login::start(Realm::Global, Some(&other.id))
+            .await
+            .unwrap();
+        let refused = super::super::login::poll(&reauth.id).await.unwrap();
+        assert_eq!(refused.status, "wrong_account");
+        assert!(refused.account.is_none());
+        assert_eq!(
+            super::super::login::poll(&reauth.id).await.unwrap().status,
+            "expired"
+        );
+        assert_eq!(super::super::accounts::get(&other.id).unwrap().uid, "other");
+        // The same account reauthorizes in its own realm.
+        let reauth = super::super::login::start(Realm::Global, Some(&id))
+            .await
+            .unwrap();
+        let renewed = super::super::login::poll(&reauth.id).await.unwrap();
+        assert_eq!(renewed.status, "ready");
+        assert_eq!(renewed.account.unwrap().id, id);
+        assert_eq!(super::super::accounts::list().unwrap().len(), 2);
         super::super::login::cancel(&started.id).await.unwrap();
         assert!(super::super::login::poll(&started.id).await.is_err());
     }
