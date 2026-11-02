@@ -96,6 +96,10 @@ static ASSIGN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::de
 /// Login runs before an account exists and shares one selector; one login at a time.
 static LOGIN_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(Default::default);
 static CLIENTS: LazyLock<Mutex<HashMap<String, rquest::Client>>> = LazyLock::new(Default::default);
+/// Direct accounts still share this server's address. They must not also share
+/// one HTTP/2 connection, or several tokens ride the same socket.
+static DIRECT_CLIENTS: LazyLock<Mutex<HashMap<String, rquest::Client>>> =
+    LazyLock::new(Default::default);
 
 fn path() -> Result<PathBuf, String> {
     Ok(crate::modules::account::get_data_dir()?.join("workbuddy_egress.json"))
@@ -215,6 +219,22 @@ fn choose(nodes: &[Node], settings: &Settings) -> Option<String> {
 fn direct() -> Result<rquest::Client, String> {
     super::client::http().cloned()
 }
+fn direct_for(account_id: &str) -> Result<rquest::Client, String> {
+    let mut clients = DIRECT_CLIENTS
+        .lock()
+        .map_err(|_| "Egress client cache unavailable")?;
+    if let Some(client) = clients.get(account_id) {
+        return Ok(client.clone());
+    }
+    let client = super::client::builder()
+        .build()
+        .map_err(|_| "Cannot initialize WorkBuddy connection")?;
+    if clients.len() >= 1024 {
+        clients.clear();
+    }
+    clients.insert(account_id.to_owned(), client.clone());
+    Ok(client)
+}
 fn proxied(proxy_url: &str) -> Result<rquest::Client, String> {
     let mut clients = CLIENTS
         .lock()
@@ -235,6 +255,8 @@ fn proxied(proxy_url: &str) -> Result<rquest::Client, String> {
 }
 
 /// The node an account must use, auto-assigning one when allowed.
+/// An existing binding is never moved. A dead node fails this account; it does
+/// not send the same machine identity out through another address.
 async fn binding(settings: &Settings, account_id: &str) -> Result<String, String> {
     if let Some(node) = settings.bindings.get(account_id) {
         return Ok(node.clone());
@@ -259,11 +281,11 @@ async fn binding(settings: &Settings, account_id: &str) -> Result<String, String
 pub async fn client_for(account: &Account) -> Result<rquest::Client, String> {
     let settings = load()?;
     if !settings.enabled {
-        return direct();
+        return direct_for(&account.id);
     }
     let node = binding(&settings, &account.id).await?;
     if node == DIRECT {
-        return direct();
+        return direct_for(&account.id);
     }
     let route = mihomo::route(&settings, &account.id, &node).await?;
     proxied(&route.proxy_url)
@@ -298,7 +320,7 @@ pub async fn login_route(preferred: Option<&str>) -> Result<LoginRoute, String> 
     if node == DIRECT {
         return Ok(LoginRoute {
             client: direct()?,
-            node: Some(node),
+            node: Some(DIRECT.to_owned()),
             _guard: guard,
         });
     }
@@ -323,6 +345,9 @@ pub fn adopt(account_id: &str, node: Option<&str>) {
 }
 pub fn forget(account_id: &str) {
     let id = account_id.to_owned();
+    if let Ok(mut clients) = DIRECT_CLIENTS.lock() {
+        clients.remove(account_id);
+    }
     if let Err(error) = edit(|s| {
         s.bindings.remove(&id);
         Ok(())
@@ -455,7 +480,7 @@ pub async fn test_account(account_id: &str) -> Result<Probe, String> {
     let url = probe_url(account.realm);
     let result = if node == DIRECT {
         let started = std::time::Instant::now();
-        direct()?
+        direct_for(account_id)?
             .head(&url)
             .timeout(PROBE_URL_TIMEOUT)
             .send()

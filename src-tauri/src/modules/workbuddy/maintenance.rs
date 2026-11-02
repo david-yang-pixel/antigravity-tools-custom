@@ -72,6 +72,15 @@ fn beijing_minute(at: i64) -> u32 {
 fn sync_delay(account_id: &str) -> i64 {
     900 + super::identity::sync_extra_secs(account_id)
 }
+/// Catalog and credit polls stop once a real generation is this old.
+const QUIET_AFTER_SECS: i64 = 6 * 3600;
+fn recently_active(account: &Account, now: i64) -> bool {
+    let last = accounts::last_generation_at(&account.id);
+    last > 0 && now.saturating_sub(last) < QUIET_AFTER_SECS
+}
+fn catalog_due(account: &Account, now: i64) -> bool {
+    now >= account.management.next_sync_at && recently_active(account, now)
+}
 fn checkin_due(a: &Account, now: i64) -> bool {
     if a.realm != Realm::Cn
         || !a.management.auto_checkin
@@ -105,7 +114,7 @@ fn due(a: &Account, now: i64) -> bool {
     }
     a.enabled
         && a.management.managed
-        && (now >= a.management.next_sync_at || keepalive_due(a, now) || checkin_due(a, now))
+        && (catalog_due(a, now) || keepalive_due(a, now) || checkin_due(a, now))
 }
 /// Manual sync / check-in and automatic maintenance share a per-account lock.
 /// Refresh tokens have a separate single-flight lock; observations never overwrite credentials.
@@ -158,23 +167,27 @@ pub async fn run(
     if account.realm == Realm::Global {
         account.management.checkin_status = "unsupported".into();
     }
-    let (models, credits) = tokio::join!(
-        super::client::models(&account),
-        super::resources::credits(&account)
-    );
-    match models {
-        Ok(models) => {
-            account.models = models;
-            account.last_error = None;
+    // Manual sync still refreshes the catalog. Automatic polls only follow a
+    // real generation, so an idle pool does not heartbeat the upstream.
+    if !automatic || recently_active(&account, now) {
+        let (models, credits) = tokio::join!(
+            super::client::models(&account),
+            super::resources::credits(&account)
+        );
+        match models {
+            Ok(models) => {
+                account.models = models;
+                account.last_error = None;
+            }
+            Err(e) => account.last_error = Some(e),
         }
-        Err(e) => account.last_error = Some(e),
-    }
-    match credits {
-        Ok(credits) => {
-            account.management.credits = Some(credits);
-            account.management.credits_error = None;
+        match credits {
+            Ok(credits) => {
+                account.management.credits = Some(credits);
+                account.management.credits_error = None;
+            }
+            Err(e) => account.management.credits_error = Some(e),
         }
-        Err(e) => account.management.credits_error = Some(e),
     }
     account.management.last_sync_at = accounts::now();
     account.management.next_sync_at = accounts::now() + sync_delay(id);
@@ -231,8 +244,16 @@ mod tests {
         assert!(!checkin_due(&a, 1792425600 + 23 * 3600));
         a.management.auto_checkin = true;
         a.management.auto_checkin_chosen = true;
-        // Beijing 2026-10-20 00:00 — sync is due, but check-in waits for the habit slot.
+        // Beijing 2026-10-20 00:00 — an unused account does not poll. A recent
+        // generation makes the catalog due; check-in still waits for the habit slot.
         let midnight = 1792425600;
+        assert!(!due(&a, midnight));
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        accounts::note_generation_at(&a.id, midnight);
+        assert!(due(&a, midnight));
+        accounts::note_generation_at(&a.id, midnight - QUIET_AFTER_SECS - 1);
+        assert!(!due(&a, midnight));
+        accounts::note_generation_at(&a.id, midnight);
         let evening = midnight + 23 * 3600; // past the 22:30 same-day fallback
         assert!(due(&a, midnight));
         assert!(!checkin_due(&a, midnight));

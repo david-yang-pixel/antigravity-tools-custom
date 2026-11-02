@@ -244,6 +244,27 @@ pub(super) fn all() -> Result<Vec<Account>, String> {
 fn runtime_key(id: &str) -> Result<String, String> {
     Ok(format!("{}:{id}", path()?.display()))
 }
+/// When this process last finished a real generation for the account.
+/// Restarts forget it, so background catalog traffic stays quiet until the next call.
+pub(super) fn last_generation_at(id: &str) -> i64 {
+    let Ok(key) = runtime_key(id) else {
+        return 0;
+    };
+    RUNTIME
+        .lock()
+        .ok()
+        .and_then(|pool| pool.get(&key).map(|entry| entry.health.last_success_at))
+        .unwrap_or(0)
+}
+#[cfg(test)]
+pub(super) fn note_generation_at(id: &str, at: i64) {
+    let Ok(key) = runtime_key(id) else {
+        return;
+    };
+    if let Ok(mut pool) = RUNTIME.lock() {
+        pool.entry(key).or_default().health.last_success_at = at;
+    }
+}
 pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
     // The draw journal is persisted for retry safety, not exposed in the admin UI.
     account.management.activity.pending_draw = None;

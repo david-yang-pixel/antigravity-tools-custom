@@ -24,8 +24,12 @@ pub fn builder() -> rquest::ClientBuilder {
         .no_proxy()
         .redirect(rquest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
+        // Two idle sockets match the per-account concurrency cap. Each account
+        // owns a client, so this does not pool those accounts together.
+        .pool_max_idle_per_host(2)
 }
-/// Direct connection from this server. Account traffic must use [`http_for`].
+/// One client for login, before an account exists. Account traffic must use
+/// [`http_for`], which keeps a separate connection pool per account.
 pub fn http() -> Result<&'static rquest::Client, String> {
     static CLIENT: OnceLock<Result<rquest::Client, String>> = OnceLock::new();
     CLIENT
