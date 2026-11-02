@@ -311,18 +311,25 @@ impl PromptSanitizer {
     }
 
     /// 开头轨：system 文本的开头窗口是否像第三方 agent 提示词（见 `RE_AGENT_OPENING`）。
-    /// 只做识别、不改文本；点名上游自家客户端（WorkBuddy / CodeBuddy）的开头返回 `false`。
+    /// 只做识别、不改文本。豁免只看**触发识别的那一行**：该行点名上游自家客户端
+    /// （WorkBuddy / CodeBuddy）时返回 `false`；窗口内其他位置提到这些名字不构成豁免。
     pub fn opens_like_agent_prompt(text: &str) -> bool {
         let head: String = text
             .trim_start()
             .chars()
             .take(AGENT_OPENING_SCAN_CHARS)
             .collect();
-        let lower = head.to_lowercase();
+        let Some(found) = RE_AGENT_OPENING.find(&head) else {
+            return false;
+        };
+        let line_start = head[..found.start()].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = head[found.start()..]
+            .find('\n')
+            .map_or(head.len(), |i| found.start() + i);
+        let line = head[line_start..line_end].to_lowercase();
         !FIRST_PARTY_OPENING_NAMES
             .iter()
-            .any(|name| lower.contains(name))
-            && RE_AGENT_OPENING.is_match(&head)
+            .any(|name| line.contains(name))
     }
 
     /// 是否为客户端注入的单行计费元数据（issue #3452：与大量工具组合会触发上游 429）。
@@ -546,6 +553,9 @@ mod agent_opening_tests {
             "你是一个资深的编程助手，帮助用户完成任务。",
             "您是专业的代码审查智能体。",
             "You are a helpful assistant.",
+            // Mentioning a first-party product later in the window is not a first-party opening.
+            "You are Cline, a highly skilled software engineer.\nThis repository is the CodeBuddy plugin.",
+            "x-anthropic-billing-header: cc_version=2.1.3;\nYou are Claude Code. The user builds WorkBuddy tools.",
         ] {
             assert!(PromptSanitizer::opens_like_agent_prompt(text), "{text}");
         }
