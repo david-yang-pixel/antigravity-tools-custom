@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, CircleHelp, Download, Loader2, RefreshCw, Search } from 'lucide-react';
 import { request } from '../../../utils/request';
-import type { CandidateModel, DiscoverUpstreamModelsRequest, ModelRegistryView, ModelVerificationReport, ModelVerificationResult, PublishedModel, SaveModelRegistryRequest, UpstreamDiscoveryReport, VerifyModelCandidatesRequest } from '../../../types/modelRegistry';
+import type { CandidateModel, DiscoverUpstreamModelsRequest, ModelRegistryView, ModelVerificationReport, ModelVerificationResult, PublishedModel, SaveModelRegistryRequest, UpstreamDiscoveryReport, VerificationPrompt, VerifyModelCandidatesRequest } from '../../../types/modelRegistry';
 import { candidateFor, capabilityLabels, capabilityScope, filterPublications, formatCheckedAt, mergePublications, needsUnverifiedConfirmation, newPublicationId, publicationError, registryError, saveRequest, verificationLabels } from './registryLogic';
 import RegistryDialog from './RegistryDialog';
 import UpstreamModels, { hasRealm, type UpstreamPick } from './UpstreamModels';
@@ -144,11 +144,12 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
     };
     // Clicking Test on one model is the explicit consent for that single upstream request,
     // sent through the account that listed the model.
-    async function test(candidate: CandidateModel) {
+    // WorkBuddy tests carry the administrator's own content instead of a fixed sentence.
+    async function test(candidate: CandidateModel, prompt?: VerificationPrompt) {
         setTesting(candidate.id);
         try {
             const account_id = discovery?.source_id === candidate.source_id ? discovery.account_id : null;
-            await mutate('verify_model_candidates', { candidate_ids: [candidate.id], confirm_upstream_usage: true, account_id }, `${candidate.native_model} 测试完成，仅基础文本。 / Test finished: basic text only.`);
+            await mutate('verify_model_candidates', { candidate_ids: [candidate.id], confirm_upstream_usage: true, account_id, prompt: prompt ?? null }, `${candidate.native_model} 测试完成，仅基础文本。 / Test finished: basic text only.`);
         } finally { if (alive.current) setTesting(null); }
     }
     const closeAction = () => { if (!busy) { setAction(null); setActionError(null); } };
@@ -210,7 +211,7 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
             </div> : !busy && <p className="registry-empty">目录不可用时不回退旧路由，请重新加载。 / Registry unavailable; no legacy fallback. Reload to retry.</p>)}
         </div>
         {upstreamOpen && !action && view && <UpstreamModels view={view} pick={pick} report={discovery} busy={busy} testing={testing} tested={tested} notice={issue(feedback)}
-            onPick={setPick} onFetch={sync} onChangeSource={() => setDiscovery(null)} onTest={c => void test(c)} onAdd={c => openPublish([c])} onClose={() => { if (!busy) setUpstreamOpen(false); }} />}
+            onPick={setPick} onFetch={sync} onChangeSource={() => setDiscovery(null)} onTest={(c, prompt) => void test(c, prompt)} onAdd={c => openPublish([c])} onClose={() => { if (!busy) setUpstreamOpen(false); }} />}
         {action && view && <RegistryDialog title={action.kind === 'publish' ? (action.editing ? '编辑公开模型 / Edit publication' : '添加到已上架 / Add to published') : action.kind === 'remove' ? '确认下架 / Unpublish' : toggleDraft?.enabled ? '启用 / Enable' : '停用 / Disable'}
             confirmText={action.kind === 'publish' ? (action.editing ? '保存 / Save' : '添加 / Add') : action.kind === 'remove' ? '确认下架 / Unpublish' : '确认保存 / Save'}
             onConfirm={() => void submit()} onCancel={closeAction} busy={!!busy} destructive={action.kind === 'remove' || (action.kind === 'toggle' && !toggleDraft?.enabled)}

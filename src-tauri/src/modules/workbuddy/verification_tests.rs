@@ -1,17 +1,15 @@
-use super::super::accounts;
 use super::*;
 use axum::{
-    http::StatusCode,
-    response::IntoResponse,
+    body::Body,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde_json::json;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use std::time::Duration;
 
 struct Mock(tokio::task::JoinHandle<()>);
 impl Drop for Mock {
@@ -36,25 +34,73 @@ fn account(uid: &str) -> accounts::Account {
     )
     .unwrap()
 }
+fn stream(content: &str) -> Response {
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from(content.to_owned()))
+        .unwrap()
+}
+fn prompt() -> VerificationPrompt {
+    VerificationPrompt {
+        system: "Admin system text".into(),
+        user: "Admin question".into(),
+    }
+}
+const OK: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
 #[tokio::test]
-async fn workbuddy_verification_does_not_send_a_generated_prompt() {
+async fn workbuddy_verification_sends_admin_content_and_requires_completed_text() {
     let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counter = calls.clone();
-    let _mock = serve(Router::new().route(
-        "/v2/chat/completions",
-        post(move || {
-            let counter = counter.clone();
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                "should not be called"
-            }
-        }),
-    ))
-    .await;
-    assert!(PROBE_DISABLED.contains("不再向上游发送生成的验证短句"));
-    assert!(start().is_err());
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let _mock = serve(Router::new().route("/v2/chat/completions", post(|Json(body): Json<Value>| async move {
+        // Exactly the administrator's content: no fixed sentence, no injected limit.
+        assert_eq!(body["messages"], json!([
+            {"role":"system","content":"Admin system text"},
+            {"role":"user","content":"Admin question"},
+        ]));
+        assert!(body.get("max_tokens").is_none());
+        match body["model"].as_str().unwrap() {
+            "ok" => stream(OK),
+            "denied" => (StatusCode::BAD_REQUEST, Json(json!({"code":11158}))).into_response(),
+            "missing" => (StatusCode::BAD_REQUEST, Json(json!({"error":{"code":"11-102"}}))).into_response(),
+            "denied-stream" => stream("data: {\"error\":{\"code\":\"11-158\"}}\n\n"),
+            "error" => stream("data: {\"error\":{\"message\":\"not allowed\"}}\n\n"),
+            "reasoning" => stream("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":\"length\"}]}\n\n"),
+            "long" => stream("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n"),
+            "truncated" => stream("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
+            "busy" => StatusCode::TOO_MANY_REQUESTS.into_response(),
+            _ => Json(json!({"message":"not an inference result"})).into_response(),
+        }
+    }))).await;
+    for (model, expected) in [
+        ("ok", Outcome::Available),
+        ("long", Outcome::Available),
+        ("denied", Outcome::Unavailable),
+        ("missing", Outcome::Unavailable),
+        ("denied-stream", Outcome::Unavailable),
+        ("error", Outcome::Failed),
+        ("reasoning", Outcome::Failed),
+        ("truncated", Outcome::Failed),
+        ("busy", Outcome::Failed),
+        ("json", Outcome::Failed),
+    ] {
+        assert_eq!(
+            probe(&account("test"), model, &prompt()).await,
+            expected,
+            "{model}"
+        );
+    }
+    // Both fields are required; nothing is sent without them.
+    assert!(validate_prompt(None).is_err());
+    let mut blank = prompt();
+    blank.user = "  ".into();
+    assert!(validate_prompt(Some(&blank)).is_err());
+    blank = prompt();
+    blank.system.clear();
+    assert!(validate_prompt(Some(&blank)).is_err());
+    blank = prompt();
+    blank.user = "x".repeat(PROMPT_MAX_BYTES + 1);
+    assert!(validate_prompt(Some(&blank)).is_err());
+    assert!(validate_prompt(Some(&prompt())).is_ok());
 }
 
 #[tokio::test]
@@ -103,11 +149,15 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
             )
             .route(
                 "/v2/chat/completions",
-                post(move || {
+                post(move |headers: HeaderMap, Json(body): Json<Value>| {
                     let counter = counter.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        StatusCode::BAD_REQUEST.into_response()
+                        if headers["x-user-id"] == "a" && body["model"] == "shared" {
+                            stream(OK)
+                        } else {
+                            (StatusCode::BAD_REQUEST, Json(json!({"code":11158}))).into_response()
+                        }
                     }
                 }),
             ),
@@ -134,20 +184,44 @@ async fn workbuddy_verification_scopes_grants_and_maintenance_cannot_restore_den
             .unwrap();
     };
     select(&a);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let current = accounts::get(&a).unwrap();
-    accounts::record_model_verification(&current, "denied", false).unwrap();
-    let current = accounts::get(&a).unwrap();
-    accounts::record_model_verification(&current, "shared", true).unwrap();
+    assert_eq!(
+        verify_selected_model("shared", None, &prompt())
+            .await
+            .unwrap(),
+        (a.clone(), Outcome::Available)
+    );
+    assert_eq!(
+        verify_selected_model("denied", None, &prompt())
+            .await
+            .unwrap(),
+        (a.clone(), Outcome::Unavailable)
+    );
+    // A single-target denial never erases another target's successful evidence.
+    assert!(accounts::get(&a)
+        .unwrap()
+        .verified_models
+        .contains_key("shared"));
+    select(&b);
+    assert_eq!(
+        verify_selected_model("shared", None, &prompt())
+            .await
+            .unwrap(),
+        (b.clone(), Outcome::Unavailable)
+    );
+    // A pinned account outside the eligible pool is refused before any upstream call.
+    assert!(verify_selected_model("shared", Some(&a), &prompt())
+        .await
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(accounts::get(&a).unwrap().supports_model("shared"));
-    assert!(!accounts::get(&a).unwrap().supports_model("denied"));
+    assert!(!accounts::get(&b).unwrap().supports_model("shared"));
     for _ in 0..2 {
         accounts::sync(&a, false).await.unwrap();
         accounts::sync(&b, false).await.unwrap();
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(!accounts::get(&a).unwrap().supports_model("denied"));
-    assert!(accounts::get(&b).unwrap().supports_model("shared"));
+    assert!(!accounts::get(&b).unwrap().supports_model("shared"));
     let registry =
         crate::modules::model_registry::view(&[], &std::collections::HashMap::new()).unwrap();
     assert!(registry.published_models.is_empty());

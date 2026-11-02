@@ -397,13 +397,19 @@ pub async fn verify(
                 .ok_or_else(|| "Unknown model candidate; refresh the directory".to_string())
         })
         .collect::<Result<_, _>>()?;
-    // WorkBuddy is never probed with a canned prompt. Refuse before anything is
-    // recorded, so the registry does not show a failure that never happened.
-    if selected
+    // WorkBuddy is never probed with a fixed sentence: its test sends the
+    // administrator's own content, which other sources do not take.
+    let workbuddy = selected
         .iter()
-        .any(|candidate| candidate.source_id == model_registry::WORKBUDDY_SOURCE)
-    {
-        return Err(super::workbuddy::verification::PROBE_DISABLED.into());
+        .filter(|candidate| candidate.source_id == model_registry::WORKBUDDY_SOURCE)
+        .count();
+    if workbuddy > 0 {
+        if workbuddy != selected.len() {
+            return Err("Test WorkBuddy models separately from other sources".into());
+        }
+        super::workbuddy::verification::validate_prompt(request.prompt.as_ref())?;
+    } else if request.prompt.is_some() {
+        return Err("Custom test content applies only to WorkBuddy models".into());
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut results = Vec::new();
@@ -415,7 +421,13 @@ pub async fn verify(
         let checked_at = chrono::Utc::now().timestamp();
         let result = tokio::time::timeout(
             remaining.min(Duration::from_secs(30)),
-            probe(manager, upstream, &candidate, request.account_id.as_deref()),
+            probe(
+                manager,
+                upstream,
+                &candidate,
+                request.account_id.as_deref(),
+                request.prompt.as_ref(),
+            ),
         )
         .await;
         let (status, message, account_id) = match result {
@@ -442,6 +454,7 @@ pub async fn verify(
                 )
             }
         };
+        let workbuddy = candidate.source_id == model_registry::WORKBUDDY_SOURCE;
         let result = model_registry::sanitize_verification_result(ModelVerificationResult {
             candidate_id: candidate.id,
             status,
@@ -449,7 +462,11 @@ pub async fn verify(
             checked_at,
             account_id,
         })?;
-        model_registry::record_verification(result.clone())?;
+        // A failed WorkBuddy test is reported but not kept: it says nothing about
+        // the model and would read as a verdict in the registry.
+        if !(workbuddy && result.status == "failed") {
+            model_registry::record_verification(result.clone())?;
+        }
         results.push(result);
     }
     let mut registry = view(manager).await?;
@@ -467,11 +484,37 @@ async fn probe(
     upstream: &UpstreamClient,
     candidate: &CandidateModel,
     account_id: Option<&str>,
+    prompt: Option<&model_registry::VerificationPrompt>,
 ) -> Result<(String, String, Option<String>), String> {
     match candidate.source_id.as_str() {
-        // `verify` refuses WorkBuddy candidates before probing.
         model_registry::WORKBUDDY_SOURCE => {
-            Err(super::workbuddy::verification::PROBE_DISABLED.into())
+            use super::workbuddy::verification::{self, Outcome};
+            let prompt = prompt.ok_or(verification::PROMPT_REQUIRED)?;
+            let (account_id, outcome) =
+                verification::verify_selected_model(&candidate.native_model, account_id, prompt)
+                    .await?;
+            let (status, message) = match outcome {
+                Outcome::Available => (
+                    "verified",
+                    "一个启用账号用你填写的内容调用通过；其他能力未验证。",
+                ),
+                Outcome::Unavailable => (
+                    "unavailable",
+                    "抽样账号明确无此模型权限；不代表其他账号均不可用。",
+                ),
+                Outcome::Failed => {
+                    tracing::warn!(
+                        "Model test for {} on WorkBuddy account {} failed",
+                        candidate.native_model,
+                        account_id
+                    );
+                    (
+                        "failed",
+                        "本次调用失败或暂不可用；未记录，也未撤销已有证据。",
+                    )
+                }
+            };
+            Ok((status.into(), message.into(), Some(account_id)))
         }
         model_registry::ANTIGRAVITY_SOURCE => {
             probe_antigravity(manager, upstream, candidate, account_id).await
@@ -664,6 +707,7 @@ mod tests {
             candidate_ids: ids,
             confirm_upstream_usage: confirm,
             account_id: None,
+            prompt: None,
         };
         assert!(validate_verification_request(&request(vec!["a".into()], false)).is_err());
         assert!(validate_verification_request(&request(vec![], true)).is_err());

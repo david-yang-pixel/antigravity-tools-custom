@@ -65,10 +65,16 @@ export interface UpstreamDiscoveryReport {
     candidate_ids: string[];
     registry: ModelRegistryView;
 }
+/** Administrator-written test content; WorkBuddy only, sent once and never stored. */
+export interface VerificationPrompt {
+    system: string;
+    user: string;
+}
 export interface VerifyModelCandidatesRequest {
     candidate_ids: string[];
     confirm_upstream_usage: boolean;
     account_id?: string | null;
+    prompt?: VerificationPrompt | null;
 }
 export interface ModelVerificationResult {
     candidate_id: string;

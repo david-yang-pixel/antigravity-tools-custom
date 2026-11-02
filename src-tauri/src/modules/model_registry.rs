@@ -124,6 +124,17 @@ pub struct VerifyModelCandidatesRequest {
     /// Probe through this account instead of the first eligible one.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// Request content written by the administrator. Required for WorkBuddy,
+    /// which never sends a fixed probe sentence; refused for other sources.
+    /// Sent once and never persisted.
+    #[serde(default)]
+    pub prompt: Option<VerificationPrompt>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationPrompt {
+    pub system: String,
+    pub user: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
