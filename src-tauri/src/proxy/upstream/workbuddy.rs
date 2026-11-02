@@ -339,11 +339,22 @@ async fn attempt(
                         lease.failure("Upstream connection failed", 10);
                         retry(StatusCode::BAD_GATEWAY, "workbuddy_unavailable", &message)
                     }
-                    workbuddy::client::ChatError::Local(message) => fatal(
+                    workbuddy::client::ChatError::Request(message) => fatal(
                         StatusCode::BAD_REQUEST,
                         "workbuddy_request_unsupported",
                         &message,
                     ),
+                    workbuddy::client::ChatError::Account(message) => {
+                        lease.failure("Account data cannot form a request", 60);
+                        fatal(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "workbuddy_account_invalid",
+                            &message,
+                        )
+                    }
+                    workbuddy::client::ChatError::Timeout(message) => {
+                        fatal(StatusCode::GATEWAY_TIMEOUT, "workbuddy_timeout", &message)
+                    }
                 });
             }
         };

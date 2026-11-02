@@ -327,12 +327,18 @@ pub fn session_key(scope: &str, payload: &Value) -> String {
     format!("{:x}", Sha256::digest(format!("{scope}:{first}")))
 }
 
+/// Why a chat request produced no upstream HTTP response. Only `Connection`
+/// may move to another account; the others are final for this request.
 #[derive(Debug)]
 pub enum ChatError {
     /// The TCP/TLS request never received an HTTP response. One other account may try.
     Connection(String),
-    /// The request was not sent, or a response must not be replayed on another account.
-    Local(String),
+    /// The caller's request cannot be expressed on the WorkBuddy wire.
+    Request(String),
+    /// This account's stored data cannot form a valid request.
+    Account(String),
+    /// The deadline ran out before or while waiting for the upstream response.
+    Timeout(String),
 }
 struct Conversation {
     id: String,
@@ -377,7 +383,7 @@ fn upstream_conversation_id(session: &str) -> String {
 
 fn require_leading_system(payload: &mut Value) -> Result<(), ChatError> {
     let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
-        return Err(ChatError::Local(
+        return Err(ChatError::Request(
             "WorkBuddy requires a leading system message from the caller".into(),
         ));
     };
@@ -395,7 +401,7 @@ fn require_leading_system(payload: &mut Value) -> Result<(), ChatError> {
         messages.insert(0, system);
         return Ok(());
     }
-    Err(ChatError::Local(
+    Err(ChatError::Request(
         "WorkBuddy requires a leading system message from the caller".into(),
     ))
 }
@@ -439,13 +445,15 @@ pub async fn chat(
         if let Some(name) = choice.pointer("/function/name").and_then(Value::as_str) {
             payload["tool_choice"] = json!(name);
         } else {
-            return Err(ChatError::Local("Unsupported WorkBuddy tool_choice".into()));
+            return Err(ChatError::Request(
+                "Unsupported WorkBuddy tool_choice".into(),
+            ));
         }
     }
     if payload["tool_choice"] == "none" {
         let obj = payload
             .as_object_mut()
-            .ok_or_else(|| ChatError::Local("Invalid request".into()))?;
+            .ok_or_else(|| ChatError::Request("Invalid request".into()))?;
         obj.remove("tools");
         obj.remove("tool_choice");
     }
@@ -469,8 +477,8 @@ pub async fn chat(
     }
     require_leading_system(&mut payload)?;
     let conversation = upstream_conversation_id(&session_key(scope, &payload));
-    let mut h = headers(account.realm, Some(account)).map_err(ChatError::Local)?;
-    add(&mut h, "accept", "application/json, text/event-stream").map_err(ChatError::Local)?;
+    let mut h = headers(account.realm, Some(account)).map_err(ChatError::Account)?;
+    add(&mut h, "accept", "application/json, text/event-stream").map_err(ChatError::Account)?;
     let product_version = if account.client.product_version.is_empty() {
         super::identity::PRODUCT_VERSION
     } else {
@@ -483,7 +491,7 @@ pub async fn chat(
         ("x-ide-version", product_version),
         ("x-product", "WorkBuddy"),
     ] {
-        add(&mut h, name, value).map_err(ChatError::Local)?;
+        add(&mut h, name, value).map_err(ChatError::Account)?;
     }
     for (name, value) in [
         ("x-conversation-id", conversation),
@@ -502,27 +510,29 @@ pub async fn chat(
         ),
         ("x-trace-id", uuid::Uuid::new_v4().simple().to_string()),
     ] {
-        add(&mut h, name, &value).map_err(ChatError::Local)?;
+        add(&mut h, name, &value).map_err(ChatError::Account)?;
     }
     if account.enterprise_id.is_empty() || account.realm == Realm::Global {
-        add(&mut h, "x-no-enterprise-id", "1").map_err(ChatError::Local)?;
+        add(&mut h, "x-no-enterprise-id", "1").map_err(ChatError::Account)?;
     } else {
-        add(&mut h, "x-enterprise-id", &account.enterprise_id).map_err(ChatError::Local)?;
+        add(&mut h, "x-enterprise-id", &account.enterprise_id).map_err(ChatError::Account)?;
     }
     if account.realm == Realm::Global {
-        add(&mut h, "x-domain", "www.workbuddy.ai").map_err(ChatError::Local)?;
+        add(&mut h, "x-domain", "www.workbuddy.ai").map_err(ChatError::Account)?;
     } else if !account.domain.is_empty() {
-        add(&mut h, "x-domain", &account.domain).map_err(ChatError::Local)?;
+        add(&mut h, "x-domain", &account.domain).map_err(ChatError::Account)?;
     } else {
-        add(&mut h, "x-no-department-info", "1").map_err(ChatError::Local)?;
+        add(&mut h, "x-no-department-info", "1").map_err(ChatError::Account)?;
     }
     if !account.device_token.is_empty() {
-        add(&mut h, "x-device-token", &account.device_token).map_err(ChatError::Local)?;
+        add(&mut h, "x-device-token", &account.device_token).map_err(ChatError::Account)?;
     }
     let http = http_for(account).await.map_err(ChatError::Connection)?;
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
-        return Err(ChatError::Local("WorkBuddy model request timed out".into()));
+        return Err(ChatError::Timeout(
+            "WorkBuddy model request timed out".into(),
+        ));
     }
     // A channel rejection stays on this account. Replaying the same body to
     // /console or to another account spreads one failure across the pool.
@@ -533,20 +543,26 @@ pub async fn chat(
         .json(&payload)
         .send()
         .await
-        .map_err(|_| ChatError::Connection("WorkBuddy model request failed or timed out".into()))?;
+        .map_err(|error| {
+            if error.is_timeout() {
+                ChatError::Timeout("WorkBuddy model request timed out".into())
+            } else {
+                ChatError::Connection("WorkBuddy model request failed".into())
+            }
+        })?;
     if response.status().is_success() {
         return Ok(response);
     }
     let status = response.status();
     let response_headers = response.headers().clone();
+    // An interrupted or oversized error body still came with a real status.
+    // Keep that status and drop only the result code.
     let bytes = axum::body::to_bytes(
         axum::body::Body::from_stream(response.bytes_stream()),
         64 * 1024,
     )
     .await
-    .map_err(|_| {
-        ChatError::Local("WorkBuddy error response was interrupted or too large".into())
-    })?;
+    .unwrap_or_default();
     let code = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|value| error_code(&value));
@@ -558,7 +574,7 @@ pub async fn chat(
             code.map(|code| json!({"code":code}).to_string().into_bytes())
                 .unwrap_or_default(),
         )
-        .map_err(|_| ChatError::Local("Invalid upstream response".into()))?;
+        .map_err(|_| ChatError::Connection("Invalid upstream response".into()))?;
     *rejected.headers_mut() = response_headers;
     rejected
         .headers_mut()
@@ -825,7 +841,7 @@ mod tests {
             tokio::time::Instant::now() + Duration::from_secs(2),
         )
         .await;
-        assert!(matches!(user_only, Err(ChatError::Local(_))));
+        assert!(matches!(user_only, Err(ChatError::Request(_))));
         for payload in [
             json!({"messages":[{"role":"system","content":"original content"}]}),
             json!({"messages":[{"role":"user","content":"later"},{"role":"developer","content":"original content"}]}),
@@ -921,5 +937,41 @@ mod tests {
             403
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_oversized_error_body_keeps_the_upstream_status() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "STELLAR_TEST_WORKBUDDY_BASE",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let app = Router::new().route(
+            "/v2/chat/completions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "x".repeat(80 * 1024),
+                )
+            }),
+        );
+        let _mock = Mock(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        let account =
+            super::super::accounts::parse_import(json!({"uid":"test","accessToken":"secret"}))
+                .unwrap();
+        let payload = json!({"messages":[{"role":"system","content":"caller"},{"role":"user","content":"hi"}]});
+        let response = chat(
+            &account,
+            "model",
+            payload,
+            "test",
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 429);
     }
 }
