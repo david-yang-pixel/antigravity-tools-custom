@@ -8,7 +8,7 @@ use super::{
     accounts::{self, Account, AccountView, Realm},
     resources,
 };
-use reqwest::Method;
+use rquest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{

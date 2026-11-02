@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct Management {
     pub managed: bool,
     pub auto_checkin: bool,
+    /// Background check-in runs only after an administrator saves the switch.
+    /// Older files that inherited the previous default do not count as that choice.
+    pub auto_checkin_chosen: bool,
     pub keepalive: bool,
     pub auto_rewards: bool,
     pub auto_lottery: bool,
@@ -33,7 +36,8 @@ impl Default for Management {
     fn default() -> Self {
         Self {
             managed: true,
-            auto_checkin: true,
+            auto_checkin: false,
+            auto_checkin_chosen: false,
             keepalive: true,
             auto_rewards: false,
             auto_lottery: false,
@@ -68,9 +72,19 @@ fn beijing_minute(at: i64) -> u32 {
 fn sync_delay(account_id: &str) -> i64 {
     900 + super::identity::sync_extra_secs(account_id)
 }
+/// Catalog and credit polls stop once a real generation is this old.
+const QUIET_AFTER_SECS: i64 = 6 * 3600;
+fn recently_active(account: &Account, now: i64) -> bool {
+    let last = accounts::last_generation_at(&account.id);
+    last > 0 && now.saturating_sub(last) < QUIET_AFTER_SECS
+}
+fn catalog_due(account: &Account, now: i64) -> bool {
+    now >= account.management.next_sync_at && recently_active(account, now)
+}
 fn checkin_due(a: &Account, now: i64) -> bool {
     if a.realm != Realm::Cn
         || !a.management.auto_checkin
+        || !a.management.auto_checkin_chosen
         || a.management.checkin_date.as_deref() == Some(day(now).as_str())
     {
         return false;
@@ -88,11 +102,11 @@ fn checkin_due(a: &Account, now: i64) -> bool {
     mins >= super::identity::checkin_minute(&a.id) || mins >= 22 * 60 + 30
 }
 fn keepalive_due(a: &Account, now: i64) -> bool {
-    // Renew inside the proactive window so inference rarely hits a blocking refresh.
+    // Renew only inside the proactive window. A daily refresh is not required
+    // to keep a still-valid token usable.
     a.management.keepalive
         && now - a.management.keepalive_attempt_at >= 300
-        && (a.expires_at <= now + accounts::PROACTIVE_REFRESH_SECS
-            || now - a.management.last_keepalive_at >= 86400)
+        && a.expires_at <= now + accounts::PROACTIVE_REFRESH_SECS
 }
 fn due(a: &Account, now: i64) -> bool {
     if a.management.keepalive_error.is_some() && now - a.management.keepalive_attempt_at < 300 {
@@ -100,7 +114,7 @@ fn due(a: &Account, now: i64) -> bool {
     }
     a.enabled
         && a.management.managed
-        && (now >= a.management.next_sync_at || keepalive_due(a, now) || checkin_due(a, now))
+        && (catalog_due(a, now) || keepalive_due(a, now) || checkin_due(a, now))
 }
 /// Manual sync / check-in and automatic maintenance share a per-account lock.
 /// Refresh tokens have a separate single-flight lock; observations never overwrite credentials.
@@ -117,9 +131,16 @@ pub async fn run(
     if automatic && !due(&initial, now) {
         return accounts::view(initial);
     }
-    // Persist the attempt before network I/O so a restart cannot cause a tight retry loop.
-    // Per-account jitter keeps the pool from syncing in lockstep.
-    accounts::edit_management(id, |m| m.next_sync_at = now + sync_delay(id))?;
+    // Manual sync still refreshes the catalog. Automatic polls only follow a
+    // real generation, so an idle pool does not heartbeat the upstream. A run
+    // that only renews the token or checks in leaves the sync schedule alone,
+    // so the first poll after the account becomes active is not pushed back.
+    let polls_catalog = !automatic || recently_active(&initial, now);
+    if polls_catalog {
+        // Persist the attempt before network I/O so a restart cannot cause a tight retry loop.
+        // Per-account jitter keeps the pool from syncing in lockstep.
+        accounts::edit_management(id, |m| m.next_sync_at = now + sync_delay(id))?;
+    }
     let refresh = force_refresh || (automatic && keepalive_due(&initial, now));
     let mut account = match accounts::fresh(id, refresh).await {
         Ok(account) => account,
@@ -153,26 +174,28 @@ pub async fn run(
     if account.realm == Realm::Global {
         account.management.checkin_status = "unsupported".into();
     }
-    let (models, credits) = tokio::join!(
-        super::client::models(&account),
-        super::resources::credits(&account)
-    );
-    match models {
-        Ok(models) => {
-            account.models = models;
-            account.last_error = None;
+    if polls_catalog {
+        let (models, credits) = tokio::join!(
+            super::client::models(&account),
+            super::resources::credits(&account)
+        );
+        match models {
+            Ok(models) => {
+                account.models = models;
+                account.last_error = None;
+            }
+            Err(e) => account.last_error = Some(e),
         }
-        Err(e) => account.last_error = Some(e),
-    }
-    match credits {
-        Ok(credits) => {
-            account.management.credits = Some(credits);
-            account.management.credits_error = None;
+        match credits {
+            Ok(credits) => {
+                account.management.credits = Some(credits);
+                account.management.credits_error = None;
+            }
+            Err(e) => account.management.credits_error = Some(e),
         }
-        Err(e) => account.management.credits_error = Some(e),
+        account.management.last_sync_at = accounts::now();
+        account.management.next_sync_at = accounts::now() + sync_delay(id);
     }
-    account.management.last_sync_at = accounts::now();
-    account.management.next_sync_at = accounts::now() + sync_delay(id);
     accounts::save_observation(&mut account)?;
     super::register_models(&account.available_models())?;
     accounts::view(account)
@@ -221,8 +244,21 @@ mod tests {
             json!({"uid":"test","accessToken":"secret","expiresAt":2000000000}),
         )
         .unwrap();
-        // Beijing 2026-10-20 00:00 — sync is due, but check-in waits for the habit slot.
+        assert!(!a.management.auto_checkin);
+        assert!(!a.management.auto_checkin_chosen);
+        assert!(!checkin_due(&a, 1792425600 + 23 * 3600));
+        a.management.auto_checkin = true;
+        a.management.auto_checkin_chosen = true;
+        // Beijing 2026-10-20 00:00 — an unused account does not poll. A recent
+        // generation makes the catalog due; check-in still waits for the habit slot.
         let midnight = 1792425600;
+        assert!(!due(&a, midnight));
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        accounts::note_generation_at(&a.id, midnight);
+        assert!(due(&a, midnight));
+        accounts::note_generation_at(&a.id, midnight - QUIET_AFTER_SECS - 1);
+        assert!(!due(&a, midnight));
+        accounts::note_generation_at(&a.id, midnight);
         let evening = midnight + 23 * 3600; // past the 22:30 same-day fallback
         assert!(due(&a, midnight));
         assert!(!checkin_due(&a, midnight));
@@ -242,6 +278,7 @@ mod tests {
         assert!(keepalive_due(&a, evening + 60));
         assert!(due(&a, evening + 60));
         a.expires_at = evening + 60 + accounts::PROACTIVE_REFRESH_SECS + 60;
+        a.management.last_keepalive_at = 0;
         assert!(!keepalive_due(&a, evening + 60));
         a.expires_at = evening + 100;
         assert!(due(&a, evening + 60));
@@ -256,6 +293,8 @@ mod tests {
         old.as_object_mut().unwrap().remove("management");
         let restored: Account = serde_json::from_value(old).unwrap();
         assert!(restored.management.managed);
+        assert!(!restored.management.auto_checkin);
+        assert!(!restored.management.auto_checkin_chosen);
         assert!(restored.management.keepalive);
         assert!(restored.management.credits.is_none());
     }
@@ -361,5 +400,24 @@ mod tests {
             "unsupported"
         );
         assert_eq!(checkins.load(Ordering::SeqCst), 1);
+        // An idle account whose token is near expiry renews it without polling
+        // the catalog, and its sync schedule stays where it was.
+        accounts::set_enabled(&id, true).unwrap();
+        let mut expiring = accounts::get(&id).unwrap();
+        expiring.realm = Realm::Cn;
+        expiring.expires_at = accounts::now() + 60;
+        accounts::upsert(expiring).unwrap();
+        accounts::edit_management(&id, |m| m.keepalive_attempt_at = 0).unwrap();
+        let before = accounts::get(&id).unwrap().management;
+        let (refreshed, polled) = (
+            refreshes.load(Ordering::SeqCst),
+            resource_calls.load(Ordering::SeqCst),
+        );
+        run(&id, false, false, true).await.unwrap();
+        let after = accounts::get(&id).unwrap().management;
+        assert_eq!(refreshes.load(Ordering::SeqCst), refreshed + 1);
+        assert_eq!(resource_calls.load(Ordering::SeqCst), polled);
+        assert_eq!(after.last_sync_at, before.last_sync_at);
+        assert_eq!(after.next_sync_at, before.next_sync_at);
     }
 }

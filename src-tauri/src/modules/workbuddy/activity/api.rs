@@ -3,7 +3,7 @@ use super::super::{
     accounts::{Account, Realm},
     client, resources,
 };
-use reqwest::{Method, StatusCode};
+use rquest::{Method, StatusCode};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -76,7 +76,7 @@ pub(super) async fn request(
     parse(response).await
 }
 
-async fn parse(response: reqwest::Response) -> Result<Value, Error> {
+async fn parse(response: rquest::Response) -> Result<Value, Error> {
     let http = response.status();
     if matches!(http, StatusCode::NOT_FOUND | StatusCode::GONE) {
         return Err(Error {

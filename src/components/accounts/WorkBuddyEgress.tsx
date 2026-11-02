@@ -122,7 +122,11 @@ export function WorkBuddyEgressCell({ accountId, view, disabled, onChange }: {
                 <option value="">{t('workbuddy.egress.auto')}</option>
                 <option value={DIRECT}>{t('workbuddy.egress.direct')}</option>
                 {missing && <option value={bound}>{t('workbuddy.egress.missing', { name: bound })}</option>}
-                {view.nodes.map(node => <option key={node.name} value={node.name}>{nodeLabel(node, t)}</option>)}
+                {view.nodes.map(node => {
+                    const taken = node.accounts > 0 && node.name !== bound;
+                    const label = nodeLabel(node, t);
+                    return <option key={node.name} value={node.name} disabled={taken}>{taken ? `${label} · ${t('workbuddy.egress.taken')}` : label}</option>;
+                })}
             </select>
             <button type="button" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-40 dark:hover:bg-gray-800 dark:hover:text-white"
                 disabled={disabled || busy} title={t('workbuddy.egress.test_account')} aria-label={t('workbuddy.egress.test_account')} onClick={() => void test()}>

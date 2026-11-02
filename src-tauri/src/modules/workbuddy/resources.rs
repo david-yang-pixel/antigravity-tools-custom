@@ -29,7 +29,7 @@ fn billing_base(realm: Realm) -> String {
     }
     .into()
 }
-async fn post(account: &Account, path: &str, body: &Value) -> Result<reqwest::Response, String> {
+async fn post(account: &Account, path: &str, body: &Value) -> Result<rquest::Response, String> {
     let headers = headers(account)?;
     client::http_for(account)
         .await?
@@ -41,10 +41,23 @@ async fn post(account: &Account, path: &str, body: &Value) -> Result<reqwest::Re
         .await
         .map_err(|_| "Cannot connect to WorkBuddy account resources".into())
 }
-pub(super) fn headers(account: &Account) -> Result<reqwest::header::HeaderMap, String> {
+pub(super) fn headers(account: &Account) -> Result<rquest::header::HeaderMap, String> {
     // Keep the per-account UA from client::headers; do not collapse every account
     // onto one shared WorkBuddy build string for billing/activity calls.
     let mut headers = client::headers(account.realm, Some(account))?;
+    // Billing and check-in use the single-segment product token. The chat
+    // User-Agent, including its CLI segment, stays on inference requests.
+    let version = if account.client.product_version.is_empty() {
+        super::identity::PRODUCT_VERSION
+    } else {
+        account.client.product_version.as_str()
+    };
+    headers.insert(
+        "user-agent",
+        format!("WorkBuddy/{version}")
+            .parse()
+            .map_err(|_| "Invalid WorkBuddy resource header")?,
+    );
     for (key, value) in [
         ("x-enterprise-id", account.enterprise_id.as_str()),
         ("x-tenant-id", account.enterprise_id.as_str()),
@@ -130,7 +143,7 @@ pub async fn credits(account: &Account) -> Result<Credits, String> {
             "/billing/meter/get-user-resource"
         };
         let mut response = post(account, path, &body).await?;
-        if account.realm == Realm::Global && response.status() == reqwest::StatusCode::NOT_FOUND {
+        if account.realm == Realm::Global && response.status() == rquest::StatusCode::NOT_FOUND {
             response = post(account, "/v2/billing/meter/get-user-resource", &body).await?;
         }
         let value = client::json_response(response).await?;
@@ -159,7 +172,7 @@ pub async fn checkin(account: &Account) -> Result<&'static str, String> {
     checkin_response(response).await
 }
 
-async fn checkin_response(response: reqwest::Response) -> Result<&'static str, String> {
+async fn checkin_response(response: rquest::Response) -> Result<&'static str, String> {
     let status = response.status();
     // Tencent returns HTTP 400 for an already completed daily check-in.
     // Inspect only this endpoint's bounded business response, not all HTTP errors.
@@ -182,7 +195,7 @@ async fn checkin_response(response: reqwest::Response) -> Result<&'static str, S
         && ["今天已签到", "今日已签到", "already checked in today"]
             .iter()
             .any(|marker| message.contains(marker));
-    if already && (status.is_success() || status == reqwest::StatusCode::BAD_REQUEST) {
+    if already && (status.is_success() || status == rquest::StatusCode::BAD_REQUEST) {
         return Ok("already");
     }
     if status.is_success() && code == Some(0) {

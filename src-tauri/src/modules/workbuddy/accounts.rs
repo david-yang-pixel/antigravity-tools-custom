@@ -244,9 +244,33 @@ pub(super) fn all() -> Result<Vec<Account>, String> {
 fn runtime_key(id: &str) -> Result<String, String> {
     Ok(format!("{}:{id}", path()?.display()))
 }
+/// When this process last finished a real generation for the account.
+/// Restarts forget it, so background catalog traffic stays quiet until the next call.
+pub(super) fn last_generation_at(id: &str) -> i64 {
+    let Ok(key) = runtime_key(id) else {
+        return 0;
+    };
+    RUNTIME
+        .lock()
+        .ok()
+        .and_then(|pool| pool.get(&key).map(|entry| entry.health.last_success_at))
+        .unwrap_or(0)
+}
+#[cfg(test)]
+pub(super) fn note_generation_at(id: &str, at: i64) {
+    let Ok(key) = runtime_key(id) else {
+        return;
+    };
+    if let Ok(mut pool) = RUNTIME.lock() {
+        pool.entry(key).or_default().health.last_success_at = at;
+    }
+}
 pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
     // The draw journal is persisted for retry safety, not exposed in the admin UI.
     account.management.activity.pending_draw = None;
+    if !account.management.auto_checkin_chosen {
+        account.management.auto_checkin = false;
+    }
     let runtime = RUNTIME.lock().map_err(|_| "WorkBuddy pool unavailable")?;
     let entry = runtime.get(&runtime_key(&account.id)?);
     let status = if !account.enabled {
@@ -374,6 +398,10 @@ pub fn ensure_identities() -> Result<(), String> {
     let mut dirty = false;
     for account in &mut accounts {
         dirty |= super::identity::ensure(account);
+        if !account.management.auto_checkin_chosen && account.management.auto_checkin {
+            account.management.auto_checkin = false;
+            dirty = true;
+        }
     }
     if dirty {
         write(&accounts)?;
@@ -670,6 +698,7 @@ pub fn configure(
         }
         if let Some(value) = auto_checkin {
             m.auto_checkin = value;
+            m.auto_checkin_chosen = true;
         }
         if let Some(value) = keepalive {
             m.keepalive = value;
@@ -696,6 +725,7 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.enabled = old.enabled;
     account.management.managed = old.management.managed;
     account.management.auto_checkin = old.management.auto_checkin;
+    account.management.auto_checkin_chosen = old.management.auto_checkin_chosen;
     account.management.keepalive = old.management.keepalive;
     account.management.auto_rewards = old.management.auto_rewards;
     account.management.auto_lottery = old.management.auto_lottery;

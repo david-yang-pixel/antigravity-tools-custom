@@ -53,6 +53,9 @@ pub struct AccountAction {
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub realm: Realm,
+    /// Reauthorize this saved account through its own egress node.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct LoginSession {
@@ -104,7 +107,7 @@ pub async fn delete_workbuddy_account(request: AccountAction) -> Result<(), Stri
 }
 #[tauri::command]
 pub async fn start_workbuddy_login(request: LoginRequest) -> Result<login::Started, String> {
-    login::start(request.realm).await
+    login::start(request.realm, request.account_id.as_deref()).await
 }
 #[tauri::command]
 pub async fn poll_workbuddy_login(request: LoginSession) -> Result<login::Poll, String> {

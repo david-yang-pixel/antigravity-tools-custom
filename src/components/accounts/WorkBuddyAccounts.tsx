@@ -31,6 +31,8 @@ export default function WorkBuddyAccounts() {
     const [realm, setRealm] = useState<'cn' | 'global'>('cn');
     const [auth, setAuth] = useState('');
     const [login, setLogin] = useState<Login | null>(null);
+    /** Saved account being reauthorized through its own egress node; null adds a new account. */
+    const [reauth, setReauth] = useState<Account | null>(null);
     const [now, setNow] = useState(Date.now());
     const [deleting, setDeleting] = useState<Account | null>(null);
     const [egress, setEgress] = useState<EgressView | null>(null);
@@ -65,7 +67,7 @@ export default function WorkBuddyAccounts() {
                 const result = await request<{ status: string; account: Account | null }>('poll_workbuddy_login', { request: { id: login.id } });
                 if (cancelled) return;
                 if (result.status === 'ready' && result.account) {
-                    setLogin(null); setMode(null); setError(''); setBusy(result.account.id);
+                    setLogin(null); setMode(null); setReauth(null); setError(''); setBusy(result.account.id);
                     showToast(translate.current('workbuddy.accounts.authorized'), 'success');
                     await load();
                     try {
@@ -75,6 +77,7 @@ export default function WorkBuddyAccounts() {
                     finally { if (mounted.current) { setBusy(''); void load(); } }
                     return;
                 }
+                if (result.status === 'wrong_account' || result.status === 'reauthorize_from_row') { setError(translate.current(`workbuddy.accounts.${result.status}`)); setLogin(null); return; }
                 if (result.status === 'expired') { setError(translate.current('workbuddy.accounts.login_expired')); setLogin(null); return; }
                 setError('');
             } catch (e) { if (!cancelled) setError(String(e)); }
@@ -86,10 +89,10 @@ export default function WorkBuddyAccounts() {
             void request('cancel_workbuddy_login', { request: { id: login.id } }).catch(() => undefined);
         };
     }, [login, load]);
-    async function start() {
+    async function start(target: Account | null) {
         setBusy('login'); setError('');
         try {
-            const session = await request<Login>('start_workbuddy_login', { request: { realm } });
+            const session = await request<Login>('start_workbuddy_login', { request: target ? { realm: target.realm, account_id: target.id } : { realm } });
             if (mounted.current) { setNow(Date.now()); setLogin(session); }
             else await request('cancel_workbuddy_login', { request: { id: session.id } });
         } catch (e) { if (mounted.current) setError(String(e)); }
@@ -127,19 +130,19 @@ export default function WorkBuddyAccounts() {
             <div className="flex flex-wrap gap-2">
                 <button className={button} disabled={!!busy} onClick={() => { setError(''); void load(); void loadEgress(); }} aria-label={t('common.refresh')}><RefreshCw size={16} /></button>
                 <button className={button} disabled={!!busy || !!login} onClick={() => { setMode('import'); setError(''); }}><Upload size={16} />{t('workbuddy.accounts.import')}</button>
-                <button className={`${button} !border-blue-600 !bg-blue-600 text-white hover:!bg-blue-700`} disabled={!!busy || !!login} onClick={() => { setMode('login'); setError(''); }}><Plus size={16} />{t('workbuddy.accounts.add')}</button>
+                <button className={`${button} !border-blue-600 !bg-blue-600 text-white hover:!bg-blue-700`} disabled={!!busy || !!login} onClick={() => { setMode('login'); setReauth(null); setError(''); }}><Plus size={16} />{t('workbuddy.accounts.add')}</button>
             </div>
         </div>
         <WorkBuddyEgressPanel view={egress} onChange={setEgress} />
         {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{error}</div>}
         {mode && <div className="rounded-2xl border border-blue-200 bg-white p-5 dark:border-blue-900 dark:bg-gray-900">
-            <div className="mb-4 flex items-center justify-between"><h2 className="font-medium">{t(mode === 'login' ? 'workbuddy.accounts.add' : 'workbuddy.accounts.import')}</h2>
-                <button className={button} disabled={!!busy} aria-label={t('common.close')} onClick={() => { setLogin(null); setMode(null); setAuth(''); }}><X size={16} /></button></div>
+            <div className="mb-4 flex items-center justify-between"><h2 className="font-medium">{mode === 'import' ? t('workbuddy.accounts.import') : reauth ? t('workbuddy.accounts.reauthorize_title', { name: reauth.nickname || reauth.uid }) : t('workbuddy.accounts.add')}</h2>
+                <button className={button} disabled={!!busy} aria-label={t('common.close')} onClick={() => { setLogin(null); setMode(null); setReauth(null); setAuth(''); }}><X size={16} /></button></div>
             {mode === 'login' ? <div className="space-y-4">
-                <p className="text-sm text-gray-500">{t('workbuddy.accounts.login_hint')}</p>
+                <p className="text-sm text-gray-500">{t(reauth ? 'workbuddy.accounts.reauthorize_hint' : 'workbuddy.accounts.login_hint')}</p>
                 {!login ? <div className="flex flex-wrap items-end gap-3">
-                    <label className="space-y-1 text-sm"><span>{t('workbuddy.accounts.region')}</span><select className={input} value={realm} disabled={!!busy} onChange={e => setRealm(e.target.value as 'cn' | 'global')}><option value="cn">{t('workbuddy.accounts.cn')}</option><option value="global">{t('workbuddy.accounts.global')}</option></select></label>
-                    <button className={button} disabled={!!busy} onClick={start}>{busy === 'login' ? t('common.loading') : t('workbuddy.accounts.get_link')}</button>
+                    {!reauth && <label className="space-y-1 text-sm"><span>{t('workbuddy.accounts.region')}</span><select className={input} value={realm} disabled={!!busy} onChange={e => setRealm(e.target.value as 'cn' | 'global')}><option value="cn">{t('workbuddy.accounts.cn')}</option><option value="global">{t('workbuddy.accounts.global')}</option></select></label>}
+                    <button className={button} disabled={!!busy} onClick={() => void start(reauth)}>{busy === 'login' ? t('common.loading') : t('workbuddy.accounts.get_link')}</button>
                 </div> : <div className="flex flex-wrap items-center gap-4">
                     <a href={login.auth_url} onClick={async e => {
                         if (isTauri()) { e.preventDefault(); try { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(login.auth_url); } catch (error) { setError(String(error)); } }
@@ -162,7 +165,7 @@ export default function WorkBuddyAccounts() {
                         {['credits', 'health', 'expires', 'maintenance_column', 'automation_column'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t(`workbuddy.accounts.${key}`)}</th>)}
                         <th scope="col" className="sticky right-0 bg-gray-50 px-4 py-3 text-right font-medium shadow-[-12px_0_12px_-12px_rgba(0,0,0,0.12)] dark:bg-gray-800">{t('common.actions')}</th>
                     </tr></thead>
-                    <tbody>{visibleAccounts.map(account => <WorkBuddyAccountRow key={account.id} account={account} now={now} busy={!!busy} onChange={changes => void action(account, changes)} onDelete={() => setDeleting(account)}
+                    <tbody>{visibleAccounts.map(account => <WorkBuddyAccountRow key={account.id} account={account} now={now} busy={!!busy} onChange={changes => void action(account, changes)} onReauthorize={() => { setReauth(account); setLogin(null); setMode('login'); setError(''); }} onDelete={() => setDeleting(account)}
                         egress={<WorkBuddyEgressCell accountId={account.id} view={egress} disabled={!!busy} onChange={setEgress} />} />)}</tbody>
                 </table>
             </div>}

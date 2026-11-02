@@ -3,7 +3,7 @@ use super::{
     accounts::{self, AccountView, Realm},
     client, egress,
 };
-use reqwest::Method;
+use rquest::Method;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -19,7 +19,13 @@ struct Session {
     cancelled: bool,
     /// Egress node the whole authorization uses; the new account inherits it.
     node: Option<String>,
+    /// Keeps that node off the free list until the account is bound or this session ends.
+    hold: Option<egress::LoginHold>,
+    /// Reauthorization of this saved account: another account's sign-in is refused.
+    expected: Option<String>,
 }
+/// How long an authorization link stays valid.
+const SESSION_SECS: i64 = 600;
 static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Session>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Serialize)]
@@ -53,8 +59,35 @@ fn valid_auth_url(value: &str) -> bool {
             .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
         })
 }
-pub async fn start(realm: Realm) -> Result<Started, String> {
-    let route = egress::login_route(None).await?;
+/// Drops cancelled and expired sessions, which also releases their node holds.
+/// A session locked by an in-flight poll is kept until that poll finishes.
+fn purge(sessions: &mut HashMap<String, Arc<tokio::sync::Mutex<Session>>>) {
+    sessions.retain(|_, session| {
+        session
+            .try_lock()
+            .map(|s| !s.cancelled && s.expires_at > accounts::now())
+            .unwrap_or(true)
+    });
+}
+/// Starts an authorization. `account_id` reauthorizes that saved account through
+/// its own egress node; without it a new account takes a free node.
+pub async fn start(realm: Realm, account_id: Option<&str>) -> Result<Started, String> {
+    // Release abandoned sessions before choosing a node, or their holds hide it.
+    {
+        let mut sessions = SESSIONS
+            .lock()
+            .map_err(|_| "WorkBuddy authorization unavailable")?;
+        purge(&mut sessions);
+    }
+    let (realm, expected, preferred) = match account_id {
+        Some(id) => {
+            let account = accounts::get(id)?;
+            (account.realm, Some(account.id), egress::bound_node(id)?)
+        }
+        None => (realm, None, None),
+    };
+    let mut route = egress::login_route(preferred.as_deref()).await?;
+    let mut hold = route.hold.take();
     let data = client::call_with(
         &route.client,
         realm,
@@ -79,16 +112,14 @@ pub async fn start(realm: Realm) -> Result<Started, String> {
         .ok_or("WorkBuddy returned an invalid authorization URL")?
         .to_owned();
     let id = uuid::Uuid::new_v4().to_string();
-    let expires_at = accounts::now() + 600;
+    let expires_at = accounts::now() + SESSION_SECS;
+    if let Some(hold) = hold.as_mut() {
+        hold.hold_until(expires_at);
+    }
     let mut sessions = SESSIONS
         .lock()
         .map_err(|_| "WorkBuddy authorization unavailable")?;
-    sessions.retain(|_, session| {
-        session
-            .try_lock()
-            .map(|s| !s.cancelled && s.expires_at > accounts::now())
-            .unwrap_or(true)
-    });
+    purge(&mut sessions);
     if sessions.len() >= 32 {
         return Err(
             "Too many pending WorkBuddy authorizations; cancel an existing one or wait for expiry"
@@ -104,6 +135,8 @@ pub async fn start(realm: Realm) -> Result<Started, String> {
             completed: None,
             cancelled: false,
             node,
+            hold,
+            expected,
         })),
     );
     Ok(Started {
@@ -129,6 +162,17 @@ pub async fn cancel(id: &str) -> Result<(), String> {
         entry.lock().await.cancelled = true;
     }
     Ok(())
+}
+/// Ends a session whose sign-in must not be imported and frees its node at once.
+fn refuse(session: &mut Session, status: &'static str) -> Poll {
+    session.cancelled = true;
+    if let Some(hold) = session.hold.as_mut() {
+        hold.release();
+    }
+    Poll {
+        status,
+        account: None,
+    }
 }
 pub async fn poll(id: &str) -> Result<Poll, String> {
     let entry = session(id)?;
@@ -226,8 +270,26 @@ pub async fn poll(id: &str) -> Result<Poll, String> {
             account: None,
         });
     }
-    let account = accounts::upsert(accounts::parse_import(value)?)?;
+    let parsed = accounts::parse_import(value)?;
+    let existing = accounts::all()?
+        .into_iter()
+        .find(|a| a.uid == parsed.uid && a.realm == parsed.realm)
+        .map(|a| a.id);
+    if session.expected.is_some() && existing != session.expected {
+        return Ok(refuse(&mut session, "wrong_account"));
+    }
+    // A saved account keeps its node. A token for it issued through another
+    // address would tie that address to the account's identity, so refuse it.
+    if let Some(id) = &existing {
+        if egress::bound_node(id)?.is_some_and(|node| session.node.as_deref() != Some(&node)) {
+            return Ok(refuse(&mut session, "reauthorize_from_row"));
+        }
+    }
+    let account = accounts::upsert(parsed)?;
     egress::adopt(&account.id, session.node.as_deref());
+    if let Some(hold) = session.hold.as_mut() {
+        hold.release();
+    }
     session.completed = Some(account.id.clone());
     // Keep a completed session until TTL so a lost HTTP response cannot lose the result.
     Ok(Poll {
