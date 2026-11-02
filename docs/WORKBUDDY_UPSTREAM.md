@@ -18,7 +18,7 @@ WorkBuddy 账号管理、令牌刷新、模型同步和推理转发均内置在�
 
 「获取可用模型」不再向上游发送生成的验证短句。目录同步只更新候选列表；某个模型是否可调用，以下游真实请求的结果为准。
 
-模型管理「上游模型」里的 WorkBuddy「测试」只发送管理员当场填写的系统提示和用户消息（每项必填，最多 16 KiB），通过列出该模型的账号发起一次真实请求，不使用固定短句，也不附加 `max_tokens`。接口为 `verify_model_candidates` 带 `prompt: { "system": "…", "user": "…" }`；WorkBuddy 候选缺少 `prompt` 时直接拒绝，其他来源带 `prompt` 也会拒绝，WorkBuddy 与其他来源不能放在同一次测试里。测试内容只随这一次请求发送，服务端不保存；浏览器在本地记住上次填写的内容。
+模型管理「上游模型」里的 WorkBuddy「测试」只发送管理员当场填写的系统提示和用户消息（每项必填，最多 16 KiB），通过列出该模型的账号发起一次真实请求，不使用固定短句，也不附加 `max_tokens`；system 开头命中第三方 agent 特征时，与真实请求一样会在最前面加一行中性文本。接口为 `verify_model_candidates` 带 `prompt: { "system": "…", "user": "…" }`；WorkBuddy 候选缺少 `prompt` 时直接拒绝，其他来源带 `prompt` 也会拒绝，WorkBuddy 与其他来源不能放在同一次测试里。测试内容只随这一次请求发送，服务端不保存；浏览器在本地记住上次填写的内容。
 
 测试结果：调用通过记为已验证；上游明确返回无权限或模型不存在（11158 / 11102）记为不可用；其他失败只在本次结果里显示，不写入记录，也不撤销已有证据。旧版本固定短句探测留下的「验证失败」记录不再显示，这些模型显示为「未验证」。
 
@@ -121,10 +121,11 @@ headless 授权可通过这些接口发起，然后在任意浏览器打开返�
 - Responses 需要发送完整对话历史。不支持 `previous_response_id`、服务端 conversation / background、内置搜索等 hosted tools、custom tools 或 JSON schema 输出；明确返回参数错误，不会悄悄丢弃历史。函数工具可用。
 - 不支持 WorkBuddy 的 Gemini 原生、WebSocket、旧 Completions、独立计数、图片生成和音频接口。Gemini 模型列表不展示 WorkBuddy 模型。
 - 候选目录来自模型同步。调用方没有提供 system 消息时直接拒绝，不代写固定提示词；已有的 system / developer 内容会保留，并在需要时移到首条。
+- 国内网关会扫描每条 system 消息的开头，命中其「已知第三方 agent 提示」清单时返回 11128。发送前，网关检查每条 system 消息开头 512 个字符：某一行以 `You are` / `You're` / `Act as` / `你是` / `您是` 开场，或出现 `x-…billing…:`、`cc_version=` 这类客户端计费伪 Header，就在这条 system 消息最前面加一行中性文本 `Follow the instructions below.`。原文不删不改，未命中的消息逐字节不变，点名 WorkBuddy / CodeBuddy 的开头不处理。环境变量 `ABV_WORKBUDDY_SYSTEM_LEAD` 可以替换这行文本，设为空字符串则关闭此处理。腾讯的清单不公开，这是按常见 agent 开头做的广谱识别，不能保证覆盖全部。
 - `prompt_tokens` 已包含缓存命中，不重复累加；`prompt_cache_hit_tokens` 规范化为缓存读取量。没有真实 usage 或中断时，受共享监控现有估算和已收到内容范围限制。
 - 流中途报错或未完成就断开时，调用日志和结算标记失败，按次价格不扣费；已采集的用量仍按现有 token 价格规则结算。响应头已经发出时，客户端收到的是流读取错误，原 HTTP 200 无法改写。
 
-仅向固定腾讯官方 HTTPS 地址发送 WorkBuddy 凭据，不传递下游 Key、Cookie、用户 IP；禁止重定向。生成请求只打 `/v2/chat/completions`。渠道校验、403、404、429 和已经开始的流都不会换路径或换账号重放。还没收到 HTTP 响应的连接失败可以再试一个账号。
+仅向固定腾讯官方 HTTPS 地址发送 WorkBuddy 凭据，不传递下游 Key、Cookie、用户 IP；禁止重定向。生成请求只打 `/v2/chat/completions`。渠道校验、403、404、429 和已经开始的流都不会换路径或换账号重放。还没收到 HTTP 响应的连接失败可以再试一个账号。上游返回 11128（渠道校验）时，下游收到 HTTP 400 `workbuddy_channel_rejected`，说明是 system 提示开头命中了上游的第三方 agent 识别，需要调整提示开头；与账号、额度、网络无关，不冷却账号，换账号也不会改变结果。
 
 ## 验证和回退
 

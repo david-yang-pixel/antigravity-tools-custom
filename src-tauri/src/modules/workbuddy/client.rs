@@ -406,6 +406,63 @@ fn require_leading_system(payload: &mut Value) -> Result<(), ChatError> {
     ))
 }
 
+/// Default neutral first line for a system message that opens like a third-party
+/// agent prompt. Tencent's gateway rejects such openings with code 11128.
+pub const DEFAULT_SYSTEM_LEAD: &str = "Follow the instructions below.";
+
+/// The neutral first line, or `None` when normalization is turned off.
+/// `ABV_WORKBUDDY_SYSTEM_LEAD` replaces the default; an empty value disables it.
+fn system_lead() -> Option<String> {
+    lead_from(std::env::var("ABV_WORKBUDDY_SYSTEM_LEAD").ok())
+}
+fn lead_from(value: Option<String>) -> Option<String> {
+    match value {
+        Some(value) if value.trim().is_empty() => None,
+        Some(value) => Some(value.trim().to_owned()),
+        None => Some(DEFAULT_SYSTEM_LEAD.to_owned()),
+    }
+}
+
+/// Puts the neutral line in front of every system message whose opening looks like
+/// a third-party agent prompt. Detection is broad, the change is not: one line is
+/// added, nothing is removed or rewritten, and other messages stay byte-for-byte.
+fn neutralize_system_openings(payload: &mut Value) {
+    if let Some(lead) = system_lead() {
+        neutralize_with(payload, &lead);
+    }
+}
+fn neutralize_with(payload: &mut Value, lead: &str) {
+    let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    use crate::proxy::mappers::prompt_sanitizer::PromptSanitizer;
+    for message in messages.iter_mut().filter(|m| m["role"] == "system") {
+        match message.get_mut("content") {
+            Some(Value::String(text)) => {
+                if PromptSanitizer::opens_like_agent_prompt(text) {
+                    *text = format!("{lead}\n\n{text}");
+                }
+            }
+            Some(Value::Array(parts)) => {
+                let opening = parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if PromptSanitizer::opens_like_agent_prompt(&opening) {
+                    parts.insert(0, json!({"type":"text","text":lead}));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The numeric result code in an upstream error body, for callers outside this module.
+pub fn upstream_error_code(value: &Value) -> Option<i64> {
+    error_code(value)
+}
+
 pub(super) fn error_code(value: &Value) -> Option<i64> {
     let code = value.get("code").or_else(|| value.pointer("/error/code"))?;
     code.as_i64().or_else(|| {
@@ -476,6 +533,7 @@ pub async fn chat(
         }
     }
     require_leading_system(&mut payload)?;
+    neutralize_system_openings(&mut payload);
     let conversation = upstream_conversation_id(&session_key(scope, &payload));
     let mut h = headers(account.realm, Some(account)).map_err(ChatError::Account)?;
     add(&mut h, "accept", "application/json, text/event-stream").map_err(ChatError::Account)?;
@@ -973,5 +1031,79 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), 429);
+    }
+
+    #[test]
+    fn workbuddy_agent_openings_get_one_neutral_line_and_nothing_else_changes() {
+        let claude_code = "You are Claude Code, Anthropic's official CLI for Claude.\nRules.";
+        let mut payload = json!({"messages":[
+            {"role":"system","content":claude_code},
+            {"role":"system","content":[
+                {"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.3; cc_entrypoint=cli;"},
+                {"type":"text","text":"You are Claude Code."},
+            ]},
+            {"role":"system","content":"Answer in Chinese."},
+            {"role":"user","content":"You are great."},
+        ]});
+        let untouched = payload["messages"][2].clone();
+        let user = payload["messages"][3].clone();
+        neutralize_with(&mut payload, DEFAULT_SYSTEM_LEAD);
+        assert_eq!(
+            payload["messages"][0]["content"],
+            format!("{DEFAULT_SYSTEM_LEAD}\n\n{claude_code}")
+        );
+        let parts = payload["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], json!({"type":"text","text":DEFAULT_SYSTEM_LEAD}));
+        assert!(parts[1]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("x-anthropic-billing-header"));
+        // Non-matching system messages and every user message stay byte-for-byte.
+        assert_eq!(payload["messages"][2], untouched);
+        assert_eq!(payload["messages"][3], user);
+        // The default applies when unset, a value replaces it, and empty turns it off.
+        assert_eq!(lead_from(None).as_deref(), Some(DEFAULT_SYSTEM_LEAD));
+        assert_eq!(
+            lead_from(Some(" Custom. ".into())).as_deref(),
+            Some("Custom.")
+        );
+        assert_eq!(lead_from(Some("  ".into())), None);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_upstream_receives_the_neutral_line_before_an_agent_opening() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "STELLAR_TEST_WORKBUDDY_BASE",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let app = Router::new().route(
+            "/v2/chat/completions",
+            post(|Json(body): Json<Value>| async move { Json(body) }),
+        );
+        let _mock = Mock(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        let account =
+            super::super::accounts::parse_import(json!({"uid":"test","accessToken":"secret"}))
+                .unwrap();
+        let response = chat(
+            &account,
+            "model",
+            json!({"messages":[
+                {"role":"system","content":"You are opencode, an interactive CLI tool."},
+                {"role":"user","content":"hi"},
+            ]}),
+            "test",
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let body: Value = response.json().await.unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with(&format!("{DEFAULT_SYSTEM_LEAD}\n\nYou are opencode")));
+        assert_eq!(body["messages"][1]["content"], "hi");
     }
 }
