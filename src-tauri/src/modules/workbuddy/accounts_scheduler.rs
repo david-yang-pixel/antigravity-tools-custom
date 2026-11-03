@@ -9,6 +9,18 @@ pub struct Policy {
     pub preferred: Option<String>,
     pub breaker: crate::models::CircuitBreakerConfig,
 }
+impl Policy {
+    /// The half-open probe holds the model's only admission slot, so it must not wait
+    /// for a busy or cooling session account while other accounts are free.
+    pub fn for_probe(&self) -> Policy {
+        let mut policy = self.clone();
+        if policy.sticky.mode == SchedulingMode::CacheFirst {
+            policy.sticky.mode = SchedulingMode::Balance;
+        }
+        policy.sticky.max_wait_seconds = 0;
+        policy
+    }
+}
 
 struct Binding {
     account_id: String,
@@ -343,6 +355,60 @@ pub fn record_model_limit(
         hold
     );
     Some(hold)
+}
+
+/// When no account can take `model` because every eligible one is cooling, and at least
+/// one of them is cooling for this model, the model is rate-limited in effect. Hold it on
+/// its circuit until the first account frees up, so callers get a 429 with Retry-After
+/// rather than a 503, and a half-open circuit does not keep admitting a probe that has
+/// no account to go to. Accounts that are only busy are not a rate limit: `None`.
+pub fn hold_cooling_model(model: &str, policy: &Policy) -> Option<ModelLimited> {
+    if !policy.breaker.enabled {
+        return None;
+    }
+    let accounts = eligible(model, policy, false, &[]).ok()?;
+    if accounts.is_empty() {
+        return None;
+    }
+    let now = now();
+    let mut free_at = i64::MAX;
+    let mut cooling = 0usize;
+    let mut cause = None;
+    {
+        let pool = RUNTIME.lock().ok()?;
+        for account in &accounts {
+            let entry = pool.get(&runtime_key(&account.id).ok()?);
+            let account_until = entry.map_or(0, |e| e.cooldown_until);
+            let limit = entry.and_then(|e| e.models.get(model));
+            let model_until = limit.map_or(0, |m| m.until);
+            let until = account_until.max(model_until);
+            if until <= now {
+                return None;
+            }
+            if model_until > now {
+                cooling += 1;
+                cause.get_or_insert_with(|| limit.map(|m| m.reason.clone()).unwrap_or_default());
+            }
+            free_at = free_at.min(until);
+        }
+    }
+    if cooling == 0 {
+        return None;
+    }
+    let key = circuit_key(model).ok()?;
+    let mut circuits = CIRCUITS.lock().ok()?;
+    let circuit = circuits.entry(key).or_default();
+    circuit.open_until = circuit.open_until.max(free_at);
+    circuit.probing = false;
+    circuit.accounts = circuit.accounts.max(cooling);
+    if circuit.reason.is_empty() {
+        circuit.reason = cause.unwrap_or_default();
+    }
+    Some(ModelLimited {
+        retry_after: circuit.open_until.saturating_sub(now).max(1),
+        accounts: circuit.accounts,
+        reason: circuit.reason.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -685,6 +751,74 @@ mod tests {
         record_model_limit("model", &b, "code 1", 60, &policy);
         assert!(admit_model("model", &off).unwrap().is_none());
         assert_eq!(record_model_limit("model", &a, "code 1", 60, &off), None);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_every_account_cooling_for_a_model_holds_it_until_the_first_frees() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed("a");
+        let b = seed("b");
+        let policy = Policy::default();
+        let set = |id: &str, until: i64| {
+            RUNTIME
+                .lock()
+                .unwrap()
+                .entry(runtime_key(id).unwrap())
+                .or_default()
+                .models
+                .insert(
+                    "model".into(),
+                    super::super::ModelCooldown {
+                        until,
+                        reason: "limited".into(),
+                        consecutive: 1,
+                    },
+                );
+        };
+        // One account still free: not held.
+        set(&a, now() + 300);
+        assert!(hold_cooling_model("model", &policy).is_none());
+        // Both cooling: held until the earlier one frees, whatever the circuit said.
+        set(&b, now() + 90);
+        let limited = hold_cooling_model("model", &policy).unwrap();
+        assert!((89..=90).contains(&limited.retry_after));
+        assert_eq!(limited.accounts, 2);
+        assert_eq!(limited.reason, "limited");
+        assert!((89..=90).contains(&admit_model("model", &policy).unwrap_err().retry_after));
+        // Busy is not a rate limit, nor is an account-wide cooldown alone.
+        clear_cooldowns(None);
+        let first = acquire("model", "", &policy, 5).await.unwrap();
+        let second = acquire("model", "", &policy, 5).await.unwrap();
+        let third = acquire("model", "", &policy, 5).await.unwrap();
+        let fourth = acquire("model", "", &policy, 5).await.unwrap();
+        assert!(acquire("model", "", &policy, 5).await.is_err());
+        assert!(hold_cooling_model("model", &policy).is_none());
+        first.failure("down", 60);
+        second.failure("down", 60);
+        third.failure("down", 60);
+        fourth.failure("down", 60);
+        drop((first, second, third, fourth));
+        assert!(acquire("model", "", &policy, 5).await.is_err());
+        assert!(hold_cooling_model("model", &policy).is_none());
+        // With the breaker off nothing is held.
+        clear_cooldowns(None);
+        set(&a, now() + 60);
+        set(&b, now() + 60);
+        let mut off = Policy::default();
+        off.breaker.enabled = false;
+        assert!(hold_cooling_model("model", &off).is_none());
+    }
+
+    #[test]
+    fn workbuddy_probe_policy_never_waits_for_its_session_account() {
+        let mut policy = Policy::default();
+        policy.sticky.mode = SchedulingMode::CacheFirst;
+        policy.sticky.max_wait_seconds = 120;
+        let probe = policy.for_probe();
+        assert!(probe.sticky.mode == SchedulingMode::Balance);
+        assert_eq!(probe.sticky.max_wait_seconds, 0);
+        policy.sticky.mode = SchedulingMode::PerformanceFirst;
+        assert!(policy.for_probe().sticky.mode == SchedulingMode::PerformanceFirst);
     }
 
     #[tokio::test]
