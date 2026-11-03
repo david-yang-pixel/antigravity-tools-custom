@@ -1417,6 +1417,62 @@ async fn workbuddy_failed_probe_reopens_and_different_reasons_do_not_add_up() {
 }
 
 #[tokio::test]
+async fn workbuddy_probe_without_a_free_account_holds_the_model_instead_of_503() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(2, &["limited", "limited"]).await;
+    let policy = Policy::default();
+    for _ in 0..2 {
+        send(false, policy.clone()).await;
+    }
+    assert_eq!(hits(&script).len(), 2);
+    // The circuit's hold ends while both accounts are still cooling for the model.
+    workbuddy::accounts::scheduling::expire_model_circuits();
+    for _ in 0..2 {
+        let (status, retry_after, code, _) = error_of(send(false, policy.clone()).await).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(code, "workbuddy_model_rate_limited");
+        let wait: i64 = retry_after.unwrap().parse().unwrap();
+        assert!((1..=60).contains(&wait));
+    }
+    assert!(hits(&script).is_empty());
+    // An account that is merely busy is still a 503, not a rate limit.
+    workbuddy::accounts::scheduling::clear_cooldowns(None);
+    let leases: Vec<_> = (0..4)
+        .map(|_| workbuddy::accounts::acquire("claude-sonnet-4-6").unwrap())
+        .collect();
+    let (status, _, code, _) = error_of(send(false, policy).await).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(code, "workbuddy_account_unavailable");
+    drop(leases);
+}
+
+#[tokio::test]
+async fn workbuddy_cache_first_probe_does_not_wait_for_its_cooling_session_account() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(3, &["limited", "limited"]).await;
+    // Balance keeps a session binding and moves it when the bound account cools.
+    let balance = Policy::default();
+    for _ in 0..2 {
+        send(false, balance.clone()).await;
+    }
+    let spent = hits(&script);
+    assert_eq!(spent.len(), 2);
+    workbuddy::accounts::scheduling::expire_model_circuits();
+    // The session is bound to an account still cooling for the model. Cache-first would
+    // wait for it while holding the only probe slot; the probe takes the free account.
+    let mut cache_first = Policy::default();
+    cache_first.sticky.mode = crate::proxy::sticky_config::SchedulingMode::CacheFirst;
+    cache_first.sticky.max_wait_seconds = 5;
+    let started = tokio::time::Instant::now();
+    let response = send(false, cache_first).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let probe = hits(&script);
+    assert_eq!(probe.len(), 1);
+    assert!(!spent.contains(&probe[0]));
+}
+
+#[tokio::test]
 async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alias() {
     let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
     let _mock = mock().await;

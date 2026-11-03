@@ -252,21 +252,34 @@ async fn forward(
     let session = workbuddy::client::session_key(scope, &payload);
     // A model the upstream is rate-limiting across accounts is held here, before it can
     // spend another account. The probe guard (if any) lives until this request ends.
-    let _probe = match workbuddy::accounts::scheduling::admit_model(target, &policy) {
+    let probe = match workbuddy::accounts::scheduling::admit_model(target, &policy) {
         Ok(probe) => probe,
         Err(limited) => return model_limited(target, &limited),
     };
+    let admission = if probe.is_some() {
+        policy.for_probe()
+    } else {
+        policy.clone()
+    };
     let mut lease =
-        match workbuddy::accounts::scheduling::acquire(target, &session, &policy, timeout).await {
+        match workbuddy::accounts::scheduling::acquire(target, &session, &admission, timeout).await
+        {
             Ok(lease) => lease,
             Err(message) => {
+                // Every account cooling for this model is a rate limit, not an outage.
+                if let Some(limited) =
+                    workbuddy::accounts::scheduling::hold_cooling_model(target, &policy)
+                {
+                    return model_limited(target, &limited);
+                }
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "workbuddy_account_unavailable",
                     &message,
-                )
+                );
             }
         };
+    let _probe = probe;
     let mut tried = Vec::new();
     let mut failovers = 0usize;
     loop {
