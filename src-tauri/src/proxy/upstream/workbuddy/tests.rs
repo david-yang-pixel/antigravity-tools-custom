@@ -1139,6 +1139,10 @@ async fn scripted(
         ))),
         "empty" => sse(Body::from("data: [DONE]\n\n")),
         "channel" => (StatusCode::FORBIDDEN, Json(json!({"code":11128}))).into_response(),
+        "limited" => (StatusCode::TOO_MANY_REQUESTS, Json(json!({"code":14003}))).into_response(),
+        "limited-other" => {
+            (StatusCode::TOO_MANY_REQUESTS, Json(json!({"code":14004}))).into_response()
+        }
         "partial-error" => sse(Body::from_stream(async_stream::stream! {
             yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("data: {}\n\n",
                 json!({"choices":[{"delta":{"content":"partial"}}]}))));
@@ -1295,6 +1299,121 @@ async fn workbuddy_http_rejection_does_not_walk_the_pool() {
     };
     assert_eq!(send(false, policy).await.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(hits(&script).len(), 1);
+}
+
+async fn error_of(response: Response) -> (StatusCode, Option<String>, String, String) {
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .map(|v| v.to_str().unwrap().to_owned());
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    (
+        status,
+        retry_after,
+        body["error"]["code"].as_str().unwrap().to_owned(),
+        body["error"]["message"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn workbuddy_model_rate_limit_stops_spending_accounts() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    // The production incident: every account answers 429 {"code":14003} for one model
+    // and the client retries every few seconds.
+    let (_mock, script) = scripted_pool(5, &["limited"; 7]).await;
+    let policy = Policy::default();
+    for _ in 0..2 {
+        let (status, retry_after, code, message) =
+            error_of(send(false, policy.clone()).await).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(code, "workbuddy_upstream_rate_limited");
+        assert_eq!(retry_after.as_deref(), Some("60"));
+        assert!(message.contains("14003") && message.contains("claude-sonnet-4-6"));
+        assert!(!message.contains("refresh account authorization"));
+    }
+    // Two accounts agreeing is enough: the rest are held locally, no account is spent.
+    for streaming in [true, false, true, false, true] {
+        let (status, retry_after, code, message) =
+            error_of(send(streaming, policy.clone()).await).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(code, "workbuddy_model_rate_limited");
+        let wait: i64 = retry_after.unwrap().parse().unwrap();
+        assert!((1..=60).contains(&wait));
+        assert!(message.contains("2 account(s)") && message.contains("code 14003"));
+    }
+    let spent = hits(&script);
+    assert_eq!(spent.len(), 2);
+    assert_ne!(spent[0], spent[1]);
+    let accounts = workbuddy::accounts::list().unwrap();
+    // Only the limited model is cooled; no account as a whole is.
+    assert!(accounts
+        .iter()
+        .all(|a| a.cooldown_until == 0 && a.in_flight == 0 && a.status == "ready"));
+    assert_eq!(
+        accounts
+            .iter()
+            .filter(|a| a.model_cooldowns.len() == 1)
+            .count(),
+        2
+    );
+    // After the hold one probe goes out, to an account that was not limited; its
+    // success closes the circuit and traffic resumes.
+    workbuddy::accounts::scheduling::expire_model_circuits();
+    script.outcomes.lock().unwrap().clear();
+    let response = send(true, policy.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), 100_000).await.unwrap();
+    let probe = hits(&script);
+    assert_eq!(probe.len(), 1);
+    assert!(!spent.contains(&probe[0]));
+    assert_eq!(send(false, policy).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn workbuddy_failed_probe_reopens_and_different_reasons_do_not_add_up() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let (_mock, script) = scripted_pool(4, &["limited", "limited-other", "ok"]).await;
+    let policy = Policy::default();
+    // Two 429s with different upstream codes are not one model-wide limit.
+    for _ in 0..2 {
+        assert_eq!(
+            error_of(send(false, policy.clone()).await).await.2,
+            "workbuddy_upstream_rate_limited"
+        );
+    }
+    assert_eq!(send(false, policy.clone()).await.status(), StatusCode::OK);
+    assert_eq!(hits(&script).len(), 3);
+    // The success closed nothing open, but matching codes now open the circuit.
+    script
+        .outcomes
+        .lock()
+        .unwrap()
+        .extend(["limited", "limited", "limited"]);
+    for _ in 0..2 {
+        send(false, policy.clone()).await;
+    }
+    assert_eq!(
+        error_of(send(false, policy.clone()).await).await.2,
+        "workbuddy_model_rate_limited"
+    );
+    assert_eq!(hits(&script).len(), 2);
+    // A failed probe reopens at the next backoff step.
+    workbuddy::accounts::scheduling::expire_model_circuits();
+    workbuddy::accounts::scheduling::clear_cooldowns(Some(
+        &workbuddy::accounts::list().unwrap()[0].id,
+    ));
+    let (status, retry_after, code, _) = error_of(send(false, policy.clone()).await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code, "workbuddy_upstream_rate_limited");
+    assert_eq!(retry_after.as_deref(), Some("300"));
+    assert_eq!(hits(&script).len(), 1);
+    assert_eq!(
+        error_of(send(false, policy).await).await.2,
+        "workbuddy_model_rate_limited"
+    );
+    assert!(hits(&script).is_empty());
 }
 
 #[tokio::test]

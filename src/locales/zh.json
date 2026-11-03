@@ -2180,6 +2180,7 @@
       "cooldown": "冷却状态",
       "cooldown_remaining": "冷却中 · {{time}} 后可调度",
       "no_cooldown": "未冷却",
+      "model_cooldown_remaining": "{{model}} 被限流 · {{time}} 后可调度",
       "hours_remaining": "（剩余约 {{hours}} 小时）",
       "credit_expiry": "最近积分到期",
       "credit_expiry_value": "{{amount}} 积分 · {{time}}",

@@ -2214,6 +2214,7 @@
       "cooldown": "Cooldown",
       "cooldown_remaining": "Available again in {{time}}",
       "no_cooldown": "None",
+      "model_cooldown_remaining": "{{model}} rate-limited · {{time}}",
       "hours_remaining": "(~{{hours}} hours left)",
       "credit_expiry": "Next credit expiry",
       "credit_expiry_value": "{{amount}} credits · {{time}}",

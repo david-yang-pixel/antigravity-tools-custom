@@ -8,6 +8,7 @@ export interface WorkBuddyAccount {
     expires_at: number; models: { id: string; name: string }[]; last_error: string | null;
     candidate_model_count?: number; models_verified_at?: number;
     status: string; in_flight: number; cooldown_until: number; cooldown_reason: string | null;
+    model_cooldowns?: { model: string; until: number; reason: string }[];
     health: { successes: number; failures: number; consecutive_failures: number; last_success_at: number; last_failure_at: number; last_error: string | null };
     management: {
         managed: boolean; auto_checkin: boolean; keepalive: boolean;
@@ -35,6 +36,8 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onRe
     const shortDate = (at: number) => new Date(at * 1000).toLocaleDateString();
     const shortTime = (at: number) => new Date(at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const seconds = Math.max(0, Math.ceil(account.cooldown_until - now / 1000));
+    const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    const limited = (account.model_cooldowns ?? []).map(c => ({ ...c, seconds: Math.max(0, Math.ceil(c.until - now / 1000)) })).filter(c => c.seconds > 0);
     const lifetime = Math.max(0, Math.ceil((account.expires_at - now / 1000) / 3600));
     const total = h.successes + h.failures;
     const health = h.consecutive_failures > 0 ? 'degraded' : h.successes > 0 ? 'healthy' : 'unknown';
@@ -65,7 +68,8 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onRe
             </td>
             <td className={`${cell} whitespace-nowrap`}>
                 <span title={t('workbuddy.accounts.health_hint')} className={health === 'healthy' ? 'text-green-700 dark:text-green-400' : health === 'degraded' ? 'text-amber-700 dark:text-amber-400' : 'text-gray-500'}>{t(`workbuddy.accounts.health_${health}`)}{total > 0 && <span className="ml-2 text-xs tabular-nums">{Math.round(h.successes / total * 100)}%</span>}</span>
-                <div className={`${muted} tabular-nums`} title={account.cooldown_reason || undefined}>{seconds ? t('workbuddy.accounts.cooldown_remaining', { time: `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` }) : t('workbuddy.accounts.no_cooldown')}</div>
+                <div className={`${muted} tabular-nums`} title={account.cooldown_reason || undefined}>{seconds ? t('workbuddy.accounts.cooldown_remaining', { time: clock(seconds) }) : limited.length ? null : t('workbuddy.accounts.no_cooldown')}</div>
+                {limited.map(c => <div key={c.model} className="mt-1 max-w-56 truncate text-xs tabular-nums text-amber-700 dark:text-amber-400" title={c.reason}>{t('workbuddy.accounts.model_cooldown_remaining', { model: c.model, time: clock(c.seconds) })}</div>)}
             </td>
             <td className={`${cell} whitespace-nowrap`} title={account.expires_at > 0 ? date(account.expires_at) : undefined}>
                 <div>{account.expires_at > 0 ? shortDate(account.expires_at) : t('workbuddy.accounts.unknown_expiry')}</div>

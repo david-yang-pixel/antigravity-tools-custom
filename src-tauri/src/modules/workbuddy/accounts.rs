@@ -88,6 +88,14 @@ pub struct AccountView {
     pub health: Health,
     pub cooldown_until: i64,
     pub cooldown_reason: Option<String>,
+    /// Models this account may not serve right now while its other models stay schedulable.
+    pub model_cooldowns: Vec<ModelCooldownView>,
+}
+#[derive(Clone, Serialize)]
+pub struct ModelCooldownView {
+    pub model: String,
+    pub until: i64,
+    pub reason: String,
 }
 #[derive(Clone, Default, Serialize)]
 pub struct Health {
@@ -121,6 +129,38 @@ struct Runtime {
     in_flight: usize,
     last_used: u64,
     cooldown_until: i64,
+    /// Upstream rate limits are often per model (quota, model-wide throttling), so they
+    /// cool only that model on this account instead of the whole account.
+    models: HashMap<String, ModelCooldown>,
+}
+#[derive(Default)]
+struct ModelCooldown {
+    until: i64,
+    reason: String,
+    consecutive: u64,
+}
+impl Runtime {
+    fn schedulable(&self, model: &str, now: i64) -> bool {
+        self.cooldown_until <= now && self.models.get(model).is_none_or(|m| m.until <= now)
+    }
+}
+/// Cooldown for the `consecutive`-th failure in a row: the caller's minimum, raised to
+/// the configured backoff step.
+fn backoff_seconds(
+    breaker: &crate::models::CircuitBreakerConfig,
+    consecutive: u64,
+    seconds: i64,
+) -> i64 {
+    let step = breaker
+        .backoff_steps
+        .get(
+            (consecutive.saturating_sub(1) as usize)
+                .min(breaker.backoff_steps.len().saturating_sub(1)),
+        )
+        .copied()
+        .unwrap_or(60)
+        .min(86400) as i64;
+    seconds.max(step).clamp(1, 86400)
 }
 #[derive(Deserialize, Serialize)]
 struct Envelope {
@@ -291,6 +331,21 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         "ready"
     };
     let models = account.available_models();
+    let current = now();
+    let mut model_cooldowns: Vec<_> = entry
+        .map(|e| {
+            e.models
+                .iter()
+                .filter(|(_, m)| m.until > current)
+                .map(|(model, m)| ModelCooldownView {
+                    model: model.clone(),
+                    until: m.until,
+                    reason: m.reason.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    model_cooldowns.sort_by(|a, b| a.model.cmp(&b.model));
     Ok(AccountView {
         id: account.id,
         uid: account.uid,
@@ -308,6 +363,7 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         health: entry.map(|e| e.health.clone()).unwrap_or_default(),
         cooldown_until: entry.map(|e| e.cooldown_until).unwrap_or(0),
         cooldown_reason: entry.and_then(|e| e.cooldown_reason.clone()),
+        model_cooldowns,
     })
 }
 pub fn list() -> Result<Vec<AccountView>, String> {
@@ -901,6 +957,8 @@ pub fn parse_import(value: Value) -> Result<Account, String> {
 
 pub struct Lease {
     pub account: Account,
+    /// The native model this lease was admitted for.
+    model: String,
     key: String,
     finished: std::sync::atomic::AtomicBool,
     breaker: crate::models::CircuitBreakerConfig,
@@ -929,6 +987,7 @@ impl Lease {
                 entry.health.consecutive_failures = 0;
                 entry.health.last_success_at = now();
                 entry.health.last_error = None;
+                entry.models.remove(&self.model);
             }
         }
         // Piggyback domestic reward collection on real usage so it is not a lonely cron.
@@ -956,21 +1015,41 @@ impl Lease {
                 entry.health.last_failure_at = now();
                 entry.health.last_error = Some(reason.into());
                 if self.breaker.enabled {
-                    let step = self
-                        .breaker
-                        .backoff_steps
-                        .get(
-                            (entry.health.consecutive_failures.saturating_sub(1) as usize)
-                                .min(self.breaker.backoff_steps.len().saturating_sub(1)),
-                        )
-                        .copied()
-                        .unwrap_or(60)
-                        .min(86400) as i64;
-                    entry.cooldown_until = now().saturating_add(seconds.max(step).clamp(1, 86400));
+                    let hold =
+                        backoff_seconds(&self.breaker, entry.health.consecutive_failures, seconds);
+                    entry.cooldown_until = now().saturating_add(hold);
                     entry.cooldown_reason = Some(reason.into());
                 }
             }
         }
+    }
+    /// An upstream rate limit for this lease's model: the account keeps serving its
+    /// other models. Returns the cooldown applied (0 with the breaker off).
+    pub fn model_failure(&self, reason: &str, seconds: i64) -> i64 {
+        if self
+            .finished
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return 0;
+        }
+        let Ok(mut pool) = RUNTIME.lock() else {
+            return 0;
+        };
+        let Some(entry) = pool.get_mut(&self.key) else {
+            return 0;
+        };
+        entry.health.failures += 1;
+        entry.health.last_failure_at = now();
+        entry.health.last_error = Some(reason.into());
+        if !self.breaker.enabled {
+            return 0;
+        }
+        let model = entry.models.entry(self.model.clone()).or_default();
+        model.consecutive += 1;
+        let hold = backoff_seconds(&self.breaker, model.consecutive, seconds);
+        model.until = now().saturating_add(hold);
+        model.reason = reason.into();
+        hold
     }
     #[cfg(test)]
     pub fn cooldown(&self, seconds: i64) {
