@@ -250,6 +250,12 @@ async fn forward(
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.clamp(1, 3600));
     let session = workbuddy::client::session_key(scope, &payload);
+    // A model the upstream is rate-limiting across accounts is held here, before it can
+    // spend another account. The probe guard (if any) lives until this request ends.
+    let _probe = match workbuddy::accounts::scheduling::admit_model(target, &policy) {
+        Ok(probe) => probe,
+        Err(limited) => return model_limited(target, &limited),
+    };
     let mut lease =
         match workbuddy::accounts::scheduling::acquire(target, &session, &policy, timeout).await {
             Ok(lease) => lease,
@@ -266,7 +272,8 @@ async fn forward(
     loop {
         tried.push(lease.account.id.clone());
         let failure = match attempt(
-            lease, &payload, streaming, alias, target, protocol, namespaced, scope, deadline,
+            lease, &payload, streaming, alias, target, protocol, namespaced, scope, &policy,
+            deadline,
         )
         .await
         {
@@ -309,6 +316,7 @@ async fn attempt(
     protocol: codec::Protocol,
     namespaced: &codec::Namespaced,
     scope: &str,
+    policy: &Policy,
     deadline: tokio::time::Instant,
 ) -> Result<Response, Failure> {
     let account = match workbuddy::accounts::fresh_before(&lease.account.id, deadline).await {
@@ -396,21 +404,55 @@ async fn attempt(
                 CHANNEL_REJECTED_MESSAGE,
             ));
         }
+        // A rate limit is about this model (its quota or upstream throttling): it cools
+        // only this model on this account and counts toward the model-wide circuit.
+        // Like every HTTP response it stays on this account rather than walking the pool.
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let signature =
+                code.map_or_else(|| "no result code".to_owned(), |c| format!("code {c}"));
+            let minimum = retry_after.filter(|s| *s > 0).unwrap_or(60);
+            let cooled = lease.model_failure(
+                &format!("Upstream HTTP 429 for {target} ({signature})"),
+                minimum,
+            );
+            let held = workbuddy::accounts::scheduling::record_model_limit(
+                target,
+                &lease.account.id,
+                &signature,
+                minimum,
+                policy,
+            );
+            let wait = held.unwrap_or(cooled).max(minimum);
+            let mut response = error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "workbuddy_upstream_rate_limited",
+                &format!("WorkBuddy is rate-limiting model {target} (HTTP 429, {signature}). This is a model quota or upstream rate limit, not an authorization problem; retry after {wait}s or use another model."),
+            );
+            set_retry_after(&mut response, wait);
+            return Err(Failure {
+                response,
+                retry: false,
+            });
+        }
         // A request rejected for its own shape says nothing about the account, so it
-        // must not cool the account down for every other caller. Any HTTP response
-        // stays on this account either way.
+        // must not cool the account down for every other caller.
         if retryable_status(status) {
             lease.failure(
                 &format!("Upstream HTTP {}", status.as_u16()),
-                retry_after.unwrap_or(if status.as_u16() == 429 { 60 } else { 15 }),
+                retry_after.unwrap_or(15),
             );
         }
         return Err(Failure {
-            response: error(if status.as_u16() == 429 { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::BAD_GATEWAY },
-                "workbuddy_upstream_rejected", &format!("WorkBuddy returned HTTP {}; refresh account authorization or check model availability",status.as_u16())),
+            response: error(
+                StatusCode::BAD_GATEWAY,
+                "workbuddy_upstream_rejected",
+                &format!("WorkBuddy returned HTTP {}; refresh account authorization or check model availability", status.as_u16()),
+            ),
             retry: false,
         });
     }
+    // Only a rate limit opens the model circuit, so any accepted response closes it.
+    workbuddy::accounts::scheduling::model_accepted(target);
     if !upstream
         .headers()
         .get(header::CONTENT_TYPE)
@@ -554,6 +596,29 @@ async fn attempt(
             Err(failed("workbuddy_incomplete_response", &message))
         }
     }
+}
+
+fn set_retry_after(response: &mut Response, seconds: i64) {
+    if let Ok(value) = seconds.max(1).to_string().parse() {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+}
+
+/// The local answer while a model's circuit is open: no account is spent on it.
+fn model_limited(
+    target: &str,
+    limited: &workbuddy::accounts::scheduling::ModelLimited,
+) -> Response {
+    let mut response = error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "workbuddy_model_rate_limited",
+        &format!(
+            "WorkBuddy is rate-limiting model {target} across {} account(s) ({}). The gateway is holding requests for this model instead of spending more accounts; retry after {}s or use another model.",
+            limited.accounts, limited.reason, limited.retry_after
+        ),
+    );
+    set_retry_after(&mut response, limited.retry_after);
+    response
 }
 
 /// Token Stats key (`X-Account-Email`). Identity is realm + uid only.

@@ -39,11 +39,16 @@ pub fn clear_cooldowns(account_id: Option<&str>) -> bool {
     let mut cleared = false;
     for (key, entry) in pool.iter_mut() {
         if key.starts_with(&prefix) && account_id.is_none_or(|id| key == &format!("{prefix}{id}")) {
-            cleared |= entry.cooldown_until > 0;
+            cleared |= entry.cooldown_until > 0 || !entry.models.is_empty();
             entry.cooldown_until = 0;
             entry.cooldown_reason = None;
             entry.health.consecutive_failures = 0;
+            entry.models.clear();
         }
+    }
+    drop(pool);
+    if account_id.is_none() {
+        cleared |= clear_model_circuits();
     }
     wake();
     cleared
@@ -70,14 +75,13 @@ pub fn try_acquire_excluding(
     try_acquire_inner(model, session, policy, false, excluded)
 }
 
-fn try_acquire_inner(
+fn eligible(
     model: &str,
-    session: &str,
     policy: &Policy,
     probe: bool,
     excluded: &[String],
-) -> Result<Option<Lease>, String> {
-    let accounts: Vec<_> = all()?
+) -> Result<Vec<Account>, String> {
+    Ok(all()?
         .into_iter()
         .filter(|a| {
             a.enabled
@@ -89,7 +93,17 @@ fn try_acquire_inner(
         })
         .filter(|a| policy.preferred.as_ref().is_none_or(|id| &a.id == id))
         .filter(|a| !excluded.contains(&a.id))
-        .collect();
+        .collect())
+}
+
+fn try_acquire_inner(
+    model: &str,
+    session: &str,
+    policy: &Policy,
+    probe: bool,
+    excluded: &[String],
+) -> Result<Option<Lease>, String> {
+    let accounts = eligible(model, policy, probe, excluded)?;
     if accounts.is_empty() {
         return Err("No eligible WorkBuddy account for this model; check the fixed account, enablement and fetch verified models".into());
     }
@@ -115,7 +129,7 @@ fn try_acquire_inner(
         let key = runtime_key(&account.id)?;
         let entry = pool.entry(key.clone()).or_default();
         let available =
-            entry.in_flight < 2 && (!policy.breaker.enabled || entry.cooldown_until <= now);
+            entry.in_flight < 2 && (!policy.breaker.enabled || entry.schedulable(model, now));
         if bound.as_ref() == Some(&account.id)
             && !available
             && policy.sticky.mode == SchedulingMode::CacheFirst
@@ -165,10 +179,189 @@ fn try_acquire_inner(
     }
     Ok(Some(Lease {
         account,
+        model: model.to_owned(),
         key,
         finished: std::sync::atomic::AtomicBool::new(false),
         breaker: policy.breaker.clone(),
     }))
+}
+
+/// Model-wide circuit for upstream rate limits. When several accounts get the same
+/// HTTP 429 for one model in a short window, the limit is about the model (quota or
+/// upstream throttling), not the accounts: further requests are held locally with a
+/// Retry-After instead of each one spending another account. After the hold a single
+/// probe is let through; any accepted response closes the circuit, another 429
+/// reopens it at the next backoff step.
+#[derive(Default)]
+struct ModelCircuit {
+    /// Recent 429s as (account, upstream signature, unix seconds); one per account.
+    strikes: Vec<(String, String, i64)>,
+    open_until: i64,
+    /// Consecutive openings without an accepted response in between.
+    trips: u64,
+    reason: String,
+    accounts: usize,
+    probing: bool,
+}
+static CIRCUITS: LazyLock<Mutex<HashMap<String, ModelCircuit>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// How long a 429 counts toward opening the model circuit.
+const STRIKE_WINDOW_SECONDS: i64 = 120;
+/// Distinct accounts that must agree before the limit is treated as model-wide.
+const STRIKE_ACCOUNTS: usize = 2;
+/// Retry-After while another request is probing a half-open circuit.
+const PROBE_RETRY_SECONDS: i64 = 5;
+
+fn circuit_key(model: &str) -> Result<String, String> {
+    Ok(format!("{}:{model}", path()?.display()))
+}
+
+fn clear_model_circuits() -> bool {
+    let Ok(prefix) = circuit_key("") else {
+        return false;
+    };
+    let Ok(mut circuits) = CIRCUITS.lock() else {
+        return false;
+    };
+    let before = circuits.len();
+    circuits.retain(|key, _| !key.starts_with(&prefix));
+    circuits.len() != before
+}
+
+/// Why a model is being held locally.
+#[derive(Debug)]
+pub struct ModelLimited {
+    pub retry_after: i64,
+    pub accounts: usize,
+    pub reason: String,
+}
+
+/// Held by the one request probing a half-open circuit; releases the probe slot on drop
+/// whatever the outcome, so a probe that ends without a verdict cannot wedge the model.
+#[derive(Debug)]
+pub struct ModelProbe {
+    key: String,
+}
+impl Drop for ModelProbe {
+    fn drop(&mut self) {
+        if let Ok(mut circuits) = CIRCUITS.lock() {
+            if let Some(circuit) = circuits.get_mut(&self.key) {
+                circuit.probing = false;
+            }
+        }
+    }
+}
+
+/// Admission for a model before any account is leased. `Ok(Some(_))` marks the probe.
+pub fn admit_model(model: &str, policy: &Policy) -> Result<Option<ModelProbe>, ModelLimited> {
+    if !policy.breaker.enabled {
+        return Ok(None);
+    }
+    let Ok(key) = circuit_key(model) else {
+        return Ok(None);
+    };
+    let Ok(mut circuits) = CIRCUITS.lock() else {
+        return Ok(None);
+    };
+    let Some(circuit) = circuits.get_mut(&key) else {
+        return Ok(None);
+    };
+    let now = now();
+    let limited = |circuit: &ModelCircuit, retry_after: i64| ModelLimited {
+        retry_after: retry_after.max(1),
+        accounts: circuit.accounts,
+        reason: circuit.reason.clone(),
+    };
+    if circuit.open_until > now {
+        return Err(limited(circuit, circuit.open_until - now));
+    }
+    if circuit.trips == 0 {
+        return Ok(None);
+    }
+    if circuit.probing {
+        return Err(limited(circuit, PROBE_RETRY_SECONDS));
+    }
+    circuit.probing = true;
+    Ok(Some(ModelProbe { key }))
+}
+
+/// Records an upstream HTTP 429 for `model` on `account_id`. `signature` identifies the
+/// upstream reason (its result code) so only matching rejections add up. Returns the
+/// hold in seconds when this rejection opened the circuit.
+pub fn record_model_limit(
+    model: &str,
+    account_id: &str,
+    signature: &str,
+    seconds: i64,
+    policy: &Policy,
+) -> Option<i64> {
+    if !policy.breaker.enabled {
+        return None;
+    }
+    // A pool of one has nobody left to try, so its first rejection is already model-wide.
+    let threshold = eligible(model, policy, false, &[])
+        .map(|accounts| accounts.len())
+        .unwrap_or(0)
+        .clamp(1, STRIKE_ACCOUNTS);
+    let key = circuit_key(model).ok()?;
+    let mut circuits = CIRCUITS.lock().ok()?;
+    let circuit = circuits.entry(key).or_default();
+    let now = now();
+    // Requests admitted before the circuit opened may still land here; they confirm the
+    // hold, not a new opening.
+    if circuit.open_until > now {
+        return None;
+    }
+    circuit
+        .strikes
+        .retain(|(id, _, at)| id != account_id && now.saturating_sub(*at) < STRIKE_WINDOW_SECONDS);
+    circuit
+        .strikes
+        .push((account_id.to_owned(), signature.to_owned(), now));
+    let agreeing = circuit
+        .strikes
+        .iter()
+        .filter(|(_, s, _)| s == signature)
+        .count();
+    // While half-open (an earlier opening, hold elapsed) one more rejection reopens it.
+    let half_open = circuit.trips > 0 && circuit.open_until <= now;
+    if !half_open && agreeing < threshold {
+        return None;
+    }
+    circuit.trips += 1;
+    let hold = super::backoff_seconds(&policy.breaker, circuit.trips, seconds);
+    circuit.open_until = now.saturating_add(hold);
+    circuit.accounts = agreeing.max(1);
+    circuit.reason = signature.to_owned();
+    circuit.strikes.clear();
+    circuit.probing = false;
+    tracing::warn!(
+        "WorkBuddy model {} is rate-limited upstream ({}) across {} account(s); holding requests for {}s",
+        model,
+        signature,
+        circuit.accounts,
+        hold
+    );
+    Some(hold)
+}
+
+#[cfg(test)]
+pub(crate) fn expire_model_circuits() {
+    if let Ok(mut circuits) = CIRCUITS.lock() {
+        for circuit in circuits.values_mut() {
+            circuit.open_until = 0;
+        }
+    }
+}
+
+/// Any response the upstream accepted proves the model is being served: close its circuit.
+pub fn model_accepted(model: &str) {
+    let Ok(key) = circuit_key(model) else {
+        return;
+    };
+    if let Ok(mut circuits) = CIRCUITS.lock() {
+        circuits.remove(&key);
+    }
 }
 
 /// Explicit verification shares the real pool's capacity and cooldown state, but
@@ -378,6 +571,138 @@ mod tests {
         assert!(acquire("model", "session", &policy, 5).await.is_err());
         remove(&id).unwrap();
         assert!(acquire("model", "session", &policy, 5).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn workbuddy_rate_limit_cools_only_that_model_on_the_account() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let mut account =
+            parse_import(json!({"uid": "a", "accessToken": "test", "expiresAt": now()+3600}))
+                .unwrap();
+        for id in ["model", "other"] {
+            account.models.push(Model {
+                id: id.into(),
+                name: id.into(),
+            });
+        }
+        let id = upsert(account).unwrap().id;
+        let policy = Policy::default();
+        let lease = acquire("model", "", &policy, 5).await.unwrap();
+        assert_eq!(lease.model_failure("limited", 60), 60);
+        drop(lease);
+        // The limited model has no account left, the other model keeps its account.
+        assert!(acquire("model", "", &policy, 5).await.is_err());
+        let other = acquire("other", "", &policy, 5).await.unwrap();
+        assert_eq!(other.account.id, id);
+        drop(other);
+        let view = list().unwrap().remove(0);
+        assert_eq!(view.status, "ready");
+        assert_eq!(view.cooldown_until, 0);
+        assert_eq!(view.health.consecutive_failures, 0);
+        assert_eq!(view.health.failures, 1);
+        assert_eq!(view.model_cooldowns.len(), 1);
+        assert_eq!(view.model_cooldowns[0].model, "model");
+        assert!(view.model_cooldowns[0].until >= now() + 59);
+        // A second consecutive limit backs off to the next configured step.
+        RUNTIME
+            .lock()
+            .unwrap()
+            .get_mut(&runtime_key(&id).unwrap())
+            .unwrap()
+            .models
+            .get_mut("model")
+            .unwrap()
+            .until = 0;
+        let lease = acquire("model", "", &policy, 5).await.unwrap();
+        assert_eq!(lease.model_failure("limited", 60), 300);
+        drop(lease);
+        assert!(clear_cooldowns(None));
+        let lease = acquire("model", "", &policy, 5).await.unwrap();
+        lease.success();
+        drop(lease);
+        assert!(list().unwrap()[0].model_cooldowns.is_empty());
+        // With the breaker off nothing is cooled.
+        let mut off = Policy::default();
+        off.breaker.enabled = false;
+        let lease = acquire("model", "", &off, 5).await.unwrap();
+        assert_eq!(lease.model_failure("limited", 60), 0);
+        drop(lease);
+        assert!(acquire("model", "", &policy, 5).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn workbuddy_model_circuit_opens_on_agreeing_accounts_and_probes_once() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed("a");
+        let b = seed("b");
+        seed("c");
+        let policy = Policy::default();
+        assert!(admit_model("model", &policy).unwrap().is_none());
+        assert_eq!(record_model_limit("model", &a, "code 1", 60, &policy), None);
+        // A different upstream reason, or the same account again, does not add up.
+        assert_eq!(record_model_limit("model", &b, "code 2", 60, &policy), None);
+        assert_eq!(record_model_limit("model", &a, "code 1", 60, &policy), None);
+        assert!(admit_model("model", &policy).unwrap().is_none());
+        assert_eq!(
+            record_model_limit("model", &b, "code 1", 60, &policy),
+            Some(60)
+        );
+        let limited = admit_model("model", &policy).unwrap_err();
+        assert!((59..=60).contains(&limited.retry_after));
+        assert_eq!(limited.accounts, 2);
+        assert_eq!(limited.reason, "code 1");
+        // Other models are untouched; late rejections confirm the hold without escalating.
+        assert!(admit_model("other", &policy).unwrap().is_none());
+        assert_eq!(record_model_limit("model", &a, "code 1", 60, &policy), None);
+        // Half-open: exactly one probe at a time.
+        expire_model_circuits();
+        let probe = admit_model("model", &policy).unwrap().unwrap();
+        assert_eq!(
+            admit_model("model", &policy).unwrap_err().retry_after,
+            PROBE_RETRY_SECONDS
+        );
+        drop(probe);
+        let _probe = admit_model("model", &policy).unwrap().unwrap();
+        // The probe's rejection reopens at the next backoff step.
+        assert_eq!(
+            record_model_limit("model", &a, "code 1", 60, &policy),
+            Some(300)
+        );
+        assert!(admit_model("model", &policy).is_err());
+        // Any accepted response closes it.
+        model_accepted("model");
+        assert!(admit_model("model", &policy).unwrap().is_none());
+        // The shared reset clears circuits too.
+        record_model_limit("model", &a, "code 1", 60, &policy);
+        record_model_limit("model", &b, "code 1", 60, &policy);
+        assert!(admit_model("model", &policy).is_err());
+        assert!(clear_cooldowns(None));
+        assert!(admit_model("model", &policy).unwrap().is_none());
+        // With the breaker off the circuit never engages.
+        let mut off = Policy::default();
+        off.breaker.enabled = false;
+        record_model_limit("model", &a, "code 1", 60, &policy);
+        record_model_limit("model", &b, "code 1", 60, &policy);
+        assert!(admit_model("model", &off).unwrap().is_none());
+        assert_eq!(record_model_limit("model", &a, "code 1", 60, &off), None);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_single_account_rate_limit_opens_the_model_circuit() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed("a");
+        seed("b");
+        let policy = Policy::default();
+        let fixed = Policy {
+            preferred: Some(a.clone()),
+            ..Default::default()
+        };
+        // A fixed account has nobody else to try: one rejection is already model-wide.
+        assert_eq!(
+            record_model_limit("model", &a, "code 1", 60, &fixed),
+            Some(60)
+        );
+        assert!(admit_model("model", &policy).is_err());
     }
 
     #[test]
