@@ -131,17 +131,28 @@ fn dialect(provider: Provider) -> codec::Dialect {
 }
 /// Request constraints a provider's wire payload cannot carry are request errors (400)
 /// raised before account selection, never silently dropped. Qoder has no tool-selection
-/// field: it honors `auto` and `none` (by offering no tools), not `required` or a forced
-/// function.
+/// or parallel-call field: it honors `auto` and `none` (by offering no tools), not
+/// `required`, a forced function, or `parallel_tool_calls: false` (also produced from
+/// Messages `disable_parallel_tool_use`) while tools are offered.
 fn representable(provider: Provider, chat: &Value) -> Result<(), Failure> {
-    if provider == Provider::Qoder
-        && chat
-            .get("tool_choice")
-            .is_some_and(|choice| choice != "auto" && choice != "none")
-    {
+    if provider != Provider::Qoder {
+        return Ok(());
+    }
+    let choice = chat.get("tool_choice");
+    if choice.is_some_and(|choice| choice != "auto" && choice != "none") {
         return Err(Failure::new(
             400,
             "This source supports tool_choice auto or none only",
+        ));
+    }
+    let offers_tools = choice.is_none_or(|choice| choice != "none")
+        && chat["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty());
+    if offers_tools && chat["parallel_tool_calls"] == false {
+        return Err(Failure::new(
+            400,
+            "This source cannot restrict parallel tool calls; omit parallel_tool_calls=false",
         ));
     }
     Ok(())
@@ -551,6 +562,32 @@ mod tests {
             (
                 codec::Protocol::Chat,
                 json!({"messages":[{"role":"user","content":"hi"}],"tools":tools}),
+                true,
+            ),
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":tools,"parallel_tool_calls":false}),
+                false,
+            ),
+            (
+                codec::Protocol::Messages,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read","input_schema":{"type":"object"}}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}),
+                false,
+            ),
+            // No tools are offered, so there is nothing to restrict.
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":tools,"tool_choice":"none","parallel_tool_calls":false}),
+                true,
+            ),
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"parallel_tool_calls":false}),
+                true,
+            ),
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":tools,"parallel_tool_calls":true}),
                 true,
             ),
         ];
