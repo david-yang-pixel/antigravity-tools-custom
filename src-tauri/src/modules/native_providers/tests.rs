@@ -1115,3 +1115,29 @@ fn maintenance_batches_take_the_oldest_due_accounts_first() {
     }
     assert!(batch.iter().all(|b| b.id != later.id && b.id != paused.id));
 }
+
+#[tokio::test]
+async fn registry_refresh_skips_an_unreadable_native_vault_and_still_reports() {
+    let _sandbox = Sandbox::new();
+    // TRAE disabled keeps this offline; only the damaged Qoder source is selected.
+    std::env::set_var(Provider::Trae.env("ENABLED"), "false");
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("qoder_accounts.enc"),
+        "damaged vault",
+    )
+    .unwrap();
+    let manager = crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
+    let view = crate::modules::model_registry_service::refresh(
+        &manager,
+        crate::modules::model_registry::RefreshModelCandidatesRequest { source_id: None },
+    )
+    .await
+    .unwrap();
+    assert!(view.notices.iter().any(|n| n.contains("目录同步完成")));
+    assert!(view
+        .notices
+        .iter()
+        .any(|n| n.contains("Qoder") && n.contains("已跳过该来源")));
+}

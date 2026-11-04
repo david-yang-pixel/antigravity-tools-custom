@@ -134,18 +134,23 @@ pub async fn refresh(
             }
         }
     }
+    // An unreadable native vault or settings file affects only that source, exactly as
+    // in `model_registry::discover`; the remaining sources are still refreshed.
+    let mut unavailable = Vec::new();
     for provider in NativeProvider::ALL
         .into_iter()
         .filter(|p| selected(p.source()))
     {
-        if !native::store::settings(provider)?.enabled {
+        let accounts = match native::store::settings(provider) {
+            Ok(settings) if !settings.enabled => continue,
+            Ok(_) => native::store::all(provider),
+            Err(error) => Err(error),
+        };
+        let Ok(accounts) = accounts else {
+            unavailable.push(provider.name());
             continue;
-        }
-        for account in native::store::all(provider)?
-            .into_iter()
-            .filter(|a| a.enabled)
-            .take(100)
-        {
+        };
+        for account in accounts.into_iter().filter(|a| a.enabled).take(100) {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 failed += 1;
@@ -187,6 +192,12 @@ pub async fn refresh(
     }
     let mut registry = view(manager).await?;
     registry.notices.push(format!("目录同步完成：{refreshed} 个账号成功，{failed} 个失败或超时。未发起模型推理，未自动上架新模型。"));
+    if !unavailable.is_empty() {
+        registry.notices.push(format!(
+            "{} 账号库或来源设置无法读取，已跳过该来源；其余来源已照常同步。请在账号页修复。",
+            unavailable.join("、")
+        ));
+    }
     Ok(registry)
 }
 
