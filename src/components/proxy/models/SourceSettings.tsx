@@ -76,7 +76,6 @@ export default function SourceSettings() {
             <Link className="registry-link" to="/accounts">Antigravity · 连接与账号 / Accounts</Link>
             <Link className="registry-link" to="/accounts?provider=workbuddy">WorkBuddy · 连接与账号 / Accounts</Link>
             <Link className="registry-link" to="/accounts?provider=qoder">Qoder · 连接与账号 / Accounts</Link>
-            <Link className="registry-link" to="/accounts?provider=trae">TRAE · 连接与账号 / Accounts</Link>
         </div>
         <div className="rounded-lg border border-gray-200 p-3 space-y-3 dark:border-base-300">
             <h4 className="text-sm font-medium">WorkBuddy</h4>

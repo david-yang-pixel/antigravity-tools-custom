@@ -47,8 +47,8 @@ test('OpenAI-compatible upstreams serve OpenAI and Anthropic endpoints only', ()
     assert.equal(model.image_generation, false);
 });
 
-test('native TRAE and Qoder publications retain their sources and supported client protocols', () => {
-    for (const provider_type of ['qoder', 'trae']) {
+test('native Qoder publications retain their sources and supported client protocols', () => {
+    for (const provider_type of ['qoder']) {
         const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type };
         const registry = view({ sources: [source], candidates: [candidate('native-c', source.id, 'same-native')], published_models: [publication('native-p', source.id, 'same-native', `${provider_type}-chat`)] });
         const [model] = logic.registryCatalog(registry);

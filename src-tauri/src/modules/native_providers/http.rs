@@ -46,27 +46,17 @@ pub fn insert(headers: &mut HeaderMap, key: &'static str, value: &str) -> Result
     Ok(())
 }
 /// Credential-bearing requests are restricted to the provider's HTTPS service family. A
-/// callback, model response, or imported account cannot redirect credentials to a new host.
+/// model response or imported account cannot redirect credentials to a new host.
 pub fn official_url(provider: Provider, raw: &str) -> Result<url::Url, Failure> {
     let url =
         url::Url::parse(raw).map_err(|_| Failure::new(400, "Invalid provider service URL"))?;
     let domains: &[&str] = match provider {
         Provider::Qoder => &["qoder.com", "qoder.com.cn", "qoder.sh"],
-        Provider::Trae => &[
-            "trae.ai",
-            "trae.cn",
-            "trae.com.cn",
-            "traeapi.us",
-            "marscode.com",
-        ],
     };
-    // The CN core endpoint is also documented in TRAE's official network-troubleshooting
-    // forum. Permit this exact service, not arbitrary mchost.guru tenants.
     let allowed = url.host_str().is_some_and(|host| {
         domains
             .iter()
             .any(|d| host == *d || host.ends_with(&format!(".{d}")))
-            || (provider == Provider::Trae && host == "trae-api-cn.mchost.guru")
     });
     if !allowed
         || url.scheme() != "https"

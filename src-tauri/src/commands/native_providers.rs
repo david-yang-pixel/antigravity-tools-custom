@@ -19,27 +19,11 @@ pub struct LoginRequest {
     pub provider: Provider,
     pub realm: Realm,
     pub account_id: Option<String>,
-    #[serde(default)]
-    pub solo: bool,
-    #[serde(default)]
-    pub server_browser: bool,
 }
 #[derive(Deserialize)]
 pub struct SessionRequest {
     pub provider: Provider,
     pub id: String,
-}
-#[derive(Deserialize)]
-pub struct CallbackRequest {
-    pub provider: Provider,
-    pub id: String,
-    pub callback_url: String,
-}
-#[derive(Deserialize)]
-pub struct BrowserInputRequest {
-    pub provider: Provider,
-    pub id: String,
-    pub action: native::browser::Input,
 }
 #[derive(Deserialize)]
 pub struct ImportRequest {
@@ -81,12 +65,10 @@ pub async fn save_native_provider_settings(
 }
 #[tauri::command]
 pub async fn start_native_login(request: LoginRequest) -> Result<native::login::Started, String> {
-    native::login::start_with_browser(
+    native::login::start(
         request.provider,
         request.realm,
         request.account_id.as_deref(),
-        request.solo,
-        request.server_browser,
     )
     .await
 }
@@ -97,26 +79,6 @@ pub async fn poll_native_login(request: SessionRequest) -> Result<native::login:
 #[tauri::command]
 pub async fn cancel_native_login(request: SessionRequest) -> Result<(), String> {
     native::login::cancel(request.provider, &request.id).await
-}
-#[tauri::command]
-pub async fn native_login_browser_snapshot(
-    request: SessionRequest,
-) -> Result<native::browser::Snapshot, String> {
-    if request.provider != Provider::Trae {
-        return Err("Only TRAE uses a server login browser".into());
-    }
-    native::browser::snapshot(&request.id).await
-}
-#[tauri::command]
-pub async fn native_login_browser_input(request: BrowserInputRequest) -> Result<(), String> {
-    if request.provider != Provider::Trae {
-        return Err("Only TRAE uses a server login browser".into());
-    }
-    native::browser::input(&request.id, request.action).await
-}
-#[tauri::command]
-pub async fn complete_native_login(request: CallbackRequest) -> Result<AccountView, String> {
-    native::login::complete(request.provider, &request.id, &request.callback_url).await
 }
 #[tauri::command]
 pub async fn import_native_account(request: ImportRequest) -> Result<AccountView, String> {

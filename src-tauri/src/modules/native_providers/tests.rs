@@ -17,9 +17,7 @@ impl Sandbox {
         let previous = std::env::var_os("ABV_DATA_DIR");
         let overrides = [
             "ABV_QODER_ENABLED",
-            "ABV_TRAE_ENABLED",
             "ABV_QODER_MAX_CONCURRENCY",
-            "ABV_TRAE_MAX_CONCURRENCY",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -141,28 +139,6 @@ fn free_models_with_zero_credits_keep_concurrency_and_failure_cooldowns() {
     }
 }
 #[test]
-fn quota_expiry_and_missing_usage_do_not_invent_zero_balance() {
-    let q = trae::parse_quota(&json!({"data":{"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":100}},"usage":{"credits_amount":25}},
-        {"entitlement_base_info":{"end_time":now()-1,"quota":{"credits_limit":500}},"usage":{"credits_amount":10}}]}})).unwrap();
-    assert_eq!(q.total, Some(100.0));
-    assert_eq!(q.remaining, Some(75.0));
-    let unknown = trae::parse_quota(&json!({"user_entitlement_pack_list":[{"entitlement_base_info":{"quota":{"credits_limit":100}}}]})).unwrap();
-    assert_eq!(unknown.remaining, None);
-    assert!(!unknown.unlimited);
-    assert!(!unknown.exhausted());
-    assert!(trae::parse_quota(
-        &json!({"user_entitlement_pack_list":[{"quota":{"future_limit":100}}]})
-    )
-    .is_err());
-}
-#[test]
-fn trae_legacy_quota_and_unlimited_are_recognized() {
-    let q = trae::parse_quota(&json!({"Data":{"userEntitlementPackList":[{"entitlementBaseInfo":{"quota":{"basicUsageLimit":-1}},"usage":{"basicUsageAmount":90}}]}})).unwrap();
-    assert!(q.unlimited);
-    assert_eq!(q.remaining, None);
-    assert_eq!(q.used, Some(90.0));
-}
-#[test]
 fn token_rotation_preserves_refresh_token_when_omitted_and_converts_epoch_units() {
     let mut a = account(Provider::Qoder, "uid");
     let expiry = now() + 3600;
@@ -173,13 +149,9 @@ fn token_rotation_preserves_refresh_token_when_omitted_and_converts_epoch_units(
     .unwrap();
     assert_eq!(a.expires_at, expiry);
     assert_eq!(a.credentials.refresh_token, "test-refresh-private");
-    trae::apply_tokens(&mut a, &json!({"Result":{"Token":"trae-access","RefreshToken":"rotated","TokenExpireAt":expiry*1000}})).unwrap();
-    assert_eq!(a.expires_at, expiry);
-    assert_eq!(a.credentials.refresh_token, "rotated");
-    assert!(trae::apply_tokens(&mut a, &json!({"Result":{}})).is_err());
 }
 #[test]
-fn identity_and_callback_urls_cannot_choose_an_untrusted_credential_destination() {
+fn identity_urls_cannot_choose_an_untrusted_credential_destination() {
     for bad in [
         "https://qoder.com.attacker.example/a",
         "https://qoder.sh@evil.example/a",
@@ -191,15 +163,6 @@ fn identity_and_callback_urls_cannot_choose_an_untrusted_credential_destination(
     assert!(
         http::official_url(Provider::Qoder, "https://openapi.qoder.sh/api/v1/userinfo").is_ok()
     );
-    assert!(http::official_url(
-        Provider::Trae,
-        "https://coresg-normal.trae.ai/api/agent/v3/llm_utils_chat"
-    )
-    .is_ok());
-    let mut query = HashMap::from([("state".into(), "other-session".into())]);
-    assert!(login::validate_callback(&query, "session", "trace").is_err());
-    query = HashMap::from([("login_trace_id".into(), "other-trace".into())]);
-    assert!(login::validate_callback(&query, "session", "trace").is_err());
 }
 #[test]
 fn account_vault_and_public_projection_never_expose_tokens() {
@@ -224,33 +187,32 @@ fn account_vault_and_public_projection_never_expose_tokens() {
             .refresh_token,
         "test-refresh-private"
     );
-    assert!(store::all(Provider::Trae).unwrap().is_empty());
 }
 #[test]
 fn reauthorization_and_deletion_reject_stale_refresh_writes() {
     let _sandbox = Sandbox::new();
-    let a = store::upsert(account(Provider::Trae, "u"), None).unwrap();
-    let mut replacement = account(Provider::Trae, "u");
+    let a = store::upsert(account(Provider::Qoder, "u"), None).unwrap();
+    let mut replacement = account(Provider::Qoder, "u");
     replacement.credentials.refresh_token = "new-refresh".into();
     let replacement = store::upsert(replacement, Some(&a.id)).unwrap();
     assert_eq!(replacement.id, a.id);
     assert!(
-        store::update(Provider::Trae, &a.id, Some(&a.revision), |a| a
+        store::update(Provider::Qoder, &a.id, Some(&a.revision), |a| a
             .credentials
             .refresh_token =
             "stale".into())
         .is_err()
     );
     assert_eq!(
-        store::get(Provider::Trae, &a.id)
+        store::get(Provider::Qoder, &a.id)
             .unwrap()
             .credentials
             .refresh_token,
         "new-refresh"
     );
-    assert!(store::upsert(account(Provider::Trae, "different-user"), Some(&a.id)).is_err());
-    store::remove(Provider::Trae, &a.id).unwrap();
-    assert!(store::update(Provider::Trae, &a.id, None, |_| {}).is_err());
+    assert!(store::upsert(account(Provider::Qoder, "different-user"), Some(&a.id)).is_err());
+    store::remove(Provider::Qoder, &a.id).unwrap();
+    assert!(store::update(Provider::Qoder, &a.id, None, |_| {}).is_err());
 }
 #[test]
 fn scheduler_rotates_limits_concurrency_and_skips_cooling_or_exhausted_accounts() {
@@ -613,7 +575,6 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
     let _sandbox = Sandbox::new();
     let a = store::upsert(account(Provider::Qoder, "breaker-qoder"), None).unwrap();
-    let b = store::upsert(account(Provider::Trae, "breaker-trae"), None).unwrap();
     let manager = crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
     manager
         .update_circuit_breaker_config(crate::models::CircuitBreakerConfig {
@@ -647,8 +608,10 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     lease.failure_after(429, Some(120));
     drop(lease);
     assert!(accounts::runtime(&a.id).cooldown_until >= now() + 119);
+    // A second account is selected while `a` cools down; both cooldowns are then cleared.
+    let b = store::upsert(account(Provider::Qoder, "breaker-b"), None).unwrap();
     let mut lease = accounts::scheduling::try_acquire(
-        Provider::Trae,
+        Provider::Qoder,
         "shared-model",
         "",
         &policy,
@@ -661,6 +624,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     manager.clear_all_rate_limits();
     assert_eq!(accounts::runtime(&a.id).cooldown_until, 0);
     assert_eq!(accounts::runtime(&b.id).cooldown_until, 0);
+    store::remove(Provider::Qoder, &b.id).unwrap();
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
         "shared-model",
@@ -749,7 +713,7 @@ async fn model_tests_respect_source_disablement_and_in_flight_permits() {
 fn provider_streams_preserve_text_tools_usage_and_surface_envelope_errors() {
     let wrapped = json!({"statusCodeValue":200,"body":json!({"choices":[{"index":0,"delta":{"content":"hello"}}]}).to_string()});
     let decoded: Value = serde_json::from_str(
-        &wire::event(Provider::Qoder, "message", &wrapped.to_string())
+        &wire::event(Provider::Qoder, &wrapped.to_string())
             .unwrap()
             .unwrap(),
     )
@@ -758,38 +722,15 @@ fn provider_streams_preserve_text_tools_usage_and_surface_envelope_errors() {
     assert_eq!(
         wire::event(
             Provider::Qoder,
-            "message",
             &json!({"statusCodeValue":429,"body":"rate limited"}).to_string()
         )
         .unwrap_err()
         .status,
         429
     );
-    let chunk = wire::event(Provider::Trae, "output", &json!({"response":"text","tool_calls":[{"id":"call-1","function_call":{"name":"read_file","arguments":"{}"}}]}).to_string()).unwrap().unwrap();
-    let chunk: Value = serde_json::from_str(&chunk).unwrap();
-    assert_eq!(
-        chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
-        "read_file"
-    );
-    assert!(
-        wire::event(Provider::Trae, "progress_notice", "\"working\"")
-            .unwrap()
-            .is_none()
-    );
-    assert!(wire::event(Provider::Trae, "error", "{\"code\":429}").is_err());
 }
 #[test]
 fn payload_translation_keeps_tool_history_and_provider_model_identity() {
-    let a = account(Provider::Trae, "u");
-    let payload = wire::trae_request(&a, "shared-model", json!({"messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call","content":"result"}],"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}]})).unwrap();
-    assert_eq!(payload["function"], "chat_v3");
-    assert_eq!(payload["config_name"], "shared-model");
-    assert!(payload["tools"][0]["function"]["parameters"].is_string());
-    assert_eq!(
-        payload["messages"][0]["tool_calls"][0]["function_call"]["name"],
-        "read"
-    );
-    assert_eq!(payload["messages"][1]["tool_call_id"], "call");
     let payload = wire::qoder_request(
         &account(Provider::Qoder, "u"),
         "shared-model",
@@ -987,12 +928,11 @@ fn withdrawn_model_evidence_is_not_reused_and_broken_native_vault_is_isolated() 
         .notices
         .iter()
         .any(|n| n.contains("Qoder") && n.contains("unavailable")));
-    assert!(view.sources.iter().any(|s| s.id == Provider::Trae.source()));
 }
 
 #[tokio::test]
 async fn device_authorization_is_pkce_bound_cancellable_and_provider_scoped() {
-    let started = login::start(Provider::Qoder, Realm::Global, None, false)
+    let started = login::start(Provider::Qoder, Realm::Global, None)
         .await
         .unwrap();
     let url = url::Url::parse(&started.auth_url).unwrap();
@@ -1002,7 +942,6 @@ async fn device_authorization_is_pkce_bound_cancellable_and_provider_scoped() {
     assert_eq!(query["challenge"].len(), 43);
     assert!(!query.contains_key("verifier"));
     assert!(!query.contains_key("redirect_uri"));
-    assert!(login::cancel(Provider::Trae, &started.id).await.is_err());
     login::cancel(Provider::Qoder, &started.id).await.unwrap();
     assert!(login::poll(Provider::Qoder, &started.id).await.is_err());
 }
@@ -1126,8 +1065,6 @@ fn maintenance_batches_take_the_oldest_due_accounts_first() {
 #[tokio::test]
 async fn registry_refresh_skips_an_unreadable_native_vault_and_still_reports() {
     let _sandbox = Sandbox::new();
-    // TRAE disabled keeps this offline; only the damaged Qoder source is selected.
-    std::env::set_var(Provider::Trae.env("ENABLED"), "false");
     std::fs::write(
         crate::modules::account::get_data_dir()
             .unwrap()
@@ -1147,4 +1084,60 @@ async fn registry_refresh_skips_an_unreadable_native_vault_and_still_reports() {
         .notices
         .iter()
         .any(|n| n.contains("Qoder") && n.contains("已跳过该来源")));
+}
+
+#[test]
+fn registry_with_removed_trae_records_still_loads_but_never_routes_them() {
+    use crate::modules::model_registry as registry;
+    let _sandbox = Sandbox::new();
+    let mapping = HashMap::new();
+    let candidate = registry::candidate_id("trae:default", "trae-model");
+    let published = registry::PublishedModel {
+        id: "retired-trae".into(),
+        public_id: "trae-public".into(),
+        display_name: "Old TRAE model".into(),
+        source_id: "trae:default".into(),
+        native_model: "trae-model".into(),
+        enabled: true,
+        legacy: false,
+    };
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("model_registry.json"),
+        json!({"schema_version":1,"revision":3,
+            "candidates":[{"id":candidate,"source_id":"trae:default","native_model":"trae-model"}],
+            "published_models":[published],"ignored_candidate_ids":[],"verification_results":[]})
+        .to_string(),
+    )
+    .unwrap();
+    // The registry stays readable, and the stored TRAE record is shown as retired.
+    let view = registry::view(&[], &mapping).unwrap();
+    assert!(view
+        .candidates
+        .iter()
+        .any(|c| c.id == candidate && c.provider_type == registry::RETIRED_PROVIDER));
+    // Inference on the old publication is refused instead of reaching another upstream.
+    let denied =
+        crate::proxy::middleware::model_registry::resolve_public_model("trae-public").unwrap_err();
+    assert_eq!(denied.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    // Discovery cannot fall through to another source, and nothing new can be published.
+    assert!(
+        registry::validate_discovery_request(&registry::DiscoverUpstreamModelsRequest {
+            source_id: "trae:default".into(),
+            realm: None,
+        })
+        .is_err()
+    );
+    let mut renamed = published.clone();
+    renamed.public_id = "trae-renamed".into();
+    let republish = |models| registry::SaveModelRegistryRequest {
+        revision: view.revision,
+        published_models: models,
+        ignored_candidate_ids: vec![],
+        allow_unverified: true,
+    };
+    assert!(registry::save(republish(vec![renamed]), &[], &mapping).is_err());
+    // The administrator can still clean up: unpublishing the old binding succeeds.
+    registry::save(republish(vec![]), &[], &mapping).unwrap();
 }

@@ -1,4 +1,4 @@
-//! Qoder/TRAE account admission uses the same live policy as the other pools.
+//! Native account admission uses the same live policy as the other pools.
 use super::*;
 use crate::proxy::sticky_config::{AccountSchedulingPolicy as Policy, SchedulingMode};
 use std::time::Duration;
