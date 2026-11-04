@@ -350,7 +350,6 @@ async fn discover_native_account(
         .map_err(|e| e.to_string())?;
     let models = match provider {
         NativeProvider::Qoder => native::qoder::models(&account).await,
-        NativeProvider::Trae => native::trae::models(&account).await,
     }
     .map_err(|e| e.to_string())?;
     let ids = models.iter().map(|m| m.id.clone()).collect();

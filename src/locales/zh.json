@@ -21,8 +21,6 @@
     "getLink": "获取授权链接",
     "openLogin": "打开官方授权页",
     "waiting": "等待授权，剩余 {{seconds}} 秒",
-    "callbackHint": "完成官方登录后，账号会自动保存。请保持当前页面开启。",
-    "callbackPortUnavailable": "本机授权回传端口已被其他程序占用，为保护授权凭证已停止本次登录。请释放该端口（默认 18080，可通过 ABV_TRAE_CALLBACK_PORT 修改）后重试。",
     "importHint": "粘贴你自己的账号凭证 JSON。保存前会向官方服务验证账号身份。Qoder 也支持 personalToken。",
     "credentials": "账号凭证 JSON",
     "importSave": "验证并导入",
@@ -64,22 +62,7 @@
     "deleteTitle": "移除账号",
     "deleteHint": "移除 {{name}} 的本地凭证？该账号将停止参与轮换。",
     "authorized": "账号授权已保存",
-    "loginExpired": "授权已过期，请重新获取链接。",
-    "browserLoginHint": "在本页打开 TRAE 官方登录页，登录完成后自动保存账号。",
-    "browserBegin": "打开官方登录页",
-    "browserHint": "在下方官方页面扫码或登录。可点击并直接输入；使用中文或手机时，先点击官方输入框，再用下方输入栏发送文字。授权完成后会自动返回账号列表。",
-    "browserLabel": "TRAE 官方登录页面",
-    "browserStarting": "正在打开官方登录页…",
-    "browserReload": "刷新登录页",
-    "browserTextHint": "向选中的官方输入框发送文字（内容隐藏）",
-    "browserType": "输入文字",
-    "browserError_REGION_BLOCKED": "TRAE 国内版不支持当前服务器所在地区，暂时无法登录。",
-    "browserError_START_FAILED": "登录页面未能启动，请检查服务器上的 Chromium 和 Node.js 配置后重试。",
-    "browserError_STOPPED": "登录页面已关闭或过期；若账号尚未添加，请重新发起登录。",
-    "browserError_BUSY": "当前登录会话较多，请稍后重试或关闭其他登录页面。",
-    "browserError_PAGE_UNAVAILABLE": "官方登录页面暂时不可用，请刷新登录页重试。",
-    "browserError_UNAVAILABLE": "暂时无法连接登录页面，请稍后重试。",
-    "browserError_COMMAND_FAILED": "操作未完成，请稍后重试。"
+    "loginExpired": "授权已过期，请重新获取链接。"
   },
   "topup": {
     "pending_orders": "待支付订单",
@@ -1355,7 +1338,7 @@
       "scheduling": {
         "title": "账号轮换与会话调度",
         "title_tooltip": "控制会话如何绑定到账号，以及触发限流时的行为。",
-        "subtitle": "调度模式、最大等待时长、清除会话绑定及熔断退避统一作用于 Antigravity、WorkBuddy、Qoder 和 TRAE 账号池。固定账号按上游分别设置。",
+        "subtitle": "调度模式、最大等待时长、清除会话绑定及熔断退避统一作用于 Antigravity、WorkBuddy 和 Qoder 账号池。固定账号按上游分别设置。",
         "mode": "调度模式",
         "mode_tooltip": "缓存优先：绑定账号，限流时强制等待（最大化缓存）；平衡：绑定账号，限流时自动热切；性能优先：不绑定，全自动轮换。",
         "modes": {

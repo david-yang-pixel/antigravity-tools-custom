@@ -1,4 +1,4 @@
-//! Native account dispatch for Qoder/TRAE. Admission, billing and monitor middleware
+//! Native account dispatch (Qoder). Admission, billing and monitor middleware
 //! have already run. One shared Chat codec/relay serves all three client protocols.
 use super::{
     chat_codec as codec,
@@ -123,10 +123,11 @@ pub async fn route(
 /// Request features each provider's wire payload actually carries. Qoder rebuilds its
 /// own request without a structured-output field, so `response_format` / Responses
 /// `text.format` must be rejected up front instead of silently running unconstrained.
-/// TRAE forwards the Chat body, including `response_format`.
 fn dialect(provider: Provider) -> codec::Dialect {
-    codec::Dialect {
-        structured_output: provider == Provider::Trae,
+    match provider {
+        Provider::Qoder => codec::Dialect {
+            structured_output: false,
+        },
     }
 }
 /// Request constraints a provider's wire payload cannot carry are request errors (400)
@@ -135,8 +136,8 @@ fn dialect(provider: Provider) -> codec::Dialect {
 /// `required`, a forced function, or `parallel_tool_calls: false` (also produced from
 /// Messages `disable_parallel_tool_use`) while tools are offered.
 fn representable(provider: Provider, chat: &Value) -> Result<(), Failure> {
-    if provider != Provider::Qoder {
-        return Ok(());
+    match provider {
+        Provider::Qoder => {}
     }
     let choice = chat.get("tool_choice");
     if choice.is_some_and(|choice| choice != "auto" && choice != "none") {
@@ -174,24 +175,19 @@ async fn send(
 ) -> Result<reqwest::Response, Failure> {
     match account.provider {
         Provider::Qoder => native::qoder::chat(account, model, payload, timeout).await,
-        Provider::Trae => native::trae::chat(account, model, payload, timeout).await,
     }
 }
 fn normalize(provider: Provider, response: reqwest::Response) -> NativeEvents {
     let stream = async_stream::stream! {
         let mut events = response.bytes_stream().eventsource();
-        let mut done = false; let mut finished = false; let mut has_tools = false;
+        let mut done = false; let mut finished = false;
         while let Some(event) = events.next().await {
             let event = match event { Ok(event) => event, Err(_) => { yield Err(Failure::new(502, "Provider stream connection interrupted")); return; } };
             if event.data.len() > 8 * 1024 * 1024 { yield Err(Failure::new(502, "Provider stream event exceeds size limit")); return; }
-            match native::wire::event(provider, &event.event, &event.data) {
-                Ok(Some(mut data)) => {
+            match native::wire::event(provider, &event.data) {
+                Ok(Some(data)) => {
                     if data == "[DONE]" { done = true; yield Ok(data); break; }
-                    if let Ok(mut value) = serde_json::from_str::<Value>(&data) {
-                        has_tools |= value.pointer("/choices/0/delta/tool_calls").and_then(Value::as_array).is_some_and(|calls| !calls.is_empty());
-                        if provider == Provider::Trae && event.event == "done" && serde_json::from_str::<Value>(&event.data).ok().is_some_and(|v| native::text(&v, &["finish_reason"]).is_empty()) {
-                            value["choices"][0]["finish_reason"] = json!(if has_tools { "tool_calls" } else { "stop" }); data = value.to_string();
-                        }
+                    if let Ok(value) = serde_json::from_str::<Value>(&data) {
                         if value.pointer("/choices/0/finish_reason").is_some_and(|v| !v.is_null()) { finished = true; }
                     }
                     yield Ok(data);
@@ -497,25 +493,6 @@ mod tests {
             .unwrap()
             .into()
     }
-    #[tokio::test]
-    async fn trae_empty_done_keeps_tool_finish_reason_and_final_usage() {
-        let body = "event: output\ndata: {\"tool_calls\":[{\"id\":\"call-1\",\"function_call\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}\n\nevent: done\ndata: {}\n\nevent: token_usage\ndata: {\"prompt_tokens\":9,\"completion_tokens\":2}\n\n";
-        let events = normalize(Provider::Trae, response(body))
-            .collect::<Vec<_>>()
-            .await;
-        assert!(events.iter().all(Result::is_ok));
-        let values: Vec<Value> = events
-            .iter()
-            .filter_map(|v| serde_json::from_str(v.as_ref().unwrap()).ok())
-            .collect();
-        assert!(values
-            .iter()
-            .any(|v| v.pointer("/choices/0/finish_reason") == Some(&json!("tool_calls"))));
-        assert!(values
-            .iter()
-            .any(|v| v.pointer("/usage/prompt_tokens") == Some(&json!(9))));
-        assert_eq!(events.last().unwrap().as_ref().unwrap(), "[DONE]");
-    }
     #[test]
     fn qoder_rejects_structured_output_it_cannot_forward() {
         let chat = json!({"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}});
@@ -524,9 +501,7 @@ mod tests {
             (codec::Protocol::Chat, chat),
             (codec::Protocol::Responses, responses),
         ] {
-            assert!(codec::request_for(protocol, body.clone(), dialect(Provider::Qoder)).is_err());
-            let trae = codec::request_for(protocol, body, dialect(Provider::Trae)).unwrap();
-            assert_eq!(trae["response_format"]["type"], "json_object");
+            assert!(codec::request_for(protocol, body, dialect(Provider::Qoder)).is_err());
         }
     }
     #[test]
@@ -598,7 +573,6 @@ mod tests {
                 accepted,
                 "{chat}"
             );
-            assert!(representable(Provider::Trae, &chat).is_ok());
         }
     }
     #[tokio::test]
@@ -624,7 +598,7 @@ mod tests {
             response("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"),
         );
         assert_eq!(until_output(&mut events).await.unwrap_err().status, 502);
-        // A finish reason alone (e.g. a TRAE `done` after tool output) counts as output.
+        // A finish reason alone (e.g. after tool output) counts as output.
         assert!(carries_output(
             r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#
         ));
@@ -632,8 +606,8 @@ mod tests {
     #[tokio::test]
     async fn truncated_stream_and_pre_generation_provider_errors_stay_failures() {
         let events = normalize(
-            Provider::Trae,
-            response("event: output\ndata: {\"response\":\"partial\"}\n\n"),
+            Provider::Qoder,
+            response("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"),
         )
         .collect::<Vec<_>>()
         .await;

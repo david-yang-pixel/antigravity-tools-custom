@@ -51,7 +51,10 @@ pub(crate) fn resolve_public_model(
                 "Model is not published or is disabled.".into(),
             )
         })?;
-    if model_registry::provider_type(&published.source_id) == "unknown" {
+    if matches!(
+        model_registry::provider_type(&published.source_id),
+        "unknown" | model_registry::RETIRED_PROVIDER
+    ) {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Model source is not integrated.".into(),

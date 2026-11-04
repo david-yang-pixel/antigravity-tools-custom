@@ -242,8 +242,15 @@ pub fn candidate_id(source_id: &str, native_model: &str) -> String {
         URL_SAFE_NO_PAD.encode(native_model)
     )
 }
+/// Sources whose integration was removed (TRAE). Stored candidates and publications that
+/// reference them still load, so an existing registry stays readable and can be cleaned
+/// up, but they never resolve to an upstream: admission answers "not integrated", and
+/// discovery or a new publication on them is refused.
+const RETIRED_SOURCES: &[&str] = &["trae:default"];
+pub const RETIRED_PROVIDER: &str = "retired";
 fn provider(source: &str) -> Result<&'static str, String> {
     match source {
+        _ if RETIRED_SOURCES.contains(&source) => Ok(RETIRED_PROVIDER),
         ANTIGRAVITY_SOURCE => Ok("antigravity"),
         WORKBUDDY_SOURCE => Ok("workbuddy"),
         source if native_providers::Provider::from_source(source).is_some() => {
@@ -256,7 +263,8 @@ fn provider(source: &str) -> Result<&'static str, String> {
         _ => Err("Unknown model source".into()),
     }
 }
-/// Provider family of a source (`antigravity`, `workbuddy`, `openai_compatible`).
+/// Provider family of a source (`antigravity`, `workbuddy`, `qoder`, `openai_compatible`,
+/// `retired`), or `unknown`.
 pub fn provider_type(source: &str) -> &'static str {
     provider(source).unwrap_or("unknown")
 }
@@ -1291,6 +1299,9 @@ pub fn save(
                 && old.source_id == model.source_id
                 && old.native_model == model.native_model
         });
+        if provider(&model.source_id)? == RETIRED_PROVIDER && !same_binding {
+            return Err("This model source has been removed; it cannot be published".into());
+        }
         let grandfathered = same_binding && old.is_some_and(|old| old.legacy);
         if model.legacy && !grandfathered {
             return Err(
@@ -1425,6 +1436,9 @@ pub fn validate_refresh_request(request: &RefreshModelCandidatesRequest) -> Resu
 }
 
 pub fn validate_discovery_request(request: &DiscoverUpstreamModelsRequest) -> Result<(), String> {
+    if provider(&request.source_id)? == RETIRED_PROVIDER {
+        return Err("This model source has been removed".into());
+    }
     if provider(&request.source_id)? != "workbuddy"
         && native_providers::Provider::from_source(&request.source_id).is_none()
         && request.realm.is_some()

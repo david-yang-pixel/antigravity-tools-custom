@@ -90,7 +90,6 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
     }
     let result = match provider {
         Provider::Qoder => qoder::refresh(&mut a).await,
-        Provider::Trae => trae::refresh(&mut a).await,
     };
     if let Err(error) = result {
         let _ = store::update(provider, id, Some(&a.revision), |a| {
@@ -115,7 +114,6 @@ pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountVi
         .map_err(|e| e.to_string())?;
     let (mut models, mut quota) = match provider {
         Provider::Qoder => tokio::join!(qoder::models(&a), qoder::quota(&a)),
-        Provider::Trae => tokio::join!(trae::models(&a), trae::quota(&a)),
     };
     if models.as_ref().err().is_some_and(|e| e.status == 401)
         || quota.as_ref().err().is_some_and(|e| e.status == 401)
@@ -123,7 +121,6 @@ pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountVi
         a = fresh(provider, id, true).await.map_err(|e| e.to_string())?;
         (models, quota) = match provider {
             Provider::Qoder => tokio::join!(qoder::models(&a), qoder::quota(&a)),
-            Provider::Trae => tokio::join!(trae::models(&a), trae::quota(&a)),
         };
     }
     let updated = store::update(provider, id, Some(&a.revision), |stored| {

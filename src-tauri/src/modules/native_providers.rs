@@ -1,11 +1,8 @@
-//! Native TRAE and Qoder accounts. Only the provider modules know their wire protocols;
-//! authorization, encrypted persistence, refresh, scheduling and account views are shared.
+//! Native provider accounts (currently Qoder). Only the provider module knows its wire
+//! protocol; authorization, encrypted persistence, refresh, scheduling and account views
+//! are shared.
 #[path = "native_providers/accounts.rs"]
 pub mod accounts;
-#[path = "native_providers/browser.rs"]
-pub mod browser;
-#[path = "native_providers/callback.rs"]
-pub mod callback;
 #[path = "native_providers/http.rs"]
 pub mod http;
 #[path = "native_providers/login.rs"]
@@ -14,8 +11,6 @@ pub mod login;
 pub mod qoder;
 #[path = "native_providers/store.rs"]
 pub mod store;
-#[path = "native_providers/trae.rs"]
-pub mod trae;
 #[path = "native_providers/wire.rs"]
 pub mod wire;
 
@@ -27,27 +22,23 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Qoder,
-    Trae,
 }
 
 impl Provider {
-    pub const ALL: [Self; 2] = [Self::Qoder, Self::Trae];
+    pub const ALL: [Self; 1] = [Self::Qoder];
     pub fn key(self) -> &'static str {
         match self {
             Self::Qoder => "qoder",
-            Self::Trae => "trae",
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Qoder => "Qoder",
-            Self::Trae => "TRAE",
         }
     }
     pub fn source(self) -> &'static str {
         match self {
             Self::Qoder => "qoder:default",
-            Self::Trae => "trae:default",
         }
     }
     pub fn from_source(source: &str) -> Option<Self> {
@@ -145,12 +136,6 @@ pub struct Credentials {
     #[serde(default)]
     pub personal_token: String,
     #[serde(default)]
-    pub client_id: String,
-    #[serde(default)]
-    pub auth_host: String,
-    #[serde(default)]
-    pub api_host: String,
-    #[serde(default)]
     pub machine_id: String,
     #[serde(default)]
     pub device_id: String,
@@ -160,10 +145,6 @@ pub struct Credentials {
     pub organization_id: String,
     #[serde(default)]
     pub organization_name: String,
-    #[serde(default)]
-    pub platform: String,
-    #[serde(default)]
-    pub inference_function: String,
 }
 
 /// This value is persisted only inside an authenticated, encrypted vault. Never serialize
@@ -232,7 +213,6 @@ pub struct AccountView {
     pub auto_refresh: bool,
     pub expires_at: i64,
     pub can_refresh: bool,
-    pub platform: String,
     pub models: Vec<Model>,
     pub models_updated_at: i64,
     pub quota: Option<Quota>,
@@ -259,7 +239,6 @@ impl From<&Account> for AccountView {
             enabled: a.enabled,
             auto_refresh: a.auto_refresh,
             expires_at: a.expires_at,
-            platform: a.credentials.platform.clone(),
             can_refresh: !a.credentials.refresh_token.is_empty()
                 || !a.credentials.personal_token.is_empty(),
             models: a.models.clone(),

@@ -7,7 +7,7 @@ import RegistryDialog from './RegistryDialog';
 export interface UpstreamPick { source_id: string; realm: WorkBuddyRealm }
 
 export const realmLabels: Record<WorkBuddyRealm, string> = { cn: '国内版 / China', global: '国际版 / Global' };
-export const hasRealm = (view: ModelRegistryView, sourceId: string) => ['workbuddy', 'qoder', 'trae'].includes(view.sources.find(s => s.id === sourceId)?.provider_type || '');
+export const hasRealm = (view: ModelRegistryView, sourceId: string) => ['workbuddy', 'qoder'].includes(view.sources.find(s => s.id === sourceId)?.provider_type || '');
 // An OpenAI-compatible upstream is served by one API key rather than an account pool.
 export const isKeySource = (view: ModelRegistryView, sourceId: string) => view.sources.find(s => s.id === sourceId)?.provider_type === 'openai_compatible';
 

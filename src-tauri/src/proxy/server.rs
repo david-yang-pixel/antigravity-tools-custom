@@ -1090,15 +1090,6 @@ impl AxumServer {
             .route("/native-login/poll", post(admin_poll_native_login))
             .route("/native-login/cancel", post(admin_cancel_native_login))
             .route(
-                "/native-login/browser/snapshot",
-                post(admin_native_login_browser_snapshot),
-            )
-            .route(
-                "/native-login/browser/input",
-                post(admin_native_login_browser_input),
-            )
-            .route("/native-login/complete", post(admin_complete_native_login))
-            .route(
                 "/workbuddy-settings",
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
             )
@@ -2918,37 +2909,6 @@ async fn admin_cancel_native_login(
     Json(payload): Json<crate::commands::native_providers::SessionRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::native_providers::cancel_native_login(payload)
-        .await
-        .map(Json)
-        .map_err(portal_admin_error)
-}
-async fn admin_complete_native_login(
-    Json(payload): Json<crate::commands::native_providers::CallbackRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::native_providers::complete_native_login(payload)
-        .await
-        .map(Json)
-        .map_err(portal_admin_error)
-}
-
-async fn admin_native_login_browser_snapshot(
-    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::native_providers::native_login_browser_snapshot(payload)
-        .await
-        .map(|image| {
-            (
-                [(axum::http::header::CACHE_CONTROL, "no-store")],
-                Json(image),
-            )
-        })
-        .map_err(portal_admin_error)
-}
-
-async fn admin_native_login_browser_input(
-    Json(payload): Json<crate::commands::native_providers::BrowserInputRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::native_providers::native_login_browser_input(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

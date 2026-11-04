@@ -1,40 +1,31 @@
-# Native TRAE and Qoder accounts
+# Native Qoder accounts
 
-TRAE and Qoder are built-in account sources. Authorization, quota queries, refresh,
-model discovery and inference run in the Rust application; no external Python/Go
-gateway is required. These integrations use the client protocols described in the
-references below. Live compatibility must be checked with an authorized account.
+Qoder is a built-in account source. Authorization, quota queries, refresh, model
+discovery and inference run in the Rust application; no external Python/Go gateway
+is required. The integration uses the client protocol described in the references
+below. Live compatibility must be checked with an authorized account.
 
 ## Using an account
 
-1. Open **Accounts → Qoder** or **Accounts → TRAE**, choose China or Global, and
-   request an authorization link. TRAE SOLO accounts have a separate option.
-2. Complete sign-in on the official website. Qoder's device grant is polled; TRAE
-   delivers its grant with a browser request. An existing account's reauthorization must
-   return the same provider, region and user identity.
-3. TRAE's official page accepts only `http://127.0.0.1:<port>/authorize` as its
-   callback. In a remote Web deployment, **Open official sign-in** opens a temporary
-   server-owned Chromium session inside the account page. Scan or sign in there;
-   its loopback receiver delivers the grant privately to Rust for PKCE exchange,
-   identity validation and encrypted persistence. No local helper, extension or
-   callback paste is required. Desktop mode binds its loopback listener on
-   `ABV_TRAE_CALLBACK_PORT` before creating the authorization link; if another
-   process already holds that port, sign-in stops instead of directing the grant to it.
-   Server browsers need Node.js 22+ and Chromium/Chrome/Edge. Each session lasts at
-   most ten minutes; success, cancellation, expiry and process failure close it
-   and remove its temporary profile. At most two browsers run concurrently.
-   The server must be able to access the selected official login website. A
-   provider region restriction is reported explicitly and cannot be solved by
-   changing the callback. It does not mean the account was authorized.
-4. Sync balance and models. Quota failures preserve the previous snapshot and its
+1. Open **Accounts → Qoder**, choose China or Global, and request an authorization
+   link.
+2. Complete sign-in on the official website. The gateway polls Qoder's PKCE device
+   grant; no callback, local helper or server-side browser is involved. An existing
+   account's reauthorization must return the same provider, region and user identity.
+3. Sync balance and models. Quota failures preserve the previous snapshot and its
    timestamp. Unknown balance and unlimited balance are separate states.
-5. In the model registry, fetch models from **Qoder** or **TRAE**, explicitly test
-   with your own system/user text, then publish public IDs. Discovery, sign-in and
-   background maintenance do not run inference or automatically publish models.
+4. In the model registry, fetch models from **Qoder**, explicitly test with your own
+   system/user text, then publish public IDs. Discovery, sign-in and background
+   maintenance do not run inference or automatically publish models.
 
 Clients use the gateway's existing API address and client keys. Public model IDs
-bind explicitly to `qoder:default` or `trae:default` and a provider-native model ID;
-two providers' identically named models remain separate candidates.
+bind explicitly to `qoder:default` and a provider-native model ID.
+
+Qoder's request payload carries no structured-output, tool-selection or
+parallel-call field. Requests with `response_format` / Responses `text.format`,
+`tool_choice` `required` or a forced function, or `parallel_tool_calls: false` while
+tools are offered are rejected with 400 before account selection instead of running
+unconstrained; `tool_choice: none` is honored by sending no tools.
 
 ## Maintenance and rotation
 
@@ -80,8 +71,8 @@ Files are relative to the existing application data directory (`ABV_DATA_DIR`):
 
 | File | Contents |
 | --- | --- |
-| `qoder_accounts.enc`, `trae_accounts.enc` | Authenticated encrypted account vaults, including tokens and local account metadata |
-| `qoder_settings.json`, `trae_settings.json` | Source enablement and the optional preferred account ID |
+| `qoder_accounts.enc` | Authenticated encrypted account vault (owner-only `0600`), including tokens and local account metadata |
+| `qoder_settings.json` | Source enablement and the optional preferred account ID |
 
 Encryption uses the application's existing machine-bound crypto utility. Web and
 Tauri account views exclude credentials. A vault/settings error disables that
@@ -95,15 +86,9 @@ Provider settings have this shape:
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `ABV_QODER_ENABLED`, `ABV_TRAE_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
-| `ABV_QODER_MAX_CONCURRENCY`, `ABV_TRAE_MAX_CONCURRENCY` | `1` | Active requests per account, clamped to 1–8 |
+| `ABV_QODER_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
+| `ABV_QODER_MAX_CONCURRENCY` | `1` | Active requests per account, clamped to 1–8 |
 | `ABV_QODER_VERSION` | `1.1.75` | COSY/client protocol version |
-| `ABV_TRAE_VERSION` | `3.5.66` | TRAE client version in authorization and service requests |
-| `ABV_TRAE_BROWSER_PATH` | Platform Chromium/Chrome/Edge executable | Server login browser executable |
-| `ABV_TRAE_BROWSER_NODE` | `node` | Node.js 22+ executable for the private browser driver |
-| `ABV_TRAE_BROWSER_NO_SANDBOX` | `false` | Set `true` only in a container where Chromium cannot use its sandbox |
-| `ABV_TRAE_BROWSER_PROXY` | none | Optional HTTP(S) or SOCKS5 browser proxy URL without credentials; separate from Rust provider requests |
-| `ABV_TRAE_CALLBACK_PORT` | `18080` | Desktop loopback callback port |
 
 The normal gateway upstream-proxy setting also applies to native account traffic.
 Credential-bearing requests validate HTTPS service hosts and do not follow redirects.
@@ -117,11 +102,8 @@ authentication, not an ordinary inference client key.
 | Endpoint | Body |
 | --- | --- |
 | `/api/native-accounts/list` | `{"provider":"qoder"}` |
-| `/api/native-login/start` | `{"provider":"trae","realm":"cn","solo":false,"account_id":null,"server_browser":true}` |
-| `/api/native-login/poll`, `/api/native-login/cancel` | `{"provider":"trae","id":"<login-session-id>"}` |
-| `/api/native-login/browser/snapshot` | Provider and login `id`; returns a no-store JPEG frame, dimensions and a URL without query/fragment |
-| `/api/native-login/browser/input` | Provider, login `id`, and bounded `action` (`click`, `text`, `key`, `scroll`, `reload`) |
-| `/api/native-login/complete` | Provider, login `id`, and `callback_url` |
+| `/api/native-login/start` | `{"provider":"qoder","realm":"cn","account_id":null}`; returns the session `id` and `auth_url` |
+| `/api/native-login/poll`, `/api/native-login/cancel` | `{"provider":"qoder","id":"<login-session-id>"}` |
 | `/api/native-accounts/import` | Provider, region and `auth` credential JSON |
 | `/api/native-accounts/update` | Provider/account `id`; optional `enabled`, `auto_refresh`, or `refresh:true`; no flags synchronizes metadata |
 | `/api/native-accounts/delete` | Provider/account `id` |
@@ -130,26 +112,6 @@ authentication, not an ordinary inference client key.
 
 Qoder credential import also accepts `personalToken`; it is exchanged for a job
 token. Imported account identity is checked with the provider before persistence.
-
-The browser endpoints require administrator authentication and a live TRAE session
-started with `server_browser:true`. They expose no arbitrary navigation, script
-execution, CDP endpoint or files. Chromium runs with `--remote-debugging-pipe`
-under the driver, so DevTools is reachable only through the driver's own process
-pipes and no debugging port exists for other local users or processes; the driver
-launches Chromium and it exits when those pipes close. The grant receiver binds
-only to loopback. The driver communicates with Rust through private process
-pipes; callback URLs/grants, text input and screenshots are not logged or written
-as application data. Chromium's temporary profile may contain official cookies
-while the session is live and is removed when it ends.
-
-Server-browser callbacks require the session's exact trace and an official TRAE
-origin (or a top-level navigation without Origin). Grant acknowledgement occurs
-only after the existing PKCE/identity/persistence service accepts it. Cancellation
-also prevents a grant exchange in progress from saving a new account. Screenshots
-and input may contain sensitive sign-in information and use the existing HTTPS
-admin channel. Downloads are disabled in this private browser.
-
-Desktop direct callbacks and credential import retain their existing behavior.
 
 ## Protocol scope and verification
 
@@ -172,7 +134,7 @@ Frontend checks:
 
 ```bash
 ./node_modules/.bin/tsc --noEmit
-node --test src-tauri/src/modules/native_providers/browser_runner.test.mjs src/types/nativeProviders.test.mjs src/components/proxy/models/registryLogic.test.mjs
+node --test src/types/nativeProviders.test.mjs src/components/proxy/models/registryLogic.test.mjs
 ```
 
 Tests cover vault/view credential isolation, stale-refresh rejection, quota
@@ -186,23 +148,22 @@ platform dependencies and CI.
 
 - [qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub): device token
   exchange, COSY public key/encoding, model catalog and quota wire layout (MIT).
-- [trae-api-proxy](https://github.com/muskke/trae-api-proxy): PKCE, token exchange,
-  current TRAE model/inference payloads and SSE events (MIT).
-- [deepseek-harness-trae quota reader](https://github.com/Fleey/deepseek-harness-trae/blob/main/src/trae/quota.ts):
-  v1/v2 entitlement response field layouts and unknown-quota behavior.
-- [TRAE official community network troubleshooting](https://forum.trae.cn/t/topic/15428):
-  the domestic `trae-api-cn.mchost.guru` core endpoint.
-- [dsh-account-pool](https://github.com/cliii-one/dsh-account-pool): browser-fetch
-  delivery and why a loopback callback cannot reach a remote deployment.
-- [trae-cn-provider](https://github.com/JsonLing/trae-cn-provider): direct `userJwt`
-  callbacks and account-specific token service hosts.
 
 The integration uses independently implemented Rust state management and protocol
-adapters; it does not bundle or run the referenced gateways.
+adapters; it does not bundle or run the referenced gateway.
+
+## Removed TRAE source
+
+An earlier beta also integrated TRAE (`trae:default`). It has been removed. Existing
+`trae_accounts.enc` / `trae_settings.json` files are no longer read and can be deleted.
+Stored model-registry candidates and publications that reference `trae:default` still
+load, so the registry stays readable, but they never route: inference on such a
+publication returns 503 ("Model source is not integrated"), and discovery or a new
+publication on that source is refused. Unpublish those models to clean them up.
 
 ## Rolling back the integration
 
-Before reverting to a version that does not recognize native TRAE/Qoder sources,
+Before reverting to a version that does not recognize the native Qoder source,
 unpublish their models and back up the data directory. Restore the pre-integration
 `model_registry.json` when reverting: older versions also reject native candidate
 records, even after unpublishing. Keep existing Antigravity/WorkBuddy bindings. Account vaults use the current
