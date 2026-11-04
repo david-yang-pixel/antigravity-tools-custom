@@ -174,6 +174,51 @@ fn normalize(provider: Provider, response: reqwest::Response) -> NativeEvents {
     };
     stream.boxed()
 }
+/// Whether a normalized Chat chunk carries completion output: text, reasoning, tool
+/// calls or a finish reason. Role-only and usage-only chunks do not. Unrecognized
+/// chunks count as output so they are never withheld from the client.
+fn carries_output(chunk: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(chunk) else {
+        return true;
+    };
+    let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+        return value.get("usage").is_none();
+    };
+    choices.iter().any(|choice| {
+        let delta = &choice["delta"];
+        !choice["finish_reason"].is_null()
+            || ["content", "reasoning_content"]
+                .iter()
+                .any(|key| delta[*key].as_str().is_some_and(|s| !s.is_empty()))
+            || delta["tool_calls"]
+                .as_array()
+                .is_some_and(|calls| !calls.is_empty())
+    })
+}
+
+/// Buffers leading non-output chunks and returns them with the first output chunk. A
+/// stream error or an end of stream before any output is returned as a typed failure.
+async fn until_output(events: &mut NativeEvents) -> Result<Vec<String>, Failure> {
+    let mut prelude = Vec::new();
+    while let Some(event) = events.next().await {
+        let chunk = event?;
+        if chunk == "[DONE]" {
+            break;
+        }
+        let output = carries_output(&chunk);
+        prelude.push(chunk);
+        if output {
+            return Ok(prelude);
+        }
+        if prelude.len() > 64 {
+            return Err(Failure::new(
+                502,
+                "Provider stream produced no completion output",
+            ));
+        }
+    }
+    Err(Failure::new(502, "Provider returned an empty completion"))
+}
 async fn open(
     provider: Provider,
     model: &str,
@@ -278,9 +323,11 @@ async fn open(
             }
         };
         let mut events = normalize(provider, response);
-        let first = match events.next().await {
-            Some(Ok(first)) if first != "[DONE]" => first,
-            Some(Err(e)) => {
+        // Nothing reaches the client until generation starts, so a failure before then
+        // still fails over (subject to the Cache First 429 exception).
+        let prelude = match until_output(&mut events).await {
+            Ok(prelude) => prelude,
+            Err(e) => {
                 lease.failure(e.status);
                 if e.status == 429 && policy.sticky.mode == SchedulingMode::CacheFirst {
                     return Err(e);
@@ -288,15 +335,10 @@ async fn open(
                 last = Some(e);
                 continue;
             }
-            _ => {
-                lease.failure(502);
-                last = Some(Failure::new(502, "Provider returned an empty completion"));
-                continue;
-            }
         };
         let account = lease.account.clone();
         let guarded = async_stream::stream! {
-            yield Ok(first);
+            for chunk in prelude { yield Ok(chunk); }
             while let Some(event) = events.next().await {
                 match event {
                     Ok(data) => { if data == "[DONE]" { lease.success(); } yield Ok(data); },
@@ -455,6 +497,34 @@ mod tests {
             let trae = codec::request_for(protocol, body, dialect(Provider::Trae)).unwrap();
             assert_eq!(trae["response_format"]["type"], "json_object");
         }
+    }
+    #[tokio::test]
+    async fn failures_before_generation_output_remain_retryable() {
+        // A role-only chunk, then an upstream error: nothing has been generated yet.
+        let mut events = normalize(
+            Provider::Qoder,
+            response("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: {\"statusCodeValue\":503,\"body\":\"busy\"}\n\n"),
+        );
+        assert_eq!(until_output(&mut events).await.unwrap_err().status, 503);
+        // Leading role-only and usage chunks are kept, in order, ahead of the first output.
+        let mut events = normalize(
+            Provider::Qoder,
+            response("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"),
+        );
+        let prelude = until_output(&mut events).await.unwrap();
+        assert_eq!(prelude.len(), 3);
+        assert!(prelude[2].contains("\"hi\""));
+        assert_eq!(events.next().await.unwrap().unwrap(), "[DONE]");
+        // A stream that finishes without any output is an empty completion.
+        let mut events = normalize(
+            Provider::Qoder,
+            response("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"),
+        );
+        assert_eq!(until_output(&mut events).await.unwrap_err().status, 502);
+        // A finish reason alone (e.g. a TRAE `done` after tool output) counts as output.
+        assert!(carries_output(
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#
+        ));
     }
     #[tokio::test]
     async fn truncated_stream_and_pre_generation_provider_errors_stay_failures() {
