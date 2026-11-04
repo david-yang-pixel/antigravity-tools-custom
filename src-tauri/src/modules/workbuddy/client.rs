@@ -6,7 +6,6 @@ use rquest::{
     Method,
 };
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
 /// Connection settings shared by direct and egress clients.
@@ -318,13 +317,7 @@ pub async fn models(account: &Account) -> Result<Vec<Model>, String> {
 }
 
 pub fn session_key(scope: &str, payload: &Value) -> String {
-    let first = payload
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|a| a.iter().find(|m| m["role"] == "user"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    format!("{:x}", Sha256::digest(format!("{scope}:{first}")))
+    crate::proxy::session_manager::SessionManager::account_session_key(scope, payload)
 }
 
 /// Why a chat request produced no upstream HTTP response. Only `Connection`
