@@ -255,6 +255,17 @@ pub fn select_for_probe(
     scheduling::try_acquire(provider, model, "", &policy, exclude)?
         .ok_or_else(|| Failure::new(429, "Accounts are busy or cooling down"))
 }
+/// Oldest-due first, so accounts rescheduled after a failure (+60s) cannot keep
+/// monopolizing the bounded batch and starve accounts later in the vault.
+pub(super) fn due_for_maintenance(accounts: Vec<Account>, at: i64) -> Vec<Account> {
+    let mut due: Vec<_> = accounts
+        .into_iter()
+        .filter(|a| a.enabled && a.auto_refresh && a.next_sync_at <= at)
+        .collect();
+    due.sort_by_key(|a| a.next_sync_at);
+    due.truncate(20);
+    due
+}
 pub fn start() {
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -274,11 +285,7 @@ pub fn start() {
                     tracing::warn!("{} account vault is unavailable", provider.name());
                     continue;
                 };
-                for a in accounts
-                    .into_iter()
-                    .filter(|a| a.enabled && a.auto_refresh && a.next_sync_at <= now())
-                    .take(20)
-                {
+                for a in due_for_maintenance(accounts, now()) {
                     let result = tokio::time::timeout(
                         std::time::Duration::from_secs(50),
                         sync(provider, &a.id, false),

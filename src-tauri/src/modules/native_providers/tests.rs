@@ -1086,3 +1086,32 @@ async fn incomplete_generation_does_not_become_a_successful_completion() {
     .await;
     assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
 }
+
+#[test]
+fn maintenance_batches_take_the_oldest_due_accounts_first() {
+    let at = 1_000_000;
+    // 25 accounts that just failed are due again at the next tick, ahead of five
+    // accounts later in the vault that have never been maintained.
+    let mut vault: Vec<Account> = (0..25)
+        .map(|_| {
+            let mut a = Account::new(Provider::Qoder, Realm::Cn);
+            a.next_sync_at = at - 1;
+            a
+        })
+        .collect();
+    let starved: Vec<Account> = (0..5)
+        .map(|_| Account::new(Provider::Qoder, Realm::Cn))
+        .collect();
+    vault.extend(starved.iter().cloned());
+    let mut later = Account::new(Provider::Qoder, Realm::Cn);
+    later.next_sync_at = at + 1;
+    let mut paused = Account::new(Provider::Qoder, Realm::Cn);
+    paused.auto_refresh = false;
+    vault.extend([later.clone(), paused.clone()]);
+    let batch = accounts::due_for_maintenance(vault, at);
+    assert_eq!(batch.len(), 20);
+    for a in &starved {
+        assert!(batch.iter().any(|b| b.id == a.id));
+    }
+    assert!(batch.iter().all(|b| b.id != later.id && b.id != paused.id));
+}
