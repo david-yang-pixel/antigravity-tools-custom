@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::modules::{account, custom_upstream, workbuddy};
+use crate::modules::{account, custom_upstream, native_providers, workbuddy};
 use crate::utils::fs::{file_stamp, write_atomic, FileStamp};
 
 pub const ANTIGRAVITY_SOURCE: &str = "antigravity:default";
@@ -246,12 +246,18 @@ fn provider(source: &str) -> Result<&'static str, String> {
     match source {
         ANTIGRAVITY_SOURCE => Ok("antigravity"),
         WORKBUDDY_SOURCE => Ok("workbuddy"),
+        source if native_providers::Provider::from_source(source).is_some() => {
+            Ok(native_providers::Provider::from_source(source)
+                .unwrap()
+                .key())
+        }
         // Syntactic only: a removed custom upstream must not invalidate stored bindings.
         _ if custom_upstream::is_source(source) => Ok(custom_upstream::PROVIDER),
         _ => Err("Unknown model source".into()),
     }
 }
-/// Provider family of a source (`antigravity`, `workbuddy`, `openai_compatible`).
+/// Provider family of a source (`antigravity`, `workbuddy`, `qoder`, `openai_compatible`),
+/// or `unknown`.
 pub fn provider_type(source: &str) -> &'static str {
     provider(source).unwrap_or("unknown")
 }
@@ -673,6 +679,77 @@ fn discover() -> Result<Discovery, String> {
             }
         }
     }
+    for native_provider in native_providers::Provider::ALL {
+        let source = native_provider.source();
+        let (settings, accounts) = match (
+            native_providers::store::settings(native_provider),
+            native_providers::store::all(native_provider),
+        ) {
+            (Ok(settings), Ok(accounts)) => (settings, accounts),
+            _ => {
+                discovery.sources.push(ModelSource {
+                    id: source.into(),
+                    provider_type: native_provider.key().into(),
+                    display_name: native_provider.name().into(),
+                    enabled: false,
+                    account_count: 0,
+                });
+                discovery.skipped.push(format!(
+                    "{} source is unavailable: repair its account vault or settings in Accounts.",
+                    native_provider.name()
+                ));
+                continue;
+            }
+        };
+        discovery.sources.push(ModelSource {
+            id: source.into(),
+            provider_type: native_provider.key().into(),
+            display_name: native_provider.name().into(),
+            enabled: settings.enabled,
+            account_count: accounts.len(),
+        });
+        for account in accounts {
+            discovery
+                .all_accounts
+                .entry(source.into())
+                .or_default()
+                .insert(account.id.clone());
+            if account.enabled && settings.enabled {
+                discovery
+                    .eligible_accounts
+                    .entry(source.into())
+                    .or_default()
+                    .insert(account.id.clone());
+            }
+            for model in &account.models {
+                let Some(id) = discovery.record(source, &model.id)? else {
+                    continue;
+                };
+                if account.enabled && settings.enabled {
+                    let checked_at = account.verified_models.get(&model.id).copied().unwrap_or(0);
+                    discovery
+                        .observations
+                        .entry(id)
+                        .or_default()
+                        .accounts
+                        .insert(
+                            account.id.clone(),
+                            Evidence {
+                                declared: true,
+                                declared_vision: Some(model.vision),
+                                declared_reasoning: Some(model.reasoning),
+                                status: if checked_at > 0 {
+                                    Some("verified")
+                                } else {
+                                    None
+                                },
+                                checked_at,
+                            },
+                        );
+                }
+            }
+        }
+    }
     Ok(discovery)
 }
 fn legacy_target(
@@ -1007,6 +1084,8 @@ fn candidate_view(
     store: &StoredRegistry,
     discovery: &Discovery,
 ) -> CandidateModel {
+    let catalog_bound = record.source_id == WORKBUDDY_SOURCE
+        || native_providers::Provider::from_source(&record.source_id).is_some();
     let mut accounts: BTreeMap<String, Evidence> = discovery
         .observations
         .get(&record.id)
@@ -1018,7 +1097,7 @@ fn candidate_view(
                 .collect()
         })
         .unwrap_or_default();
-    if record.source_id == WORKBUDDY_SOURCE {
+    if catalog_bound {
         // WB dispatch requires membership in the current native model catalog.
         // Keep probe history on disk, but do not resurrect a withdrawn grant.
         accounts.retain(|_, evidence| evidence.declared);
@@ -1032,12 +1111,12 @@ fn candidate_view(
     {
         // A failed WorkBuddy test says nothing about the model, and failures left
         // by the retired fixed-sentence probe would otherwise read as a verdict.
-        if record.source_id == WORKBUDDY_SOURCE && probe.status == "failed" {
+        if catalog_bound && probe.status == "failed" {
             continue;
         }
         if let Some(id) = &probe.account_id {
             if !eligible.is_some_and(|ids| ids.contains(id))
-                || (record.source_id == WORKBUDDY_SOURCE && !accounts.contains_key(id))
+                || (catalog_bound && !accounts.contains_key(id))
             {
                 continue;
             }
@@ -1071,7 +1150,7 @@ fn candidate_view(
         .into_iter()
         .chain(global.map(|p| p.checked_at))
         .max();
-    let all_unavailable = if record.source_id == WORKBUDDY_SOURCE {
+    let all_unavailable = if catalog_bound {
         // WB dispatch requires membership in the account's stored model catalog. Accounts
         // that only declare unrelated models cannot make a denied target merely unverified.
         !accounts.is_empty() && accounts.values().all(|e| e.status == Some("unavailable"))
@@ -1347,8 +1426,11 @@ pub fn validate_refresh_request(request: &RefreshModelCandidatesRequest) -> Resu
 }
 
 pub fn validate_discovery_request(request: &DiscoverUpstreamModelsRequest) -> Result<(), String> {
-    if provider(&request.source_id)? != "workbuddy" && request.realm.is_some() {
-        return Err("Only WorkBuddy accounts have a region".into());
+    if provider(&request.source_id)? != "workbuddy"
+        && native_providers::Provider::from_source(&request.source_id).is_none()
+        && request.realm.is_some()
+    {
+        return Err("Only native account providers have a region".into());
     }
     Ok(())
 }

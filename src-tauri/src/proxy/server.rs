@@ -767,6 +767,10 @@ impl AxumServer {
             // monitor 需要在 auth 之后执行才能获取 UserTokenIdentity
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
+                crate::proxy::upstream::native::route,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
                 crate::proxy::upstream::openai_compat::route,
             ))
             .layer(axum::middleware::from_fn_with_state(
@@ -1070,6 +1074,21 @@ impl AxumServer {
                 "/model-registry/verify",
                 post(admin_verify_model_candidates),
             )
+            .route("/native-accounts/list", post(admin_list_native_accounts))
+            .route("/native-accounts/import", post(admin_import_native_account))
+            .route("/native-accounts/update", post(admin_update_native_account))
+            .route("/native-accounts/delete", post(admin_delete_native_account))
+            .route(
+                "/native-providers/settings",
+                post(admin_get_native_provider_settings),
+            )
+            .route(
+                "/native-providers/settings/save",
+                post(admin_save_native_provider_settings),
+            )
+            .route("/native-login/start", post(admin_start_native_login))
+            .route("/native-login/poll", post(admin_poll_native_login))
+            .route("/native-login/cancel", post(admin_cancel_native_login))
             .route(
                 "/workbuddy-settings",
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
@@ -2817,6 +2836,79 @@ async fn admin_save_custom_upstreams(
     Json(payload): Json<crate::modules::custom_upstream::SettingsUpdate>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::custom_upstream::save_custom_upstreams(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+
+async fn admin_list_native_accounts(
+    Json(payload): Json<crate::commands::native_providers::ProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::list_native_accounts(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_import_native_account(
+    Json(payload): Json<crate::commands::native_providers::ImportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::import_native_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_update_native_account(
+    Json(payload): Json<crate::commands::native_providers::AccountRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::update_native_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_delete_native_account(
+    Json(payload): Json<crate::commands::native_providers::AccountRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::delete_native_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_get_native_provider_settings(
+    Json(payload): Json<crate::commands::native_providers::ProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::get_native_provider_settings(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_save_native_provider_settings(
+    Json(payload): Json<crate::commands::native_providers::SettingsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::save_native_provider_settings(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_start_native_login(
+    Json(payload): Json<crate::commands::native_providers::LoginRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::start_native_login(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_poll_native_login(
+    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::poll_native_login(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_cancel_native_login(
+    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::cancel_native_login(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

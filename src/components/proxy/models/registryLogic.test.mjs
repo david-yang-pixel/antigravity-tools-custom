@@ -47,6 +47,17 @@ test('OpenAI-compatible upstreams serve OpenAI and Anthropic endpoints only', ()
     assert.equal(model.image_generation, false);
 });
 
+test('native Qoder publications retain their sources and supported client protocols', () => {
+    for (const provider_type of ['qoder']) {
+        const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type };
+        const registry = view({ sources: [source], candidates: [candidate('native-c', source.id, 'same-native')], published_models: [publication('native-p', source.id, 'same-native', `${provider_type}-chat`)] });
+        const [model] = logic.registryCatalog(registry);
+        assert.deepEqual(model.protocols, ['openai', 'anthropic']);
+        assert.equal(model.source_id, source.id);
+        assert.equal(model.image_generation, false);
+    }
+});
+
 test('future providers remain visible without guessing protocol compatibility; explicit capabilities win', () => {
     const extra = { ...ag, id: 'future:one', provider_type: 'future', display_name: 'Future' };
     const c = candidate('future-c', extra.id, 'm');
