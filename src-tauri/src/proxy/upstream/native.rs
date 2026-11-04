@@ -68,6 +68,9 @@ pub async fn route(
         Ok(p) => super::openai_compat::prepare(p, &published.native_model),
         Err(e) => return failed(Failure::new(400, e)),
     };
+    if let Err(e) = representable(provider, &payload) {
+        return failed(e);
+    }
     if let Some(capture) = parts
         .extensions
         .get::<crate::proxy::monitor::UpstreamRequestBodyHolder>()
@@ -125,6 +128,23 @@ fn dialect(provider: Provider) -> codec::Dialect {
     codec::Dialect {
         structured_output: provider == Provider::Trae,
     }
+}
+/// Request constraints a provider's wire payload cannot carry are request errors (400)
+/// raised before account selection, never silently dropped. Qoder has no tool-selection
+/// field: it honors `auto` and `none` (by offering no tools), not `required` or a forced
+/// function.
+fn representable(provider: Provider, chat: &Value) -> Result<(), Failure> {
+    if provider == Provider::Qoder
+        && chat
+            .get("tool_choice")
+            .is_some_and(|choice| choice != "auto" && choice != "none")
+    {
+        return Err(Failure::new(
+            400,
+            "This source supports tool_choice auto or none only",
+        ));
+    }
+    Ok(())
 }
 fn failed(e: Failure) -> Response {
     let status = match e.status {
@@ -496,6 +516,52 @@ mod tests {
             assert!(codec::request_for(protocol, body.clone(), dialect(Provider::Qoder)).is_err());
             let trae = codec::request_for(protocol, body, dialect(Provider::Trae)).unwrap();
             assert_eq!(trae["response_format"]["type"], "json_object");
+        }
+    }
+    #[test]
+    fn qoder_rejects_tool_choices_it_cannot_forward() {
+        let tools =
+            json!([{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}]);
+        let requests = [
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":tools,"tool_choice":"required"}),
+                false,
+            ),
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":tools,"tool_choice":{"type":"function","function":{"name":"read"}}}),
+                false,
+            ),
+            (
+                codec::Protocol::Messages,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read","input_schema":{"type":"object"}}],"tool_choice":{"type":"any"}}),
+                false,
+            ),
+            (
+                codec::Protocol::Messages,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read","input_schema":{"type":"object"}}],"tool_choice":{"type":"none"}}),
+                true,
+            ),
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":tools,"tool_choice":"auto"}),
+                true,
+            ),
+            (
+                codec::Protocol::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}],"tools":tools}),
+                true,
+            ),
+        ];
+        for (protocol, body, accepted) in requests {
+            let chat = codec::request_for(protocol, body, dialect(Provider::Qoder)).unwrap();
+            assert_eq!(
+                representable(Provider::Qoder, &chat).is_ok(),
+                accepted,
+                "{chat}"
+            );
+            assert!(representable(Provider::Trae, &chat).is_ok());
         }
     }
     #[tokio::test]

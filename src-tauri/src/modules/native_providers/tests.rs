@@ -799,6 +799,13 @@ fn payload_translation_keeps_tool_history_and_provider_model_identity() {
     assert_eq!(payload["model_config"]["key"], "shared-model");
     assert_eq!(payload["business"]["model_key"], "shared-model");
     assert_eq!(payload["tools"], json!([]));
+    let payload = wire::qoder_request(
+        &account(Provider::Qoder, "u"),
+        "shared-model",
+        json!({"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"read"}}],"tool_choice":"none"}),
+    )
+    .unwrap();
+    assert_eq!(payload["tools"], json!([]));
 }
 
 #[test]

@@ -43,6 +43,13 @@ pub fn qoder_request(a: &Account, model: &str, mut chat: Value) -> Result<Value,
             parameters["max_tokens"] = value.clone();
         }
     }
+    // The payload has no tool-selection field: `none` is honored by offering no tools;
+    // `required`/forced choices are rejected before dispatch (proxy::upstream::native).
+    let tools = if chat["tool_choice"] == "none" {
+        json!([])
+    } else {
+        chat.get("tools").cloned().unwrap_or(json!([]))
+    };
     let id = uuid::Uuid::new_v4().to_string();
     // Group by a stable conversation prefix rather than splitting each tool turn into a new
     // upstream conversation. No raw prompt or account credential enters the identifier.
@@ -65,7 +72,7 @@ pub fn qoder_request(a: &Account, model: &str, mut chat: Value) -> Result<Value,
         json!({"request_id":id,"request_set_id":uuid::Uuid::new_v4().to_string(),"chat_record_id":conversation,"session_id":conversation,
         "stream":true,"chat_task":"FREE_INPUT","chat_context":{"chatPrompt":"","extra":{"context":[],"modelConfig":config,"originalContent":{"type":"text","text":prompt}},"features":[],"text":{"type":"text","text":prompt}},
         "is_reply":true,"is_retry":false,"source":1,"version":"3","chat_prompt":"","session_type":"qodercli","agent_id":"agent_common","task_id":"common",
-        "aliyun_user_type":a.credentials.user_type,"model_config":config,"messages":chat["messages"],"parameters":parameters,"tools":chat.get("tools").cloned().unwrap_or(json!([])),
+        "aliyun_user_type":a.credentials.user_type,"model_config":config,"messages":chat["messages"],"parameters":parameters,"tools":tools,
         "business":{"product":"cli","version":qoder::sign::version(),"type":"agent","id":conversation,"name":prompt.chars().take(30).collect::<String>(),"begin_at":now()*1000,"stage":"start","model_key":model}}),
     )
 }
