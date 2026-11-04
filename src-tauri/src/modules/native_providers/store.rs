@@ -33,14 +33,9 @@ fn write(provider: Provider, accounts: &[Account]) -> Result<(), String> {
     let encoded = crate::utils::crypto::encrypt_string(
         &serde_json::to_string(accounts).map_err(|_| "Cannot encode account vault")?,
     )?;
-    crate::utils::fs::write_atomic(&path, encoded.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| "Cannot restrict account vault permissions")?;
-    }
-    Ok(())
+    // Owner-only from creation: a post-rename chmod would leave the encrypted vault
+    // readable by other local users while it is written.
+    crate::utils::fs::write_atomic_private(&path, encoded.as_bytes())
 }
 pub fn all(provider: Provider) -> Result<Vec<Account>, String> {
     let _guard = LOCK.lock().map_err(|_| "Account vault unavailable")?;
