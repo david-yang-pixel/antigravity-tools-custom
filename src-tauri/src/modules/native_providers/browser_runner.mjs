@@ -1,6 +1,9 @@
 // Private, short-lived browser driver. Only its owning Rust process uses stdio.
 // No account credentials, screenshots, input or grants are written to a log/file.
+// Chromium speaks DevTools only over this process's private pipes (fd 3/4): no
+// debugging port exists for other local users or processes to attach to.
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -27,11 +30,18 @@ export function validateStart(config) {
         || callback.username || callback.password
         || auth.searchParams.get('auth_callback_url') !== callback.href
         || !config.trace || auth.searchParams.get('login_trace_id') !== config.trace
-        || !Number.isInteger(config.debug_port) || config.debug_port < 1 || config.debug_port > 65535
+        || !validBrowser(config.browser)
         || !Number.isInteger(config.expires_at) || config.expires_at <= now || config.expires_at > now + 610) {
         throw new Error('TRAE_BROWSER_START_FAILED');
     }
     return { auth, callback };
+}
+
+// The owning process supplies executables and flags; a debugging port must never be one.
+export function validBrowser(browser) {
+    const strings = value => Array.isArray(value) && value.every(item => typeof item === 'string' && item.length > 0);
+    return !!browser && strings(browser.executables) && browser.executables.length > 0 && strings(browser.args)
+        && !browser.args.some(arg => /^--remote-debugging-(port|address|pipe)/.test(arg));
 }
 
 export function matchingTrace(query, trace) {
@@ -68,35 +78,48 @@ export function inputEvents(action) {
     throw new Error('TRAE_BROWSER_COMMAND_FAILED');
 }
 
-async function connect(endpoint) {
-    const socket = new WebSocket(endpoint);
-    await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('TRAE_BROWSER_START_FAILED')), 8000);
-        socket.onopen = () => { clearTimeout(timeout); resolve(); };
-        socket.onerror = () => { clearTimeout(timeout); reject(new Error('TRAE_BROWSER_START_FAILED')); };
-    });
-    let serial = 0;
+// Launches the first available executable with DevTools on fd 3 (commands) and fd 4
+// (responses); stdout/stderr are discarded so page output never reaches the parent.
+export async function launch({ executables, args }) {
+    for (const executable of executables) {
+        const child = spawn(executable, [...args, '--remote-debugging-pipe', 'about:blank'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], windowsHide: true });
+        const started = await new Promise(resolve => { child.once('spawn', () => resolve(true)); child.once('error', () => resolve(false)); });
+        if (started) return child;
+    }
+    throw new Error('TRAE_BROWSER_START_FAILED');
+}
+
+// One NUL-delimited CDP connection; page targets are addressed by flattened sessionId.
+export function pipeConnection(writer, reader) {
+    let serial = 0, buffer = Buffer.alloc(0), closed = false;
     const pending = new Map();
-    socket.onmessage = event => {
-        let value; try { value = JSON.parse(event.data); } catch { return; }
-        const waiter = pending.get(value.id);
-        if (waiter) { clearTimeout(waiter.timer); pending.delete(value.id); value.error ? waiter.reject(new Error('TRAE_BROWSER_COMMAND_FAILED')) : waiter.resolve(value.result); }
-    };
-    socket.onclose = () => {
+    const fail = () => {
+        closed = true;
         for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('TRAE_BROWSER_STOPPED')); }
         pending.clear();
     };
+    reader.on('data', chunk => {
+        buffer = Buffer.concat([buffer, chunk]);
+        if (buffer.length > 8 * 1024 * 1024) { fail(); reader.destroy(); return; }
+        let end;
+        while ((end = buffer.indexOf(0)) >= 0) {
+            const raw = buffer.subarray(0, end); buffer = buffer.subarray(end + 1);
+            let value; try { value = JSON.parse(raw.toString('utf8')); } catch { continue; }
+            const waiter = pending.get(value.id);
+            if (waiter) { clearTimeout(waiter.timer); pending.delete(value.id); value.error ? waiter.reject(new Error('TRAE_BROWSER_COMMAND_FAILED')) : waiter.resolve(value.result); }
+        }
+    });
+    reader.on('close', fail); reader.on('error', fail); writer.on('error', fail);
     return {
-        call(method, params = {}) {
+        call(method, params = {}, sessionId, timeout = 8000) {
             return new Promise((resolve, reject) => {
+                if (closed) return reject(new Error('TRAE_BROWSER_STOPPED'));
                 const id = ++serial;
-                const timer = setTimeout(() => { pending.delete(id); reject(new Error('TRAE_BROWSER_COMMAND_FAILED')); }, 8000);
+                const timer = setTimeout(() => { pending.delete(id); reject(new Error('TRAE_BROWSER_COMMAND_FAILED')); }, timeout);
                 pending.set(id, { resolve, reject, timer });
-                try { socket.send(JSON.stringify({ id, method, params })); }
-                catch { clearTimeout(timer); pending.delete(id); reject(new Error('TRAE_BROWSER_STOPPED')); }
+                writer.write(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
             });
         },
-        close: () => socket.close(),
     };
 }
 
@@ -115,14 +138,13 @@ export class LoginBrowser {
             this.server.listen(Number(callback.port), '127.0.0.1', resolve);
         });
         this.timer = setTimeout(() => this.stop(), Math.max(1, config.expires_at * 1000 - Date.now()));
-        this.endpoint = `http://127.0.0.1:${config.debug_port}`;
-        let version;
-        for (let attempt = 0; attempt < 60; attempt++) {
-            try { version = await fetch(`${this.endpoint}/json/version`, { signal: AbortSignal.timeout(800) }).then(r => r.json()); break; }
-            catch { await new Promise(resolve => setTimeout(resolve, 100)); }
-        }
-        if (!version?.webSocketDebuggerUrl) throw new Error('TRAE_BROWSER_START_FAILED');
-        this.browser = await connect(version.webSocketDebuggerUrl);
+        this.chrome = await launch(config.browser);
+        this.exited = new Promise(resolve => this.chrome.once('exit', resolve));
+        void this.exited.then(() => this.stop());
+        this.browser = pipeConnection(this.chrome.stdio[3], this.chrome.stdio[4]);
+        // Chromium buffers pipe input until it is ready; allow for a slow first start.
+        try { await this.browser.call('Browser.getVersion', {}, undefined, 30000); }
+        catch { throw new Error('TRAE_BROWSER_START_FAILED'); }
         await this.browser.call('Browser.setDownloadBehavior', { behavior: 'deny' });
         // Chromium 154 split local-network permission into local and loopback.
         for (const origin of new Set([auth.origin, ...providerDomains.flatMap(d => [`https://${d}`, `https://www.${d}`])])) {
@@ -134,19 +156,20 @@ export class LoginBrowser {
         return { ready: true };
     }
     async page() {
-        const targets = await fetch(`${this.endpoint}/json/list`, { signal: AbortSignal.timeout(2000) }).then(r => r.json());
-        const pages = targets.filter(t => t.type === 'page' && t.webSocketDebuggerUrl);
-        // A login provider may open a popup. Targets belong to this private profile.
+        const { targetInfos } = await this.browser.call('Target.getTargets');
+        // Newest first: a login provider may open a popup. Targets belong to this private profile.
+        const pages = targetInfos.filter(t => t.type === 'page');
         const target = pages[0];
         if (!target) throw new Error('TRAE_BROWSER_PAGE_UNAVAILABLE');
-        for (const [id, page] of this.pages) if (!pages.some(p => p.id === id)) { page.close(); this.pages.delete(id); }
-        if (!this.pages.has(target.id)) {
-            const page = await connect(target.webSocketDebuggerUrl);
+        for (const id of this.pages.keys()) if (!pages.some(p => p.targetId === id)) this.pages.delete(id);
+        if (!this.pages.has(target.targetId)) {
+            const { sessionId } = await this.browser.call('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+            const page = { call: (method, params) => this.browser.call(method, params, sessionId) };
             await page.call('Page.enable');
             await page.call('Emulation.setDeviceMetricsOverride', { width: WIDTH, height: HEIGHT, deviceScaleFactor: 1, mobile: false });
-            this.pages.set(target.id, page);
+            this.pages.set(target.targetId, page);
         }
-        return this.pages.get(target.id);
+        return this.pages.get(target.targetId);
     }
     async snapshot() {
         const page = await this.page();
@@ -208,25 +231,38 @@ export class LoginBrowser {
         if (grant) { clearTimeout(grant.timer); this.grants.delete(command.request); grant.resolve(command.success === true); }
     }
     stop() {
+        if (this.stopped) return;
+        this.stopped = true;
         clearTimeout(this.timer);
         for (const g of this.grants.values()) { clearTimeout(g.timer); g.resolve(false); }
         this.grants.clear();
         this.server?.closeAllConnections(); this.server?.close();
-        for (const page of this.pages.values()) page.close();
+        this.pages.clear();
         if (this.browser) void this.browser.call('Browser.close').catch(() => undefined);
         this.emit({ event: 'done' });
+    }
+    // Bounded: Chromium also exits on its own once this process's pipe closes.
+    async shutdown() {
+        this.stop();
+        if (!this.chrome || this.chrome.exitCode !== null || this.chrome.signalCode !== null) return;
+        const timer = new Promise(resolve => setTimeout(resolve, 2000));
+        if (await Promise.race([this.exited.then(() => true), timer.then(() => false)])) return;
+        this.chrome.kill('SIGKILL');
+        await Promise.race([this.exited, new Promise(resolve => setTimeout(resolve, 1000))]);
     }
 }
 
 async function main() {
     const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`);
     const browser = new LoginBrowser(emit);
-    let started = false, queued = 0, chain = Promise.resolve();
+    let started = false, queued = 0, chain = Promise.resolve(), exiting = false;
+    const exit = code => { if (exiting) return; exiting = true; void browser.shutdown().finally(() => process.exit(code)); };
     const lines = readline.createInterface({ input: process.stdin });
     lines.on('line', line => {
-        if (line.length > LIMIT + 4096 || ++queued > 32) { browser.stop(); process.exit(1); }
-        let command; try { command = JSON.parse(line); } catch { browser.stop(); process.exit(1); }
-        if (command.op === 'close') { browser.stop(); process.exit(0); }
+        if (exiting) return;
+        if (line.length > LIMIT + 4096 || ++queued > 32) return exit(1);
+        let command; try { command = JSON.parse(line); } catch { return exit(1); }
+        if (command.op === 'close') return exit(0);
         if (command.op === 'grant_result') { queued--; browser.grantResult(command); return; }
         chain = chain.then(async () => {
             try {
@@ -242,7 +278,7 @@ async function main() {
             } finally { queued--; }
         });
     });
-    lines.on('close', () => { browser.stop(); process.exit(0); });
-    process.on('SIGTERM', () => { browser.stop(); process.exit(0); });
+    lines.on('close', () => exit(0));
+    process.on('SIGTERM', () => exit(0));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

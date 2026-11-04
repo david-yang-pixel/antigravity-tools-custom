@@ -133,8 +133,11 @@ token. Imported account identity is checked with the provider before persistence
 
 The browser endpoints require administrator authentication and a live TRAE session
 started with `server_browser:true`. They expose no arbitrary navigation, script
-execution, CDP endpoint or files. Chromium's debugging endpoint and grant receiver
-bind only to loopback. The driver communicates with Rust through private process
+execution, CDP endpoint or files. Chromium runs with `--remote-debugging-pipe`
+under the driver, so DevTools is reachable only through the driver's own process
+pipes and no debugging port exists for other local users or processes; the driver
+launches Chromium and it exits when those pipes close. The grant receiver binds
+only to loopback. The driver communicates with Rust through private process
 pipes; callback URLs/grants, text input and screenshots are not logged or written
 as application data. Chromium's temporary profile may contain official cookies
 while the session is live and is removed when it ends.

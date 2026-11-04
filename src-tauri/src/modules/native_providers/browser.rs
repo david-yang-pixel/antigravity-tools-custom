@@ -1,5 +1,7 @@
 //! Temporary server-owned official login browser. The public API exposes only
 //! screenshots and bounded input actions; CDP and grants stay on private pipes.
+//! Chromium runs with `--remote-debugging-pipe` under the private driver, so no
+//! DevTools port exists that another local user or process could attach to.
 use super::*;
 use serde::Deserialize;
 use serde_json::json;
@@ -127,15 +129,6 @@ pub fn close(id: &str) {
     }
 }
 
-fn port() -> Result<u16, String> {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .map_err(|_| "TRAE_BROWSER_START_FAILED")?;
-    listener
-        .local_addr()
-        .map(|a| a.port())
-        .map_err(|_| "TRAE_BROWSER_START_FAILED".into())
-}
-
 struct PrivateDirectory(PathBuf);
 impl Drop for PrivateDirectory {
     fn drop(&mut self) {
@@ -220,58 +213,45 @@ pub async fn start(
     }
     let script = directory.0.join("runner.mjs");
     crate::utils::fs::write_atomic(&script, include_bytes!("browser_runner.mjs"))?;
-    let debug_port = port()?;
-    let candidates = std::env::var("ABV_TRAE_BROWSER_PATH")
+    let executables = std::env::var("ABV_TRAE_BROWSER_PATH")
         .ok()
         .filter(|p| !p.is_empty())
         .map(|p| vec![p])
         .unwrap_or_else(|| {
-            vec![
-                "chromium".into(),
-                "chromium-browser".into(),
-                "google-chrome".into(),
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
-                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".into(),
-                "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe".into(),
+            [
+                "chromium",
+                "chromium-browser",
+                "google-chrome",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
             ]
+            .map(String::from)
+            .to_vec()
         });
-    let mut chrome = None;
-    for executable in candidates {
-        let mut command = Command::new(executable);
-        command
-            .args([
-                "--headless",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--window-size=1000,720",
-                "--remote-debugging-address=127.0.0.1",
-            ])
-            .arg(format!("--remote-debugging-port={debug_port}"))
-            .arg(format!(
-                "--user-data-dir={}",
-                directory.0.join("profile").display()
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        if std::env::var("ABV_TRAE_BROWSER_NO_SANDBOX").as_deref() == Ok("true") {
-            command.arg("--no-sandbox");
-        }
-        if let Some(proxy) = &proxy {
-            command
-                .arg(format!("--proxy-server={proxy}"))
-                .arg("--proxy-bypass-list=127.0.0.1;localhost");
-        }
-        command.arg("about:blank");
-        if let Ok(child) = command.spawn() {
-            chrome = Some(child);
-            break;
-        }
+    let mut args: Vec<String> = [
+        "--headless",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=1000,720",
+    ]
+    .map(String::from)
+    .to_vec();
+    args.push(format!(
+        "--user-data-dir={}",
+        directory.0.join("profile").display()
+    ));
+    if std::env::var("ABV_TRAE_BROWSER_NO_SANDBOX").as_deref() == Ok("true") {
+        args.push("--no-sandbox".into());
     }
-    let mut chrome = chrome.ok_or("TRAE_BROWSER_START_FAILED")?;
+    if let Some(proxy) = &proxy {
+        args.push(format!("--proxy-server={proxy}"));
+        args.push("--proxy-bypass-list=127.0.0.1;localhost".into());
+    }
+    // The driver launches Chromium itself: `--remote-debugging-pipe` needs the
+    // driver's own fd 3/4, and Chromium exits when those pipes close.
     let node = std::env::var("ABV_TRAE_BROWSER_NODE").unwrap_or_else(|_| "node".into());
     let child = Command::new(node)
         .arg(script)
@@ -279,14 +259,8 @@ pub async fn start(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
-        .spawn();
-    let child = match child {
-        Ok(child) => child,
-        Err(_) => {
-            let _ = chrome.kill().await;
-            return Err("TRAE_BROWSER_START_FAILED".into());
-        }
-    };
+        .spawn()
+        .map_err(|_| "TRAE_BROWSER_START_FAILED")?;
     let (tx, rx) = mpsc::channel(32);
     let browser = Arc::new(Browser {
         commands: tx,
@@ -301,9 +275,9 @@ pub async fn start(
     }
     let owned_id = id.to_owned();
     tokio::spawn(actor(
-        owned_id, browser, rx, child, chrome, directory, expires_at, slot,
+        owned_id, browser, rx, child, directory, expires_at, slot,
     ));
-    let result = rpc(id, json!({"op":"start","debug_port":debug_port,"auth_url":auth_url,"callback_url":callback_url,"trace":trace,"expires_at":expires_at})).await;
+    let result = rpc(id, json!({"op":"start","browser":{"executables":executables,"args":args},"auth_url":auth_url,"callback_url":callback_url,"trace":trace,"expires_at":expires_at})).await;
     match result {
         Ok(_) => Ok(()),
         Err(error) => {
@@ -318,7 +292,6 @@ async fn actor(
     browser: Arc<Browser>,
     mut commands: mpsc::Receiver<Value>,
     mut node: Child,
-    mut chrome: Child,
     _directory: PrivateDirectory,
     expires_at: i64,
     _slot: tokio::sync::OwnedSemaphorePermit,
@@ -333,7 +306,6 @@ async fn actor(
         tokio::select! {
             _ = &mut expiry => break,
             _ = node.wait() => break,
-            _ = chrome.wait() => break,
             command = commands.recv() => {
                 let Some(command) = command else { break; };
                 let closing = command["op"] == "close";
@@ -379,10 +351,10 @@ async fn actor(
         input.write_all(b"{\"op\":\"close\"}\n"),
     )
     .await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), node.wait()).await;
+    // The driver waits (bounded) for Chromium to exit before it exits itself, so the
+    // temporary profile is no longer in use when `_directory` is removed.
+    let _ = tokio::time::timeout(Duration::from_secs(4), node.wait()).await;
     let _ = node.kill().await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), chrome.wait()).await;
-    let _ = chrome.kill().await;
 }
 
 pub async fn snapshot(id: &str) -> Result<Snapshot, String> {
