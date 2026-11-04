@@ -12,7 +12,7 @@ export interface NativeAccount {
     last_error: string | null; successes: number; failures: number;
 }
 export interface NativeSettings { provider: NativeProvider; enabled: boolean; preferred_account_id: string | null; env_locked: boolean }
-export interface NativeLogin { id: string; auth_url: string; expires_at: number; manual_callback: boolean; server_browser?: boolean }
+export interface NativeLogin { id: string; auth_url: string; expires_at: number; server_browser?: boolean }
 export interface NativeBrowserSnapshot { image: string; width: number; height: number; location: string }
 export type NativeBrowserInput = { type: 'click'; x: number; y: number } | { type: 'text'; text: string } | { type: 'key'; key: string } | { type: 'scroll'; delta_y: number } | { type: 'reload' };
 export interface NativeLoginPoll { status: 'pending' | 'authorized'; account: NativeAccount | null; }

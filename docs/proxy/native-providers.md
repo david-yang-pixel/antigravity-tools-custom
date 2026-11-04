@@ -17,7 +17,9 @@ references below. Live compatibility must be checked with an authorized account.
    server-owned Chromium session inside the account page. Scan or sign in there;
    its loopback receiver delivers the grant privately to Rust for PKCE exchange,
    identity validation and encrypted persistence. No local helper, extension or
-   callback paste is required. Desktop mode retains its native loopback listener.
+   callback paste is required. Desktop mode binds its loopback listener on
+   `ABV_TRAE_CALLBACK_PORT` before creating the authorization link; if another
+   process already holds that port, sign-in stops instead of directing the grant to it.
    Server browsers need Node.js 22+ and Chromium/Chrome/Edge. Each session lasts at
    most ten minutes; success, cancellation, expiry and process failure close it
    and remove its temporary profile. At most two browsers run concurrently.

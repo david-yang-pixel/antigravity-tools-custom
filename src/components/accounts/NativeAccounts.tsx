@@ -26,7 +26,6 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
     const [solo, setSolo] = useState(false);
     const [login, setLogin] = useState<NativeLogin | null>(null);
     const [target, setTarget] = useState<NativeAccount | null>(null);
-    const [callback, setCallback] = useState('');
     const [auth, setAuth] = useState('');
     const [deleting, setDeleting] = useState<NativeAccount | null>(null);
     const [now, setNow] = useState(Date.now() / 1000);
@@ -86,7 +85,7 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
     }
     async function close() {
         const session = sessionRef.current;
-        sessionRef.current = null; setLogin(null); setMode(null); setTarget(null); setAuth(''); setCallback('');
+        sessionRef.current = null; setLogin(null); setMode(null); setTarget(null); setAuth('');
         if (session) await request('cancel_native_login', { request: { provider, id: session.id } }).catch(() => undefined);
     }
     const change = (account: NativeAccount, patch: { enabled?: boolean; auto_refresh?: boolean; refresh?: boolean }) => run(async () => {
@@ -105,11 +104,6 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
         let parsed: unknown; try { parsed = JSON.parse(auth); } catch { throw new Error(t('nativeProviders.invalidJson')); }
         await request('import_native_account', { request: { provider, realm, auth: parsed } });
         if (alive.current) { setAuth(''); setMode(null); }
-    });
-    const complete = () => run(async () => {
-        if (!login) return;
-        await request('complete_native_login', { request: { provider, id: login.id, callback_url: callback } });
-        if (alive.current) { sessionRef.current = null; setLogin(null); setCallback(''); setMode(null); }
     });
     const reauthorize = (account: NativeAccount) => { setTarget(account); setRealm(account.realm); setMode('login'); setError(''); };
     return <div className="min-h-0 flex-1 overflow-auto px-5 pb-6">
@@ -146,7 +140,7 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
                     <div className="flex flex-wrap items-center gap-3">{!login.server_browser && <a className={`${button} !border-blue-600 !bg-blue-600 text-white`} href={login.auth_url} target="_blank" rel="noopener noreferrer" onClick={event => {
                         if (isTauri()) { event.preventDefault(); void import('@tauri-apps/plugin-opener').then(({ openUrl }) => openUrl(login.auth_url)).catch(error => setError(nativeLoginError(error, translate.current))); }
                     }}><ExternalLink size={16} />{t('nativeProviders.openLogin')}</a>}<span role="status" className="text-sm text-gray-500">{t('nativeProviders.waiting', { seconds: Math.max(0, Math.ceil(login.expires_at - now)) })}</span></div>
-                    {provider === 'trae' && !login.server_browser && <div className="space-y-2"><p className="text-sm text-gray-500">{t(login.manual_callback ? 'nativeProviders.callbackManualHint' : 'nativeProviders.callbackHint')}</p>{login.manual_callback && <><label className="block space-y-1 text-sm"><span>{t('nativeProviders.callbackUrl')}</span><input className={input} type="password" autoComplete="off" spellCheck={false} value={callback} onChange={e => setCallback(e.target.value)} /></label><button className={button} disabled={busy || !callback.trim()} onClick={() => void complete()}>{t('nativeProviders.complete')}</button></>}</div>}
+                    {provider === 'trae' && !login.server_browser && <p className="text-sm text-gray-500">{t('nativeProviders.callbackHint')}</p>}
                 </>)}
                 {mode === 'import' && <><p className="text-sm text-gray-500">{t('nativeProviders.importHint')}</p><label className="block space-y-2 text-sm"><span>{t('nativeProviders.credentials')}</span><textarea className={`${input} min-h-32 font-mono`} autoComplete="off" spellCheck={false} value={auth} onChange={e => setAuth(e.target.value)} placeholder={'{"accessToken":"…","refreshToken":"…","expiresAt":0}'} /></label><button className={button} disabled={busy || !auth.trim()} onClick={() => void importAccount()}>{t('nativeProviders.importSave')}</button></>}
             </div>}

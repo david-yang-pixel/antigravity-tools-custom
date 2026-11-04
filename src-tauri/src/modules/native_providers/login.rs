@@ -12,6 +12,7 @@ use std::{
 };
 
 const TTL: i64 = 600;
+pub const CALLBACK_PORT_UNAVAILABLE: &str = "TRAE_CALLBACK_PORT_UNAVAILABLE: the desktop callback port is in use by another process; free it or set ABV_TRAE_CALLBACK_PORT, then retry";
 struct Pending {
     account: Account,
     verifier: String,
@@ -39,7 +40,6 @@ pub struct Started {
     pub id: String,
     pub auth_url: String,
     pub expires_at: i64,
-    pub manual_callback: bool,
     pub server_browser: bool,
 }
 #[derive(Serialize)]
@@ -115,7 +115,7 @@ pub async fn start_with_browser(
     let trace = uuid::Uuid::new_v4().to_string();
     let expires_at = now() + TTL;
     let mut callback_url = None;
-    let (auth_url, manual_callback) = match provider {
+    let auth_url = match provider {
         Provider::Qoder => {
             let mut url =
                 url::Url::parse(&format!("{}/device/selectAccounts", qoder::website(realm)))
@@ -132,9 +132,15 @@ pub async fn start_with_browser(
                 }
             }
             a.credentials.client_id = qoder::client_id(realm).into();
-            (url.to_string(), false)
+            url.to_string()
         }
         Provider::Trae => {
+            // The fixed desktop callback port must be ours before any authorization URL
+            // naming it exists: a process already holding it would receive bearer grants
+            // (`userJwt`), which PKCE does not protect. Server browsers own private ports.
+            if !server_browser && !start_listener().await {
+                return Err(CALLBACK_PORT_UNAVAILABLE.into());
+            }
             a.credentials.client_id = trae::client_id(solo).into();
             a.credentials.platform = format!(
                 "{}{}",
@@ -209,7 +215,7 @@ pub async fn start_with_browser(
                     q.append_pair("hide_saas_login", "true");
                 }
             }
-            (url.to_string(), !server_browser && !start_listener().await)
+            url.to_string()
         }
     };
     let pending = Pending {
@@ -262,7 +268,6 @@ pub async fn start_with_browser(
         id,
         auth_url,
         expires_at,
-        manual_callback,
         server_browser,
     })
 }
@@ -1051,6 +1056,18 @@ mod tests {
             &json!({"apiBaseUrl":"https://untrusted.example"})
         )
         .is_err());
+    }
+    #[tokio::test]
+    async fn desktop_trae_login_refuses_a_callback_port_it_does_not_own() {
+        // Hold the fixed port (if something else already holds it, that is the same case).
+        let _occupied = std::net::TcpListener::bind((
+            std::net::Ipv4Addr::LOCALHOST,
+            super::super::callback::loopback_port(),
+        ));
+        match start(Provider::Trae, Realm::Global, None, false).await {
+            Err(error) => assert_eq!(error, CALLBACK_PORT_UNAVAILABLE),
+            Ok(_) => panic!("an authorization URL was issued for a port this process does not own"),
+        }
     }
     #[tokio::test]
     async fn cancel_does_not_wait_for_an_in_flight_poll() {

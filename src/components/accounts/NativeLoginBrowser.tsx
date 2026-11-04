@@ -6,6 +6,7 @@ import type { NativeBrowserInput, NativeBrowserSnapshot, NativeProvider } from '
 
 export function nativeLoginError(error: unknown, translate: (key: string) => string): string {
     const message = String(error);
+    if (message.includes('TRAE_CALLBACK_PORT_UNAVAILABLE')) return translate('nativeProviders.callbackPortUnavailable');
     for (const code of ['REGION_BLOCKED', 'START_FAILED', 'STOPPED', 'BUSY', 'PAGE_UNAVAILABLE', 'UNAVAILABLE', 'COMMAND_FAILED']) {
         if (message.includes(`TRAE_BROWSER_${code}`)) return translate(`nativeProviders.browserError_${code}`);
     }
