@@ -64,7 +64,7 @@ pub async fn route(
     };
     let streaming = payload["stream"] == true;
     let namespaced = codec::namespaced_tools(&payload);
-    let payload = match codec::request_for(protocol, payload, codec::Dialect::OPENAI_COMPATIBLE) {
+    let payload = match codec::request_for(protocol, payload, dialect(provider)) {
         Ok(p) => super::openai_compat::prepare(p, &published.native_model),
         Err(e) => return failed(Failure::new(400, e)),
     };
@@ -116,6 +116,15 @@ pub async fn route(
     }
     .run(events, streaming)
     .await
+}
+/// Request features each provider's wire payload actually carries. Qoder rebuilds its
+/// own request without a structured-output field, so `response_format` / Responses
+/// `text.format` must be rejected up front instead of silently running unconstrained.
+/// TRAE forwards the Chat body, including `response_format`.
+fn dialect(provider: Provider) -> codec::Dialect {
+    codec::Dialect {
+        structured_output: provider == Provider::Trae,
+    }
 }
 fn failed(e: Failure) -> Response {
     let status = match e.status {
@@ -433,6 +442,19 @@ mod tests {
             .iter()
             .any(|v| v.pointer("/usage/prompt_tokens") == Some(&json!(9))));
         assert_eq!(events.last().unwrap().as_ref().unwrap(), "[DONE]");
+    }
+    #[test]
+    fn qoder_rejects_structured_output_it_cannot_forward() {
+        let chat = json!({"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}});
+        let responses = json!({"input":"hi","text":{"format":{"type":"json_object"}}});
+        for (protocol, body) in [
+            (codec::Protocol::Chat, chat),
+            (codec::Protocol::Responses, responses),
+        ] {
+            assert!(codec::request_for(protocol, body.clone(), dialect(Provider::Qoder)).is_err());
+            let trae = codec::request_for(protocol, body, dialect(Provider::Trae)).unwrap();
+            assert_eq!(trae["response_format"]["type"], "json_object");
+        }
     }
     #[tokio::test]
     async fn truncated_stream_and_pre_generation_provider_errors_stay_failures() {
