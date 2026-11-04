@@ -45,6 +45,18 @@ pub fn sanitize_user_text_for_fingerprint(raw: &str) -> String {
 }
 
 impl SessionManager {
+    /// Canonical Chat payloads give native pools the same tenant-scoped conversation
+    /// identity across Chat, Responses and Messages requests.
+    pub fn account_session_key(scope: &str, payload: &Value) -> String {
+        let first = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| messages.iter().find(|message| message["role"] == "user"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        format!("{:x}", Sha256::digest(format!("{scope}:{first}")))
+    }
+
     /// 根据 Claude 请求生成稳定的会话指纹 (Session Fingerprint)
     ///
     /// 设计理念:

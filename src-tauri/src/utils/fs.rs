@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -61,7 +60,17 @@ fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), String> {
 /// 3. Replace target file via atomic rename (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` on Windows, `fs::rename` on POSIX).
 /// 4. If any step fails, remove the temporary file.
 pub fn write_atomic<P: AsRef<Path>>(target_path: P, content: &[u8]) -> Result<(), String> {
-    let target = target_path.as_ref();
+    write_atomic_with(target_path.as_ref(), content, false)
+}
+
+/// Like [`write_atomic`], but on Unix the temporary file is created owner-only (0600)
+/// before any byte is written, so secrets are never readable by other local users,
+/// neither while being written nor after the rename (which keeps the temp file's mode).
+pub fn write_atomic_private<P: AsRef<Path>>(target_path: P, content: &[u8]) -> Result<(), String> {
+    write_atomic_with(target_path.as_ref(), content, true)
+}
+
+fn write_atomic_with(target: &Path, content: &[u8], private: bool) -> Result<(), String> {
     let parent_dir = target
         .parent()
         .ok_or_else(|| "Target path has no parent directory".to_string())?;
@@ -73,7 +82,17 @@ pub fn write_atomic<P: AsRef<Path>>(target_path: P, content: &[u8]) -> Result<()
     let temp_filename = format!("{}.tmp.{}", file_name, Uuid::new_v4());
     let temp_path: PathBuf = parent_dir.join(temp_filename);
 
-    let mut file = File::create(&temp_path)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = options
+        .open(&temp_path)
         .map_err(|e| format!("Failed to create temporary file {:?}: {}", temp_path, e))?;
 
     if let Err(e) = file.write_all(content) {
@@ -134,6 +153,25 @@ pub fn file_stamp(path: &Path) -> Option<FileStamp> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_atomic_write_is_owner_only_from_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("test_atomic_private_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("vault.enc");
+        // A pre-existing world-readable file must not leak its mode into the replacement.
+        fs::write(&target, b"old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic_private(&target, b"secret").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"secret");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_write_atomic_basic() {

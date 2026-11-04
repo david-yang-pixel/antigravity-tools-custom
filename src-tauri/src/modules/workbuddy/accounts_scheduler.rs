@@ -1,26 +1,9 @@
 //! Admission and affinity for the native pool, using the shared scheduling controls.
 use super::*;
-use crate::proxy::sticky_config::{SchedulingMode, StickySessionConfig};
+use crate::proxy::sticky_config::SchedulingMode;
 use std::time::Duration;
 
-#[derive(Clone, Default)]
-pub struct Policy {
-    pub sticky: StickySessionConfig,
-    pub preferred: Option<String>,
-    pub breaker: crate::models::CircuitBreakerConfig,
-}
-impl Policy {
-    /// The half-open probe holds the model's only admission slot, so it must not wait
-    /// for a busy or cooling session account while other accounts are free.
-    pub fn for_probe(&self) -> Policy {
-        let mut policy = self.clone();
-        if policy.sticky.mode == SchedulingMode::CacheFirst {
-            policy.sticky.mode = SchedulingMode::Balance;
-        }
-        policy.sticky.max_wait_seconds = 0;
-        policy
-    }
-}
+pub use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
 
 struct Binding {
     account_id: String,

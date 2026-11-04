@@ -46,11 +46,7 @@ pub async fn route(
         Ok(settings) => settings,
         Err(_) => return configuration_error(),
     };
-    let policy = Policy {
-        sticky: state.token_manager.get_sticky_config().await,
-        breaker: state.token_manager.get_circuit_breaker_config().await,
-        preferred: settings.preferred_account_id.clone(),
-    };
+    let policy = Policy::live(&state.token_manager, settings.preferred_account_id.clone()).await;
     dispatch(
         settings,
         published,
