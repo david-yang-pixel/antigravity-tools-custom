@@ -5,6 +5,7 @@ This folder contains developer-focused documentation (architecture, implementati
 ## Proxy
 - [`docs/proxy/auth.md`](proxy/auth.md) — proxy authorization modes, expected client behavior, and implementation pointers.
 - [`docs/proxy/accounts.md`](proxy/accounts.md) — account lifecycle in the proxy pool (including auto-disable on `invalid_grant`) and UI behavior.
+- [`docs/proxy/native-providers.md`](proxy/native-providers.md) — native TRAE/Qoder authorization, official balances, renewal, rotation, model publication and headless administration.
 
 ## z.ai (GLM) integration
 - [`docs/zai/implementation.md`](zai/implementation.md) — end-to-end “what’s implemented” and how to validate it.

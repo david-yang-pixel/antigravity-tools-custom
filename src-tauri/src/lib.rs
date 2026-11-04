@@ -445,6 +445,7 @@ pub fn run() {
                     // Start smart scheduler for 7-day weekly reset warmup
                     modules::scheduler::start_scheduler(None, proxy_state.clone());
                     modules::workbuddy::maintenance::start();
+                    modules::native_providers::accounts::start();
                     modules::workbuddy::egress::start();
                     info!("Smart scheduler (7-Day Weekly Reset Warmup) started in headless mode.");
                 }
@@ -608,6 +609,7 @@ pub fn run() {
             let scheduler_state = app.handle().state::<commands::proxy::ProxyServiceState>();
             modules::scheduler::start_scheduler(Some(app.handle().clone()), scheduler_state.inner().clone());
             modules::workbuddy::maintenance::start();
+            modules::native_providers::accounts::start();
             modules::workbuddy::egress::start();
             info!("Smart scheduler (7-Day Weekly Reset Warmup) initialized.");
 
@@ -822,6 +824,18 @@ pub fn run() {
             commands::workbuddy::save_workbuddy_settings,
             commands::custom_upstream::get_custom_upstreams,
             commands::custom_upstream::save_custom_upstreams,
+            commands::native_providers::list_native_accounts,
+            commands::native_providers::get_native_provider_settings,
+            commands::native_providers::save_native_provider_settings,
+            commands::native_providers::start_native_login,
+            commands::native_providers::poll_native_login,
+            commands::native_providers::cancel_native_login,
+            commands::native_providers::native_login_browser_snapshot,
+            commands::native_providers::native_login_browser_input,
+            commands::native_providers::complete_native_login,
+            commands::native_providers::import_native_account,
+            commands::native_providers::update_native_account,
+            commands::native_providers::delete_native_account,
             commands::workbuddy::start_workbuddy_model_verification,
             commands::workbuddy::get_workbuddy_model_verification,
             commands::workbuddy::list_workbuddy_accounts,

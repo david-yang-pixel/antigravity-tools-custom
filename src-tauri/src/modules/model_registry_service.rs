@@ -6,6 +6,7 @@ pub use super::model_registry::{
     DiscoverUpstreamModelsRequest, ModelVerificationReport, RefreshModelCandidatesRequest,
     UpstreamDiscoveryReport, VerifyModelCandidatesRequest,
 };
+use super::native_providers::{self as native, Provider as NativeProvider};
 use crate::proxy::{upstream::client::UpstreamClient, TokenManager};
 use serde_json::{json, Value};
 use std::{collections::HashSet, sync::LazyLock, time::Duration};
@@ -133,6 +134,34 @@ pub async fn refresh(
             }
         }
     }
+    for provider in NativeProvider::ALL
+        .into_iter()
+        .filter(|p| selected(p.source()))
+    {
+        if !native::store::settings(provider)?.enabled {
+            continue;
+        }
+        for account in native::store::all(provider)?
+            .into_iter()
+            .filter(|a| a.enabled)
+            .take(100)
+        {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                failed += 1;
+                break;
+            }
+            match tokio::time::timeout(
+                remaining.min(Duration::from_secs(20)),
+                discover_native_account(provider, &account.id),
+            )
+            .await
+            {
+                Ok(Ok(_)) => refreshed += 1,
+                _ => failed += 1,
+            }
+        }
+    }
     for upstream in super::custom_upstream::load()?
         .upstreams
         .into_iter()
@@ -194,6 +223,8 @@ pub async fn discover(
         discover_antigravity(manager, deadline).await?
     } else if let Some(id) = super::custom_upstream::upstream_id(&request.source_id) {
         discover_custom(id).await?
+    } else if let Some(provider) = NativeProvider::from_source(&request.source_id) {
+        discover_native(provider, request.realm, deadline).await?
     } else {
         discover_workbuddy(request.realm, deadline).await?
     };
@@ -299,6 +330,74 @@ async fn discover_custom(id: &str) -> Result<Sampled, String> {
     })
 }
 
+async fn discover_native_account(
+    provider: NativeProvider,
+    id: &str,
+) -> Result<Vec<String>, String> {
+    let account = native::accounts::fresh(provider, id, false)
+        .await
+        .map_err(|e| e.to_string())?;
+    let models = match provider {
+        NativeProvider::Qoder => native::qoder::models(&account).await,
+        NativeProvider::Trae => native::trae::models(&account).await,
+    }
+    .map_err(|e| e.to_string())?;
+    let ids = models.iter().map(|m| m.id.clone()).collect();
+    native::store::update(provider, id, Some(&account.revision), |a| {
+        a.models = models;
+        a.models_error = None;
+        a.models_updated_at = native::now();
+    })?;
+    Ok(ids)
+}
+
+async fn discover_native(
+    provider: NativeProvider,
+    realm: Option<super::workbuddy::accounts::Realm>,
+    deadline: tokio::time::Instant,
+) -> Result<Sampled, String> {
+    if !native::store::settings(provider)?.enabled {
+        return Err("Enable this source before discovering its models".into());
+    }
+    let realm = realm.map(|realm| match realm {
+        super::workbuddy::accounts::Realm::Cn => native::Realm::Cn,
+        super::workbuddy::accounts::Realm::Global => native::Realm::Global,
+    });
+    let accounts = shuffled(
+        native::store::all(provider)?
+            .into_iter()
+            .filter(|a| a.enabled && realm.is_none_or(|r| r == a.realm))
+            .collect(),
+    );
+    let mut attempts = 0;
+    for account in accounts.into_iter().take(MAX_DISCOVERY_ATTEMPTS) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        attempts += 1;
+        if let Ok(Ok(models)) = tokio::time::timeout(
+            remaining.min(Duration::from_secs(20)),
+            discover_native_account(provider, &account.id),
+        )
+        .await
+        {
+            if !models.is_empty() {
+                return Ok(Sampled {
+                    account_id: account.id,
+                    account_label: account.nickname,
+                    models,
+                    attempts,
+                });
+            }
+        }
+    }
+    Err(
+        "No enabled account returned a model catalog; check authorization and the account page"
+            .into(),
+    )
+}
+
 async fn discover_workbuddy(
     realm: Option<super::workbuddy::accounts::Realm>,
     deadline: tokio::time::Instant,
@@ -401,15 +500,25 @@ pub async fn verify(
     // administrator's own content, which other sources do not take.
     let workbuddy = selected
         .iter()
-        .filter(|candidate| candidate.source_id == model_registry::WORKBUDDY_SOURCE)
+        .filter(|candidate| {
+            candidate.source_id == model_registry::WORKBUDDY_SOURCE
+                || NativeProvider::from_source(&candidate.source_id).is_some()
+        })
         .count();
     if workbuddy > 0 {
         if workbuddy != selected.len() {
-            return Err("Test WorkBuddy models separately from other sources".into());
+            return Err("Test native account models separately from API-key sources".into());
         }
-        super::workbuddy::verification::validate_prompt(request.prompt.as_ref())?;
+        if selected
+            .iter()
+            .any(|candidate| NativeProvider::from_source(&candidate.source_id).is_some())
+        {
+            super::workbuddy::verification::validate_prompt(request.prompt.as_ref()).map_err(|_| "Enter non-empty system and user test content (up to 16 KiB each) before testing native account models")?;
+        } else {
+            super::workbuddy::verification::validate_prompt(request.prompt.as_ref())?;
+        }
     } else if request.prompt.is_some() {
-        return Err("Custom test content applies only to WorkBuddy models".into());
+        return Err("Custom test content applies only to native account models".into());
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut results = Vec::new();
@@ -454,7 +563,8 @@ pub async fn verify(
                 )
             }
         };
-        let workbuddy = candidate.source_id == model_registry::WORKBUDDY_SOURCE;
+        let workbuddy = candidate.source_id == model_registry::WORKBUDDY_SOURCE
+            || NativeProvider::from_source(&candidate.source_id).is_some();
         let result = model_registry::sanitize_verification_result(ModelVerificationResult {
             candidate_id: candidate.id,
             status,
@@ -520,6 +630,18 @@ async fn probe(
             probe_antigravity(manager, upstream, candidate, account_id).await
         }
         source if super::custom_upstream::is_source(source) => probe_custom(candidate).await,
+        source if NativeProvider::from_source(source).is_some() => {
+            let prompt = prompt
+                .ok_or("Enter system and user content before testing native account models")?;
+            crate::proxy::upstream::native::probe(
+                NativeProvider::from_source(source).unwrap(),
+                &candidate.native_model,
+                account_id,
+                &prompt.system,
+                &prompt.user,
+            )
+            .await
+        }
         _ => Err("This source has no basic-text verification adapter".into()),
     }
 }

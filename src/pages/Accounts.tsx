@@ -1,5 +1,6 @@
 import { useSearchParams } from 'react-router-dom';
 import WorkBuddyAccounts from '../components/accounts/WorkBuddyAccounts';
+import NativeAccounts from '../components/accounts/NativeAccounts';
 
 
 import {
@@ -1262,16 +1263,16 @@ function AntigravityAccounts() {
 
 function Accounts() {
   const [params, setParams] = useSearchParams();
-  const workbuddy = params.get('provider') === 'workbuddy';
+  const provider = params.get('provider') || 'antigravity';
   return <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden">
     <div className="mx-auto flex w-full max-w-7xl shrink-0 px-5 pt-4">
-      <div className="inline-flex gap-1 rounded-full bg-gray-100 p-1 dark:bg-gray-800" role="group" aria-label="Account provider">
-        {['Antigravity', 'WorkBuddy'].map((label, index) => <button key={label} type="button" aria-pressed={workbuddy === (index === 1)}
-          className={`rounded-full px-5 py-2 text-sm font-medium transition-colors ${workbuddy === (index === 1) ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-300' : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'}`}
-          onClick={() => setParams(previous => { const next = new URLSearchParams(previous); if (index) next.set('provider', 'workbuddy'); else next.delete('provider'); return next; })}>{label}</button>)}
+      <div className="inline-flex flex-wrap gap-1 rounded-full bg-gray-100 p-1 dark:bg-gray-800" role="group" aria-label="Account provider">
+        {[['antigravity', 'Antigravity'], ['workbuddy', 'WorkBuddy'], ['qoder', 'Qoder'], ['trae', 'TRAE']].map(([key, label]) => <button key={key} type="button" aria-pressed={provider === key}
+          className={`rounded-full px-5 py-2 text-sm font-medium transition-colors ${provider === key ? 'bg-white text-blue-600 shadow-sm dark:bg-gray-700 dark:text-blue-300' : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'}`}
+          onClick={() => setParams(previous => { const next = new URLSearchParams(previous); if (key !== 'antigravity') next.set('provider', key); else next.delete('provider'); return next; })}>{label}</button>)}
       </div>
     </div>
-    {workbuddy ? <WorkBuddyAccounts /> : <div className="min-h-0 flex-1"><AntigravityAccounts /></div>}
+    {provider === 'workbuddy' ? <WorkBuddyAccounts /> : provider === 'qoder' || provider === 'trae' ? <NativeAccounts key={provider} provider={provider} /> : <div className="min-h-0 flex-1"><AntigravityAccounts /></div>}
   </div>;
 }
 export default Accounts;

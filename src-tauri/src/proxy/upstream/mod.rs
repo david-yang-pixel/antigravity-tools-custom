@@ -2,7 +2,9 @@
 // 对应上游通讯接口
 
 pub mod chat_codec;
+pub(crate) mod chat_relay;
 pub mod client;
+pub mod native;
 pub mod openai_compat;
 pub mod retry;
 pub mod workbuddy;

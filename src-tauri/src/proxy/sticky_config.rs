@@ -35,3 +35,47 @@ impl Default for StickySessionConfig {
         }
     }
 }
+
+/// Account pools share the live scheduling controls; each provider owns its fixed account.
+#[derive(Clone, Default)]
+pub struct AccountSchedulingPolicy {
+    pub sticky: StickySessionConfig,
+    pub preferred: Option<String>,
+    pub breaker: crate::models::CircuitBreakerConfig,
+}
+
+impl AccountSchedulingPolicy {
+    pub async fn live(manager: &super::TokenManager, preferred: Option<String>) -> Self {
+        Self {
+            sticky: manager.get_sticky_config().await,
+            breaker: manager.get_circuit_breaker_config().await,
+            preferred,
+        }
+    }
+
+    pub fn for_probe(&self) -> Self {
+        let mut policy = self.clone();
+        if policy.sticky.mode == SchedulingMode::CacheFirst {
+            policy.sticky.mode = SchedulingMode::Balance;
+        }
+        policy.sticky.max_wait_seconds = 0;
+        policy
+    }
+}
+
+pub fn account_backoff_seconds(
+    breaker: &crate::models::CircuitBreakerConfig,
+    consecutive: u64,
+    minimum: i64,
+) -> i64 {
+    let step = breaker
+        .backoff_steps
+        .get(
+            (consecutive.saturating_sub(1) as usize)
+                .min(breaker.backoff_steps.len().saturating_sub(1)),
+        )
+        .copied()
+        .unwrap_or(60)
+        .min(86400) as i64;
+    minimum.max(step).clamp(1, 86400)
+}

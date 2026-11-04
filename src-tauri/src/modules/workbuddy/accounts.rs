@@ -151,16 +151,7 @@ fn backoff_seconds(
     consecutive: u64,
     seconds: i64,
 ) -> i64 {
-    let step = breaker
-        .backoff_steps
-        .get(
-            (consecutive.saturating_sub(1) as usize)
-                .min(breaker.backoff_steps.len().saturating_sub(1)),
-        )
-        .copied()
-        .unwrap_or(60)
-        .min(86400) as i64;
-    seconds.max(step).clamp(1, 86400)
+    crate::proxy::sticky_config::account_backoff_seconds(breaker, consecutive, seconds)
 }
 #[derive(Deserialize, Serialize)]
 struct Envelope {

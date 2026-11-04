@@ -19,6 +19,7 @@ pub mod user_token;
 pub mod workbuddy;
 // 导出自定义 OpenAI 兼容上游命令
 pub mod custom_upstream;
+pub mod native_providers;
 // 导出 patch 命令
 pub mod patch;
 pub use patch::*;

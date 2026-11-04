@@ -187,7 +187,14 @@ pub async fn internal_start_proxy_service(
         .map(|settings| settings.enabled)
         .unwrap_or(false);
     let custom_ready = crate::modules::custom_upstream::any_enabled();
-    if active_accounts == 0 && !workbuddy_ready && !custom_ready {
+    let native_ready = crate::modules::native_providers::Provider::ALL
+        .into_iter()
+        .any(|p| {
+            crate::modules::native_providers::store::settings(p).is_ok_and(|s| s.enabled)
+                && crate::modules::native_providers::store::all(p)
+                    .is_ok_and(|accounts| accounts.iter().any(|a| a.enabled))
+        });
+    if active_accounts == 0 && !workbuddy_ready && !custom_ready && !native_ready {
         tracing::warn!("没有可用账号、已启用的 WorkBuddy 或自定义上游，反代逻辑暂停。");
         return Ok(ProxyStatus {
             running: false,

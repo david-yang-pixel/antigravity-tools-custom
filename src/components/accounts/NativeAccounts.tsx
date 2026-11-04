@@ -1,0 +1,174 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ExternalLink, KeyRound, Loader2, Plus, RefreshCw, Trash2, Upload, X } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { request } from '../../utils/request';
+import { isTauri } from '../../utils/env';
+import ModalDialog from '../common/ModalDialog';
+import NativeLoginBrowser, { nativeLoginError } from './NativeLoginBrowser';
+import { showToast } from '../common/ToastContainer';
+import { nativeAccountStatus, nativeBalance, type NativeAccount, type NativeLogin, type NativeLoginPoll, type NativeProvider, type NativeRealm, type NativeSettings } from '../../types/nativeProviders';
+
+const input = 'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800';
+const button = 'inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-800';
+const date = (seconds: number) => seconds > 0 ? new Date(seconds * 1000).toLocaleString() : '—';
+
+export default function NativeAccounts({ provider }: { provider: NativeProvider }) {
+    const { t } = useTranslation();
+    const label = provider === 'qoder' ? 'Qoder' : 'TRAE';
+    const [accounts, setAccounts] = useState<NativeAccount[]>([]);
+    const [settings, setSettings] = useState<NativeSettings | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+    const [mode, setMode] = useState<'login' | 'import' | null>(null);
+    const [realm, setRealm] = useState<NativeRealm>('cn');
+    const [solo, setSolo] = useState(false);
+    const [login, setLogin] = useState<NativeLogin | null>(null);
+    const [target, setTarget] = useState<NativeAccount | null>(null);
+    const [callback, setCallback] = useState('');
+    const [auth, setAuth] = useState('');
+    const [deleting, setDeleting] = useState<NativeAccount | null>(null);
+    const [now, setNow] = useState(Date.now() / 1000);
+    const alive = useRef(true);
+    const locked = useRef(false);
+    const sessionRef = useRef<NativeLogin | null>(null);
+    const translate = useRef(t); translate.current = t;
+
+    const load = useCallback(async () => {
+        try {
+            const [rows, settings] = await Promise.all([
+                request<NativeAccount[]>('list_native_accounts', { request: { provider } }),
+                request<NativeSettings>('get_native_provider_settings', { request: { provider } }),
+            ]);
+            if (alive.current) { setAccounts(rows); setSettings(settings); }
+        } catch (error) { if (alive.current) setError(nativeLoginError(error, translate.current)); }
+        finally { if (alive.current) setLoading(false); }
+    }, [provider]);
+
+    useEffect(() => {
+        alive.current = true; void load();
+        const tick = window.setInterval(() => { if (alive.current) setNow(Date.now() / 1000); }, 1000);
+        const refresh = window.setInterval(() => { if (!locked.current) void load(); }, 30000);
+        return () => {
+            alive.current = false; window.clearInterval(tick); window.clearInterval(refresh);
+            const session = sessionRef.current;
+            if (session) void request('cancel_native_login', { request: { provider, id: session.id } }).catch(() => undefined);
+        };
+    }, [provider, load]);
+
+    useEffect(() => {
+        if (!login) return;
+        let cancelled = false; let timer: number | undefined;
+        const poll = async () => {
+            if (cancelled || !alive.current) return;
+            if (Date.now() / 1000 >= login.expires_at) { setError(translate.current('nativeProviders.loginExpired')); setLogin(null); sessionRef.current = null; return; }
+            try {
+                const result = await request<NativeLoginPoll>('poll_native_login', { request: { provider, id: login.id } });
+                if (cancelled || !alive.current) return;
+                if (result.status === 'authorized') {
+                    setLogin(null); sessionRef.current = null; setMode(null); setTarget(null); setError('');
+                    showToast(translate.current('nativeProviders.authorized'), 'success'); await load(); return;
+                }
+            } catch (error) { if (!cancelled && alive.current) setError(nativeLoginError(error, translate.current)); }
+            if (!cancelled) timer = window.setTimeout(poll, 4000);
+        };
+        timer = window.setTimeout(poll, 1500);
+        return () => { cancelled = true; window.clearTimeout(timer); };
+    }, [login, provider, load]);
+
+    async function run(action: () => Promise<void>) {
+        if (locked.current) return;
+        locked.current = true; setBusy(true); setError('');
+        try { await action(); if (alive.current) { await load(); window.dispatchEvent(new Event('model-registry-changed')); } }
+        catch (error) { if (alive.current) setError(nativeLoginError(error, translate.current)); }
+        finally { locked.current = false; if (alive.current) setBusy(false); }
+    }
+    async function close() {
+        const session = sessionRef.current;
+        sessionRef.current = null; setLogin(null); setMode(null); setTarget(null); setAuth(''); setCallback('');
+        if (session) await request('cancel_native_login', { request: { provider, id: session.id } }).catch(() => undefined);
+    }
+    const change = (account: NativeAccount, patch: { enabled?: boolean; auto_refresh?: boolean; refresh?: boolean }) => run(async () => {
+        await request('update_native_account', { request: { provider, id: account.id, ...patch } });
+    });
+    const saveSettings = (patch: Partial<NativeSettings>) => run(async () => {
+        if (!settings) return;
+        await request('save_native_provider_settings', { request: { provider, enabled: settings.enabled, preferred_account_id: settings.preferred_account_id, ...patch } });
+    });
+    const begin = () => run(async () => {
+        const result = await request<NativeLogin>('start_native_login', { request: { provider, realm: target?.realm || realm, account_id: target?.id || null, solo: target ? target.platform.endsWith('solo') : solo, server_browser: provider === 'trae' && !isTauri() } });
+        if (alive.current) { sessionRef.current = result; setLogin(result); }
+        else await request('cancel_native_login', { request: { provider, id: result.id } });
+    });
+    const importAccount = () => run(async () => {
+        let parsed: unknown; try { parsed = JSON.parse(auth); } catch { throw new Error(t('nativeProviders.invalidJson')); }
+        await request('import_native_account', { request: { provider, realm, auth: parsed } });
+        if (alive.current) { setAuth(''); setMode(null); }
+    });
+    const complete = () => run(async () => {
+        if (!login) return;
+        await request('complete_native_login', { request: { provider, id: login.id, callback_url: callback } });
+        if (alive.current) { sessionRef.current = null; setLogin(null); setCallback(''); setMode(null); }
+    });
+    const reauthorize = (account: NativeAccount) => { setTarget(account); setRealm(account.realm); setMode('login'); setError(''); };
+    return <div className="min-h-0 flex-1 overflow-auto px-5 pb-6">
+        <div className="mx-auto max-w-7xl space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><h1 className="text-xl font-semibold">{t('nativeProviders.title', { provider: label })}</h1><p className="mt-2 max-w-3xl text-sm text-gray-500">{t('nativeProviders.description')}</p></div>
+                <div className="flex gap-2">
+                    <button className={button} disabled={busy || !!login} onClick={() => { setMode('import'); setTarget(null); setError(''); }}><Upload size={16} />{t('nativeProviders.import')}</button>
+                    <button className={`${button} !border-blue-600 !bg-blue-600 text-white`} disabled={busy || !!login} onClick={() => { setMode('login'); setTarget(null); setError(''); }}><Plus size={16} />{t('nativeProviders.add')}</button>
+                </div>
+            </div>
+            {error && <div role="alert" className="flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"><span className="break-all">{error}</span><button aria-label={t('nativeProviders.dismiss')} onClick={() => setError('')}><X size={16} /></button></div>}
+            {settings && <div className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-xl border border-gray-200 p-4 text-sm dark:border-gray-700">
+                <label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" disabled={busy || settings.env_locked} checked={settings.enabled} onChange={e => void saveSettings({ enabled: e.target.checked })} />{t('nativeProviders.enableSource')}</label>
+                <label className="flex flex-wrap items-center gap-2">{t('nativeProviders.preferred')}
+                    <select className={`${input} !w-auto`} value={settings.preferred_account_id || ''} disabled={busy || settings.env_locked} onChange={e => void saveSettings({ preferred_account_id: e.target.value || null })}>
+                        <option value="">{t('nativeProviders.automatic')}</option>
+                        {settings.preferred_account_id && !accounts.some(a => a.id === settings.preferred_account_id) && <option value={settings.preferred_account_id} disabled>{t('nativeProviders.removedAccount')}</option>}
+                        {accounts.map(a => <option key={a.id} value={a.id} disabled={!a.enabled}>{a.nickname || a.uid} · {t(`nativeProviders.${a.realm}`)}</option>)}
+                    </select>
+                </label>
+                {settings.env_locked && <span className="text-gray-500">{t('nativeProviders.envLocked')}</span>}
+                <button className={`${button} ml-auto`} disabled={busy || loading} onClick={() => void run(load)}><RefreshCw size={15} />{t('nativeProviders.reload')}</button>
+            </div>}
+            {settings && <p className="text-xs leading-relaxed text-gray-500">{t('nativeProviders.schedulingHint')} <Link className="text-blue-600 underline" to="/api-proxy">{t('nativeProviders.schedulingLink')}</Link></p>}
+            {mode && <div className="space-y-4 rounded-xl border border-blue-200 p-4 dark:border-blue-900">
+                <div className="flex items-center justify-between"><h2 className="font-medium">{mode === 'import' ? t('nativeProviders.import') : target ? t('nativeProviders.reauthorize') : t('nativeProviders.add')}</h2><button className={button} disabled={busy} onClick={() => void close()}>{t('nativeProviders.cancel')}</button></div>
+                {!login && <div className="flex flex-wrap items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm">{t('nativeProviders.region')}<select className={`${input} !w-auto`} disabled={busy || !!target} value={target?.realm || realm} onChange={e => setRealm(e.target.value as NativeRealm)}><option value="cn">{t('nativeProviders.cn')}</option><option value="global">{t('nativeProviders.global')}</option></select></label>
+                    {provider === 'trae' && !target && mode === 'login' && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={solo} disabled={busy} onChange={e => setSolo(e.target.checked)} />TRAE SOLO</label>}
+                </div>}
+                {mode === 'login' && (!login ? <><p className="text-sm text-gray-500">{t(provider === 'trae' && !isTauri() ? 'nativeProviders.browserLoginHint' : 'nativeProviders.loginHint')}</p><button className={button} disabled={busy} onClick={() => void begin()}>{busy && <Loader2 size={15} className="animate-spin" />}{t(provider === 'trae' && !isTauri() ? 'nativeProviders.browserBegin' : 'nativeProviders.getLink')}</button></> : <>
+                    {login.server_browser && <NativeLoginBrowser key={login.id} provider={provider} id={login.id} />}
+                    <div className="flex flex-wrap items-center gap-3">{!login.server_browser && <a className={`${button} !border-blue-600 !bg-blue-600 text-white`} href={login.auth_url} target="_blank" rel="noopener noreferrer" onClick={event => {
+                        if (isTauri()) { event.preventDefault(); void import('@tauri-apps/plugin-opener').then(({ openUrl }) => openUrl(login.auth_url)).catch(error => setError(nativeLoginError(error, translate.current))); }
+                    }}><ExternalLink size={16} />{t('nativeProviders.openLogin')}</a>}<span role="status" className="text-sm text-gray-500">{t('nativeProviders.waiting', { seconds: Math.max(0, Math.ceil(login.expires_at - now)) })}</span></div>
+                    {provider === 'trae' && !login.server_browser && <div className="space-y-2"><p className="text-sm text-gray-500">{t(login.manual_callback ? 'nativeProviders.callbackManualHint' : 'nativeProviders.callbackHint')}</p>{login.manual_callback && <><label className="block space-y-1 text-sm"><span>{t('nativeProviders.callbackUrl')}</span><input className={input} type="password" autoComplete="off" spellCheck={false} value={callback} onChange={e => setCallback(e.target.value)} /></label><button className={button} disabled={busy || !callback.trim()} onClick={() => void complete()}>{t('nativeProviders.complete')}</button></>}</div>}
+                </>)}
+                {mode === 'import' && <><p className="text-sm text-gray-500">{t('nativeProviders.importHint')}</p><label className="block space-y-2 text-sm"><span>{t('nativeProviders.credentials')}</span><textarea className={`${input} min-h-32 font-mono`} autoComplete="off" spellCheck={false} value={auth} onChange={e => setAuth(e.target.value)} placeholder={'{"accessToken":"…","refreshToken":"…","expiresAt":0}'} /></label><button className={button} disabled={busy || !auth.trim()} onClick={() => void importAccount()}>{t('nativeProviders.importSave')}</button></>}
+            </div>}
+            {loading ? <div role="status" className="flex items-center justify-center gap-2 p-10 text-gray-500"><Loader2 size={18} className="animate-spin" />{t('nativeProviders.loading')}</div> : !accounts.length ? <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center dark:border-gray-700"><h2 className="font-medium">{t('nativeProviders.empty')}</h2><p className="mt-2 text-sm text-gray-500">{t('nativeProviders.emptyHint', { provider: label })}</p></div> :
+                <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-700" role="region" aria-label={t('nativeProviders.title', { provider: label })} tabIndex={0}>
+                    <table className="w-full text-left text-sm"><thead className="bg-gray-50 dark:bg-gray-800"><tr>{['account', 'balance', 'health', 'authorization', 'maintenance', 'actions'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t(`nativeProviders.${key}`)}</th>)}</tr></thead>
+                        <tbody>{accounts.map(account => {
+                            const errors = [account.auth_error, account.quota_error, account.models_error, account.last_error].filter((value): value is string => !!value);
+                            const status = nativeAccountStatus(account, now);
+                            return <tr key={account.id} className="border-t border-gray-100 align-top dark:border-gray-700">
+                                <td className="min-w-44 px-4 py-4"><div className="font-medium">{account.nickname || account.uid}</div><div className="mt-1 text-xs text-gray-500">{t(`nativeProviders.${account.realm}`)}{account.platform.endsWith('solo') ? ' · SOLO' : ''}</div><details className="mt-2 text-xs"><summary className="cursor-pointer text-blue-600">{t('nativeProviders.details', { count: account.models.length })}</summary><div className="mt-2 max-w-sm space-y-2 break-all text-gray-500"><div>{account.uid}</div><p>{t('nativeProviders.modelsUpdated', { time: date(account.models_updated_at) })}</p>{account.models.map(model => <div key={model.id}><code>{model.id}</code>{model.name && <span> · {model.name}</span>}{model.is_free && <span className="ml-2 text-green-700 dark:text-green-400">{t('nativeProviders.freeModel')}</span>}</div>)}{account.quota?.packs.map((pack, index) => <div key={index}>{pack.name} · {pack.unlimited ? '∞' : pack.remaining ?? '—'} {account.quota?.unit}</div>)}{errors.map((error, index) => <p key={index} className="text-amber-700 dark:text-amber-400">{error}</p>)}</div></details></td>
+                                <td className="min-w-40 px-4 py-4"><div className="font-medium tabular-nums">{nativeBalance(account.quota)} <span className="text-xs font-normal text-gray-500">{account.quota?.unit}</span></div><div className="mt-1 text-xs text-gray-500">{account.quota ? date(account.quota.updated_at) : t('nativeProviders.notQueried')}</div>{account.quota_error && <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">{t('nativeProviders.staleBalance')}</p>}{!account.quota?.unlimited && account.quota?.remaining !== null && account.quota?.remaining !== undefined && account.quota.remaining <= 0 && account.models.some(model => model.is_free) && <p className="mt-1 text-xs text-green-700 dark:text-green-400">{t('nativeProviders.freeModelsAvailable')}</p>}</td>
+                                <td className="min-w-36 px-4 py-4"><span className={`rounded-full px-2 py-1 text-xs ${status === 'ready' ? 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>{t(`nativeProviders.status_${status}`)}</span><div className="mt-2 text-xs tabular-nums text-gray-500">{t('nativeProviders.requests', { success: account.successes, failed: account.failures })}</div>{account.cooldown_until > now && <div className="mt-1 text-xs text-amber-700">{t('nativeProviders.cooldownSeconds', { seconds: Math.ceil(account.cooldown_until - now) })}</div>}</td>
+                                <td className="min-w-40 px-4 py-4"><div>{date(account.expires_at)}</div><p className="mt-1 text-xs text-gray-500">{t(account.can_refresh ? 'nativeProviders.refreshable' : 'nativeProviders.noRefresh')}</p></td>
+                                <td className="min-w-44 space-y-2 px-4 py-4"><label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" disabled={busy} checked={account.enabled} onChange={e => void change(account, { enabled: e.target.checked })} />{t('nativeProviders.enableAccount')}</label><label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" disabled={busy} checked={account.auto_refresh} onChange={e => void change(account, { auto_refresh: e.target.checked })} />{t('nativeProviders.autoRefresh')}</label><p className="text-xs text-gray-500">{t('nativeProviders.nextSync', { time: date(account.next_sync_at) })}</p></td>
+                                <td className="px-4 py-4"><div className="flex flex-col items-start gap-2"><button className={button} disabled={busy} onClick={() => void change(account, {})}><RefreshCw size={14} />{t('nativeProviders.sync')}</button><button className={button} disabled={busy || !account.can_refresh} onClick={() => void change(account, { refresh: true })}><KeyRound size={14} />{t('nativeProviders.renew')}</button><button className={button} disabled={busy || !!login} onClick={() => reauthorize(account)}>{t('nativeProviders.reauthorize')}</button><button className={`${button} text-red-600`} disabled={busy} onClick={() => setDeleting(account)}><Trash2 size={14} />{t('nativeProviders.delete')}</button></div></td>
+                            </tr>;
+                        })}</tbody>
+                    </table>
+                </div>}
+            <p className="text-xs leading-relaxed text-gray-500">{t('nativeProviders.routingHint')} <Link className="text-blue-600 underline" to="/api-proxy">{t('nativeProviders.routingLink')}</Link></p>
+            <ModalDialog isOpen={!!deleting} title={t('nativeProviders.deleteTitle')} message={t('nativeProviders.deleteHint', { name: deleting?.nickname || deleting?.uid })} type="confirm" isDestructive isLoading={busy} onConfirm={() => void run(async () => { if (!deleting) return; await request('delete_native_account', { request: { provider, id: deleting.id } }); if (alive.current) setDeleting(null); })} onCancel={() => setDeleting(null)} />
+        </div>
+    </div>;
+}

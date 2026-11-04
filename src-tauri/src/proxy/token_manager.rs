@@ -3124,7 +3124,11 @@ impl TokenManager {
         let persisted_cleared = self.clear_all_persisted_live_limits(account_id);
         let workbuddy_cleared =
             crate::modules::workbuddy::accounts::scheduling::clear_cooldowns(Some(account_id));
-        cleared || persisted_cleared || workbuddy_cleared
+        let native_cleared =
+            crate::modules::native_providers::accounts::scheduling::clear_cooldowns(Some(
+                account_id,
+            ));
+        cleared || persisted_cleared || workbuddy_cleared || native_cleared
     }
 
     pub fn clear_rate_limit_memory(&self, account_id: &str) -> bool {
@@ -3134,6 +3138,7 @@ impl TokenManager {
     /// 清除所有限流记录
     pub fn clear_all_rate_limits(&self) {
         crate::modules::workbuddy::accounts::scheduling::clear_cooldowns(None);
+        crate::modules::native_providers::accounts::scheduling::clear_cooldowns(None);
         self.rate_limit_tracker.clear_all();
         let accounts_dir = self.resolved_data_dir().join("accounts");
         if let Ok(entries) = std::fs::read_dir(accounts_dir) {
@@ -3878,6 +3883,7 @@ impl TokenManager {
         let mut config = self.sticky_config.write().await;
         if config.mode != new_config.mode {
             crate::modules::workbuddy::accounts::scheduling::clear_sessions();
+            crate::modules::native_providers::accounts::scheduling::clear_sessions();
         }
         *config = new_config;
         tracing::debug!("Scheduling configuration updated: {:?}", *config);
@@ -3888,6 +3894,7 @@ impl TokenManager {
         let mut lock = self.circuit_breaker_config.write().await;
         if !config.enabled {
             crate::modules::workbuddy::accounts::scheduling::clear_cooldowns(None);
+            crate::modules::native_providers::accounts::scheduling::clear_cooldowns(None);
         }
         *lock = config;
         tracing::debug!("Circuit breaker configuration updated");
@@ -3948,6 +3955,7 @@ impl TokenManager {
     /// 清除所有会话的粘性映射
     pub fn clear_all_sessions(&self) {
         crate::modules::workbuddy::accounts::scheduling::clear_sessions();
+        crate::modules::native_providers::accounts::scheduling::clear_sessions();
         self.session_accounts.clear();
     }
 

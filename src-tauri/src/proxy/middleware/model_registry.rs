@@ -1,6 +1,6 @@
 //! Public inference admission. Runs after authentication, before any billing
 //! permit/monitor/provider routing. No client-controlled header bypass exists.
-use crate::modules::model_registry::{self, PublishedModel, ANTIGRAVITY_SOURCE, WORKBUDDY_SOURCE};
+use crate::modules::model_registry::{self, PublishedModel, ANTIGRAVITY_SOURCE};
 use axum::{
     extract::Request,
     http::{header, Method, StatusCode},
@@ -51,11 +51,7 @@ pub(crate) fn resolve_public_model(
                 "Model is not published or is disabled.".into(),
             )
         })?;
-    if !matches!(
-        published.source_id.as_str(),
-        ANTIGRAVITY_SOURCE | WORKBUDDY_SOURCE
-    ) && !crate::modules::custom_upstream::is_source(&published.source_id)
-    {
+    if model_registry::provider_type(&published.source_id) == "unknown" {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Model source is not integrated.".into(),
