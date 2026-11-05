@@ -14,7 +14,8 @@ use wasmi::{
 };
 
 const MODULE_BYTES: &[u8] = include_bytes!("../vendor/qoder_auth.wasm");
-const MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum size of any string or byte buffer crossing the WASM boundary.
+pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 const FUEL: u64 = 200_000_000;
 
 #[derive(Clone, Default)]

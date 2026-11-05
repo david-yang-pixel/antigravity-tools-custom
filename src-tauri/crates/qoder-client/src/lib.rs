@@ -3,6 +3,7 @@
 pub mod identity;
 pub mod releases;
 pub mod signing;
+pub mod signing_queue;
 pub mod transport;
 
 pub const CLI_VERSION: &str = "1.1.83";

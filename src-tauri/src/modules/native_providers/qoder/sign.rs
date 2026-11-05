@@ -42,6 +42,9 @@ pub fn legacy() -> bool {
 
 type WasmCache = BTreeMap<String, (String, qoder_client::signing::Signer)>;
 static WASM_SIGNERS: LazyLock<Mutex<WasmCache>> = LazyLock::new(Default::default);
+// One running signer plus at most three asynchronously waiting preparations.
+static SIGNING_QUEUE: LazyLock<qoder_client::signing_queue::Queue> =
+    LazyLock::new(|| qoder_client::signing_queue::Queue::new(4));
 
 pub fn forget(id: &str) {
     if let Ok(mut cache) = WASM_SIGNERS.lock() {
@@ -129,12 +132,21 @@ pub async fn prepare(
         .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"));
     qoder_client::identity::check_network_policy(proxy_in_use, allow_direct)
         .map_err(|e| Failure::new(503, e.to_string()))?;
+    if body.len() > qoder_client::signing::MAX_BYTES {
+        return Err(Failure::new(
+            413,
+            "Qoder request exceeds the signing size limit",
+        ));
+    }
+    let reservation = SIGNING_QUEUE
+        .try_reserve()
+        .map_err(|e| Failure::new(503, e.to_string()))?;
     let root = crate::modules::account::get_data_dir()?;
     let machine = qoder_client::identity::machine(&root, a.realm == super::super::Realm::Cn, &a.uid).await
         .map_err(|_| Failure::new(503, "Official Qoder machine identity unavailable; check the runtime helper or explicitly select the legacy protocol"))?;
     let a = a.clone();
     let model = inference.map(str::to_owned);
-    tokio::task::spawn_blocking(move || {
+    reservation.run(std::time::Duration::from_secs(20), move || {
         let version = version();
         let mut identity = json!({"uid":a.uid,"security_oauth_token":a.credentials.access_token,"organization_id":a.credentials.organization_id});
         if let Some(tags) = &a.credentials.organization_tags { identity["organization_tags"] = tags.clone(); }
@@ -163,7 +175,10 @@ pub async fn prepare(
             if !host.is_empty() { request.headers.insert("Cosy-MachineHostname".into(), host); }
         }
         Ok(request)
-    }).await.map_err(|_| Failure::new(502, "Qoder signer task failed"))?
+    }).await.map_err(|error| Failure::new(
+        if error == qoder_client::signing_queue::Error::Timeout { 504 } else { 503 },
+        error.to_string(),
+    ))?
 }
 pub fn encode(bytes: &[u8]) -> String {
     let s = STANDARD.encode(bytes);

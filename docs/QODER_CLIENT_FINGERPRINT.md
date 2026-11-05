@@ -75,6 +75,12 @@ SHA-256 c7a14b11d6c23b94ac39f6868ebd3dd6a70492efe87c864c33857adadb9f0951
 Rust 使用 wasmi 执行该模块，提供 wasm-bindgen 所需的字符串、Map、字节数组、时间和
 OS 安全随机数。WASM 没有文件、网络和进程接口，设置了内存、指令预算及输入大小上限。
 
+现代签名准备最多同时接纳 4 个任务（含运行与等待），超出时在初始化 UMID 前返回 503。
+请求体在入队前按 WASM 的 16 MiB 上限检查。最多一个签名任务进入阻塞线程池，其余
+任务异步等待；排队及执行共用 20 秒上限，并受调用方更短的请求截止时间约束。
+超时或取消会释放未启动任务及其请求体，并取消线程池中尚未启动的工作。已经运行的
+WASM 仍受指令预算约束，保留队列容量直到结束，避免超时后新任务不断累积。
+
 1. `generate_runtime_auth_fields` 生成当前账号的加密认证字段。
 2. `QoderContext.prepareInferRequest` 返回推理 URL、请求体和签名头。
 3. `QoderContext.prepareRequest` 处理模型列表请求；不再强行套用旧版 Encode 查询参数。
