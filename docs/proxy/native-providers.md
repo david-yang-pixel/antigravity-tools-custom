@@ -34,6 +34,8 @@ unconstrained; `tool_choice: none` is honored by sending no tools.
   account and waits when busy/cooling (at most the configured wait and request
   deadline); Balance preserves affinity and switches when that account is unavailable;
   Performance uses load/least-recent-use selection without session affinity.
+- The source switch and fixed-account selector live in **API Proxy → Models →
+  Source configuration**, next to WorkBuddy's (`/api-proxy?section=sources`).
 - The source's fixed-account selector overrides its account pool only. Selecting
   an account excludes the other accounts; disablement, deletion or a missing model
   causes an explicit error. Automatic selection restores the global mode.
@@ -90,8 +92,35 @@ Provider settings have this shape:
 | `ABV_QODER_MAX_CONCURRENCY` | `1` | Active requests per account, clamped to 1–8 |
 | `ABV_QODER_VERSION` | `1.1.75` | COSY/client protocol version |
 
-The normal gateway upstream-proxy setting also applies to native account traffic.
-Credential-bearing requests validate HTTPS service hosts and do not follow redirects.
+Without egress, the normal gateway upstream-proxy setting applies to native account
+traffic. Credential-bearing requests validate HTTPS service hosts and do not follow
+redirects.
+
+## Account isolation and egress nodes
+
+- Every account has its own HTTP connection pool, so no socket carries two
+  accounts' tokens.
+- **Accounts → Qoder → Egress nodes** routes each account through one node of an
+  airport subscription, like WorkBuddy (see `docs/WORKBUDDY_UPSTREAM.md`). The
+  subscription link, node filters and auto-assign are shared with WorkBuddy, and
+  one mihomo process serves both; the switch and bindings are per source. Within
+  Qoder a node serves one account; a WorkBuddy account and a Qoder account may share
+  a node because they talk to different services.
+- Sign-in polling, credential import validation, refresh, model, quota and inference
+  requests all use the account's node. Login and import claim a free node and the
+  new account keeps it; reauthorization uses the account's bound node. A sign-in or
+  import of a saved account through a different node is refused. A bound account
+  whose node is unusable fails instead of falling back to the server's address.
+- `DIRECT` sends that account from this server's own address. With egress off the
+  upstream-proxy setting applies, as before.
+- Bindings are stored under `pools.qoder` in `workbuddy_egress.json` (the file keeps
+  its name; older versions ignore the new field).
+
+| Environment variable | Purpose |
+| --- | --- |
+| `ABV_QODER_EGRESS_ENABLED` | `true`/`false`; locks Qoder's egress switch |
+| `ABV_EGRESS_SUBSCRIPTION` | Shared subscription link (`ABV_WORKBUDDY_EGRESS_SUBSCRIPTION` is still read) |
+| `ABV_MIHOMO_PATH` | mihomo executable |
 
 ## Headless admin API
 
@@ -109,6 +138,11 @@ authentication, not an ordinary inference client key.
 | `/api/native-accounts/delete` | Provider/account `id` |
 | `/api/native-providers/settings` | Provider |
 | `/api/native-providers/settings/save` | Provider, `enabled`, and `preferred_account_id` |
+| `/api/native-egress` | Provider; egress settings, nodes and this source's bindings |
+| `/api/native-egress/save` | Provider plus any of `enabled`, `subscription_url`, `include`, `exclude`, `auto_assign` |
+| `/api/native-egress/refresh`, `/api/native-egress/test-nodes` | Provider |
+| `/api/native-egress/account` | Provider, account `id`, `node` (name, `"DIRECT"`, or `null` for auto-assign) |
+| `/api/native-egress/account/test` | Provider and account `id`; latency along the account's real path |
 
 Qoder credential import also accepts `personalToken`; it is exchanged for a job
 token. Imported account identity is checked with the provider before persistence.

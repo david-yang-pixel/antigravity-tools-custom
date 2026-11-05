@@ -1089,6 +1089,21 @@ impl AxumServer {
             .route("/native-login/start", post(admin_start_native_login))
             .route("/native-login/poll", post(admin_poll_native_login))
             .route("/native-login/cancel", post(admin_cancel_native_login))
+            .route("/native-egress", post(admin_get_native_egress))
+            .route("/native-egress/save", post(admin_save_native_egress))
+            .route("/native-egress/refresh", post(admin_refresh_native_egress))
+            .route(
+                "/native-egress/test-nodes",
+                post(admin_test_native_egress_nodes),
+            )
+            .route(
+                "/native-egress/account",
+                post(admin_set_native_account_egress),
+            )
+            .route(
+                "/native-egress/account/test",
+                post(admin_test_native_account_egress),
+            )
             .route(
                 "/workbuddy-settings",
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
@@ -2909,6 +2924,54 @@ async fn admin_cancel_native_login(
     Json(payload): Json<crate::commands::native_providers::SessionRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::native_providers::cancel_native_login(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_get_native_egress(
+    Json(payload): Json<crate::commands::native_providers::ProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::get_native_egress(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_save_native_egress(
+    Json(payload): Json<crate::commands::native_providers::EgressSaveRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::save_native_egress(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_refresh_native_egress(
+    Json(payload): Json<crate::commands::native_providers::ProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::refresh_native_egress(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_test_native_egress_nodes(
+    Json(payload): Json<crate::commands::native_providers::ProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::test_native_egress_nodes(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_set_native_account_egress(
+    Json(payload): Json<crate::commands::native_providers::AccountEgressRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::set_native_account_egress(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_test_native_account_egress(
+    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::test_native_account_egress(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

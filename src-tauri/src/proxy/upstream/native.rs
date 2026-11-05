@@ -174,7 +174,10 @@ async fn send(
     timeout: Duration,
 ) -> Result<reqwest::Response, Failure> {
     match account.provider {
-        Provider::Qoder => native::qoder::chat(account, model, payload, timeout).await,
+        Provider::Qoder => {
+            let client = native::http::client_for(account).await?;
+            native::qoder::chat(&client, account, model, payload, timeout).await
+        }
     }
 }
 fn normalize(provider: Provider, response: reqwest::Response) -> NativeEvents {

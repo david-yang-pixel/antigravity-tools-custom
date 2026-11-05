@@ -1,6 +1,7 @@
 //! Short-lived, administrator-initiated PKCE sessions for Qoder's device grant: the
 //! administrator signs in on the official page while this service polls for the grant.
 use super::{http, *};
+use crate::modules::egress::{self, LoginHold, Pool};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use reqwest::{header::HeaderMap, Method};
@@ -18,6 +19,11 @@ struct Pending {
     expires_at: i64,
     expected: Option<String>,
     completed: Option<String>,
+    /// Egress node the whole authorization uses; the account inherits it.
+    node: Option<String>,
+    /// Keeps that node off the pool's free list until the account is bound or the
+    /// session ends.
+    hold: Option<LoginHold>,
 }
 struct Session {
     provider: Provider,
@@ -57,6 +63,29 @@ fn session(id: &str, provider: Provider) -> Result<Arc<Session>, String> {
     }
     Ok(session)
 }
+/// Drops cancelled and expired sessions, which also releases their node holds. A
+/// session locked by an in-flight poll is kept until that poll finishes.
+fn purge(sessions: &mut HashMap<String, Arc<Session>>) {
+    sessions.retain(|_, session| {
+        session.pending.try_lock().map_or(true, |p| {
+            p.expires_at > now() && session.cancelled.lock().is_ok_and(|c| !*c)
+        })
+    });
+}
+/// A saved account keeps its node. A token for it issued through another address would
+/// tie that address to the account's identity, so such a sign-in is refused.
+fn bound_elsewhere(provider: Provider, a: &Account, node: Option<&str>) -> Result<bool, String> {
+    let Some(previous) = store::all(provider)?
+        .into_iter()
+        .find(|p| p.uid == a.uid && p.realm == a.realm)
+    else {
+        return Ok(false);
+    };
+    Ok(egress::bound_node(Pool::Native(provider), &previous.id)?
+        .is_some_and(|bound| node != Some(bound.as_str())))
+}
+const BOUND_ELSEWHERE: &str =
+    "This account is bound to another egress node; reauthorize it from its own row";
 fn valid(p: &Pending, session: &Session) -> Result<(), String> {
     if *session
         .cancelled
@@ -74,14 +103,29 @@ pub async fn start(
     account_id: Option<&str>,
 ) -> Result<Started, String> {
     let mut a = Account::new(provider, realm);
+    let mut preferred = None;
     if let Some(id) = account_id {
         let previous = store::get(provider, id)?;
         if previous.realm != realm {
             return Err("Reauthorization must use the account's region".into());
         }
-        a.credentials.machine_id = previous.credentials.machine_id;
-        a.credentials.device_id = previous.credentials.device_id;
+        a.credentials = Credentials {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            personal_token: String::new(),
+            ..previous.credentials
+        };
+        // A saved account reauthorizes through its own node.
+        preferred = egress::bound_node(Pool::Native(provider), id)?;
     }
+    // Release abandoned sessions before choosing a node, or their holds hide it.
+    if let Ok(mut sessions) = SESSIONS.lock() {
+        purge(&mut sessions);
+    }
+    let mut route = egress::login_route(Pool::Native(provider), preferred.as_deref()).await?;
+    let node = route.node.clone();
+    let mut hold = route.hold.take();
+    drop(route);
     let id = uuid::Uuid::new_v4().to_string();
     let (verifier, challenge) = pkce();
     let nonce = if realm == Realm::Cn {
@@ -90,6 +134,9 @@ pub async fn start(
         uuid::Uuid::new_v4().simple().to_string()
     };
     let expires_at = now() + TTL;
+    if let Some(hold) = hold.as_mut() {
+        hold.hold_until(expires_at);
+    }
     let mut url = url::Url::parse(&format!("{}/device/selectAccounts", qoder::website(realm)))
         .map_err(|_| "Invalid Qoder authorization URL")?;
     {
@@ -110,14 +157,12 @@ pub async fn start(
         expires_at,
         expected: account_id.map(str::to_owned),
         completed: None,
+        node,
+        hold,
     };
     {
         let mut sessions = SESSIONS.lock().map_err(|_| "Login sessions unavailable")?;
-        sessions.retain(|_, session| {
-            session.pending.try_lock().map_or(true, |p| {
-                p.expires_at > now() && session.cancelled.lock().is_ok_and(|c| !*c)
-            })
-        });
+        purge(&mut sessions);
         if sessions.len() >= 20 {
             return Err("Too many pending authorizations; cancel one or wait for expiry".into());
         }
@@ -158,7 +203,9 @@ pub async fn poll(provider: Provider, id: &str) -> Result<Poll, String> {
         .append_pair("challenge_method", "S256");
     let mut headers = HeaderMap::new();
     http::insert(&mut headers, "user-agent", "QoderWork").map_err(|e| e.to_string())?;
-    let result = http::json(provider, Method::GET, url.as_str(), headers, None).await;
+    let route = egress::login_route(Pool::Native(provider), p.node.as_deref()).await?;
+    let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
+    let result = http::json(&client, provider, Method::GET, url.as_str(), headers, None).await;
     let value = match result {
         Ok(value) => value,
         Err(e) if e.status == 202 || e.status == 404 => {
@@ -176,9 +223,10 @@ pub async fn poll(provider: Provider, id: &str) -> Result<Poll, String> {
         });
     }
     qoder::apply_tokens(&mut p.account, &value).map_err(|e| e.to_string())?;
-    qoder::identity(&mut p.account)
+    qoder::identity(&client, &mut p.account)
         .await
         .map_err(|e| e.to_string())?;
+    drop(route);
     // Cancellation can run while the provider request is in flight. Serialize its flag
     // with this final commit, rather than making Cancel wait for the network poll.
     let cancelled = session
@@ -188,7 +236,23 @@ pub async fn poll(provider: Provider, id: &str) -> Result<Poll, String> {
     if *cancelled || p.expires_at <= now() {
         return Err("Login cancelled or expired".into());
     }
+    if bound_elsewhere(provider, &p.account, p.node.as_deref())? {
+        drop(cancelled);
+        *session
+            .cancelled
+            .lock()
+            .map_err(|_| "Login cancellation unavailable")? = true;
+        if let Some(hold) = p.hold.as_mut() {
+            hold.release();
+        }
+        return Err(BOUND_ELSEWHERE.into());
+    }
     let account = store::upsert(p.account.clone(), p.expected.as_deref())?;
+    // Bind before the first sync, or auto-assignment would pick another node.
+    egress::adopt(Pool::Native(provider), &account.id, p.node.as_deref());
+    if let Some(hold) = p.hold.as_mut() {
+        hold.release();
+    }
     p.completed = Some(account.id.clone());
     drop(cancelled);
     let id = account.id.clone();
@@ -207,6 +271,13 @@ pub async fn cancel(provider: Provider, id: &str) -> Result<(), String> {
         .cancelled
         .lock()
         .map_err(|_| "Login cancellation unavailable")? = true;
+    // Free the node now unless a poll holds the session; purge or the hold's own
+    // deadline frees it otherwise.
+    if let Ok(mut p) = session.pending.try_lock() {
+        if let Some(hold) = p.hold.as_mut() {
+            hold.release();
+        }
+    }
     Ok(())
 }
 
@@ -243,11 +314,17 @@ fn needs_refresh_before_import(a: &Account, at: i64) -> bool {
 
 pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<AccountView, String> {
     let mut a = imported_account(provider, realm, &value);
+    // The account does not exist yet: validate it through the node a new account
+    // would take, and keep that node for it.
+    let route = egress::login_route(Pool::Native(provider), None).await?;
+    let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
     let refreshed = needs_refresh_before_import(&a, now());
     if refreshed {
-        qoder::refresh(&mut a).await.map_err(|e| e.to_string())?;
+        qoder::refresh(&client, &mut a)
+            .await
+            .map_err(|e| e.to_string())?;
     }
-    if let Err(error) = qoder::identity(&mut a).await {
+    if let Err(error) = qoder::identity(&client, &mut a).await {
         // An export may carry an access token that was revoked or expired without a
         // recorded expiry; retry once with the refresh credential before giving up.
         let refreshable =
@@ -255,8 +332,15 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
         if refreshed || !refreshable || !matches!(error.status, 401 | 403) {
             return Err(error.to_string());
         }
-        qoder::refresh(&mut a).await.map_err(|e| e.to_string())?;
-        qoder::identity(&mut a).await.map_err(|e| e.to_string())?;
+        qoder::refresh(&client, &mut a)
+            .await
+            .map_err(|e| e.to_string())?;
+        qoder::identity(&client, &mut a)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if bound_elsewhere(provider, &a, route.node.as_deref())? {
+        return Err(BOUND_ELSEWHERE.into());
     }
     let root = value
         .get("auth")
@@ -274,6 +358,8 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
         }
     }
     let a = store::upsert(a, None)?;
+    egress::adopt(Pool::Native(provider), &a.id, route.node.as_deref());
+    drop(route);
     let id = a.id.clone();
     tokio::spawn(async move {
         let _ = accounts::sync(provider, &id, false).await;

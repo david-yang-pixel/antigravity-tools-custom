@@ -1,4 +1,7 @@
-use super::{http::Failure, *};
+use super::{
+    http::{self, Failure},
+    *,
+};
 #[path = "accounts_scheduler.rs"]
 pub mod scheduling;
 use std::{
@@ -88,8 +91,11 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
             "This account requires browser authorization again",
         ));
     }
-    let result = match provider {
-        Provider::Qoder => qoder::refresh(&mut a).await,
+    let result = match http::client_for(&a).await {
+        Ok(client) => match provider {
+            Provider::Qoder => qoder::refresh(&client, &mut a).await,
+        },
+        Err(error) => Err(error),
     };
     if let Err(error) = result {
         let _ = store::update(provider, id, Some(&a.revision), |a| {
@@ -112,15 +118,18 @@ pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountVi
     let mut a = fresh(provider, id, force)
         .await
         .map_err(|e| e.to_string())?;
+    let client = http::client_for(&a).await.map_err(|e| e.to_string())?;
     let (mut models, mut quota) = match provider {
-        Provider::Qoder => tokio::join!(qoder::models(&a), qoder::quota(&a)),
+        Provider::Qoder => tokio::join!(qoder::models(&client, &a), qoder::quota(&client, &a)),
     };
     if models.as_ref().err().is_some_and(|e| e.status == 401)
         || quota.as_ref().err().is_some_and(|e| e.status == 401)
     {
         a = fresh(provider, id, true).await.map_err(|e| e.to_string())?;
         (models, quota) = match provider {
-            Provider::Qoder => tokio::join!(qoder::models(&a), qoder::quota(&a)),
+            Provider::Qoder => {
+                tokio::join!(qoder::models(&client, &a), qoder::quota(&client, &a))
+            }
         };
     }
     let updated = store::update(provider, id, Some(&a.revision), |stored| {

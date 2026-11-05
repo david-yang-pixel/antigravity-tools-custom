@@ -24,6 +24,8 @@
     "empty": "还没有账号",
     "emptyHint": "添加你的 {{provider}} 账号以开始使用。",
     "account": "账号",
+    "egress": "出口节点",
+    "egressDescription": "启用后，每个 {{provider}} 账号固定使用机场订阅中的一个节点，对话、续期、模型、额度查询和登录授权都从该节点出去。订阅链接、节点筛选和自动分配与 WorkBuddy 共用，开关和节点绑定各自独立：同一来源内一个节点只给一个账号，WorkBuddy 账号与 {{provider}} 账号可以使用同一节点。绑定后不再更换；节点不可用时该账号直接失败，不会回落到服务器地址。关闭时沿用 API 反代中的上游代理设置。需要服务器上可用的 mihomo（Docker 镜像已内置）。",
     "balance": "官方剩余额度",
     "health": "状态",
     "authorization": "授权有效期",

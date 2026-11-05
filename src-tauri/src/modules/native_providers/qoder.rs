@@ -82,7 +82,7 @@ pub fn apply_tokens(a: &mut Account, value: &Value) -> Result<(), Failure> {
     }
     Ok(())
 }
-pub async fn refresh(a: &mut Account) -> Result<(), Failure> {
+pub async fn refresh(client: &reqwest::Client, a: &mut Account) -> Result<(), Failure> {
     let refresh = &a.credentials.refresh_token;
     let mut attempts = Vec::new();
     if !refresh.is_empty() {
@@ -107,6 +107,7 @@ pub async fn refresh(a: &mut Account) -> Result<(), Failure> {
     );
     for (path, body) in attempts {
         match http::json(
+            client,
             Provider::Qoder,
             Method::POST,
             &format!("{}{path}", openapi(a.realm)),
@@ -121,8 +122,9 @@ pub async fn refresh(a: &mut Account) -> Result<(), Failure> {
     }
     Err(last)
 }
-pub async fn identity(a: &mut Account) -> Result<(), Failure> {
+pub async fn identity(client: &reqwest::Client, a: &mut Account) -> Result<(), Failure> {
     let value = http::json(
+        client,
         Provider::Qoder,
         Method::GET,
         &format!("{}/api/v1/userinfo", openapi(a.realm)),
@@ -148,10 +150,10 @@ pub async fn identity(a: &mut Account) -> Result<(), Failure> {
     a.credentials.organization_name = text(v, &["organization_name", "organizationName"]);
     Ok(())
 }
-pub async fn models(a: &Account) -> Result<Vec<Model>, Failure> {
+pub async fn models(client: &reqwest::Client, a: &Account) -> Result<Vec<Model>, Failure> {
     let url = format!("{}/algo/api/v2/model/list?Encode=1", gateway(a.realm));
     let body = sign::encode(b"{}");
-    let response = http::client()?
+    let response = client
         .get(http::official_url(Provider::Qoder, &url)?)
         .headers(sign::headers(a, &body, &url, "", false)?)
         .body(body)
@@ -197,8 +199,9 @@ pub fn parse_models(value: &Value) -> Result<Vec<Model>, Failure> {
     }
     Ok(models.into_values().take(2000).collect())
 }
-pub async fn quota(a: &Account) -> Result<Quota, Failure> {
+pub async fn quota(client: &reqwest::Client, a: &Account) -> Result<Quota, Failure> {
     let value = http::json(
+        client,
         Provider::Qoder,
         Method::GET,
         &format!("{}/api/v2/quota/usage", openapi(a.realm)),
@@ -258,6 +261,7 @@ pub fn parse_quota(value: &Value) -> Result<Quota, Failure> {
     Ok(Quota::from_packs("credits", packs))
 }
 pub async fn chat(
+    client: &reqwest::Client,
     a: &Account,
     model: &str,
     payload: Value,
@@ -266,7 +270,7 @@ pub async fn chat(
     let body = super::wire::qoder_request(a, model, payload)?;
     let encoded = sign::encode(body.to_string().as_bytes());
     let url = format!("{}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1", gateway(a.realm));
-    http::client()?
+    client
         .post(http::official_url(Provider::Qoder, &url)?)
         .headers(sign::headers(a, &encoded, &url, model, true)?)
         .body(encoded)
