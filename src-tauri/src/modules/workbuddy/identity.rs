@@ -110,7 +110,7 @@ pub fn ensure(account: &mut Account) -> bool {
     }
     // Previous releases generated UUID placeholders for a native SDK risk token.
     // Remove those recognizable placeholders; preserve opaque client-exported tokens.
-    if uuid::Uuid::parse_str(&account.device_token).is_ok() {
+    if account.device_token.len() == 36 && uuid::Uuid::parse_str(&account.device_token).is_ok() {
         account.device_token.clear();
         changed = true;
     }

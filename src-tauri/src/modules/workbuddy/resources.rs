@@ -31,7 +31,11 @@ fn billing_base(realm: Realm) -> String {
     .into()
 }
 async fn post(account: &Account, path: &str, body: &Value) -> Result<rquest::Response, String> {
-    let headers = headers(account)?;
+    let headers = if path == "/v2/billing/meter/daily-checkin" {
+        checkin_headers(account)?
+    } else {
+        headers(account)?
+    };
     client::http_for(account)
         .await?
         .post(format!("{}{path}", billing_base(account.realm)))
@@ -55,7 +59,6 @@ pub(super) fn headers(account: &Account) -> Result<rquest::header::HeaderMap, St
         ("x-enterprise-id", account.enterprise_id.as_str()),
         ("x-tenant-id", account.enterprise_id.as_str()),
         ("x-domain", account.domain.as_str()),
-        ("x-device-token", account.device_token.as_str()),
     ] {
         if !value.is_empty() {
             headers.insert(
@@ -65,6 +68,19 @@ pub(super) fn headers(account: &Account) -> Result<rquest::header::HeaderMap, St
                     .map_err(|_| "Invalid WorkBuddy resource header")?,
             );
         }
+    }
+    Ok(headers)
+}
+fn checkin_headers(account: &Account) -> Result<rquest::header::HeaderMap, String> {
+    let mut headers = headers(account)?;
+    if !account.device_token.is_empty() {
+        headers.insert(
+            "x-device-token",
+            account
+                .device_token
+                .parse()
+                .map_err(|_| "Invalid WorkBuddy device token header")?,
+        );
     }
     Ok(headers)
 }
@@ -241,7 +257,8 @@ mod tests {
             "client":{"product_version":"5.6.2", "cli_version":"2.147.0", "machine_id":"imported-machine", "session_id":"imported-session"}
         })).unwrap();
         super::super::identity::ensure(&mut account);
-        let billing_headers = headers(&account).unwrap();
+        assert!(!headers(&account).unwrap().contains_key("x-device-token"));
+        let billing_headers = checkin_headers(&account).unwrap();
         assert_eq!(billing_headers["authorization"], "Bearer test-access");
         assert_eq!(
             billing_headers["x-device-token"],
@@ -266,7 +283,9 @@ mod tests {
         assert_eq!(account.client.product_version, "5.6.2");
         account.device_token = uuid::Uuid::new_v4().to_string();
         super::super::identity::ensure(&mut account);
-        assert!(!headers(&account).unwrap().contains_key("x-device-token"));
+        assert!(!checkin_headers(&account)
+            .unwrap()
+            .contains_key("x-device-token"));
     }
     #[tokio::test]
     async fn workbuddy_checkin_classifies_rejections_and_retains_retry_after_without_a_json_body() {

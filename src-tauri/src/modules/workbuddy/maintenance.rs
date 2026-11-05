@@ -190,7 +190,6 @@ pub async fn run(
     if !current.enabled || (automatic && !current.management.managed) {
         return accounts::view(current);
     }
-    account.management.managed = current.management.managed;
     account.management = current.management;
     let should_checkin = wants_checkin
         && (checkin_now

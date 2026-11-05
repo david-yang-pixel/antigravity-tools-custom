@@ -20,7 +20,7 @@
 
 - `main/tar.js` 的 `AuthService.buildHeaders` / `buildHeadersWithTuringToken`：
   计费/签到只带 JSON 协商、Bearer、用户 ID、可选企业/租户/域及真实设备令牌。
-  与推理的 Origin、Referer、machine/session、CLI 产品头分开。
+  设备令牌仅附加到签到请求，不扩散到积分和活动请求；与推理的 Origin、Referer、machine/session、CLI 产品头分开。
   Axios 默认 UA 来自随包 Axios 版本。
 - `main/index.js` 的 `TuringSdkService`：设备令牌来自原生 SDK，绝非 UUID。
   官方 SDK 仅支持 Windows/macOS，Linux 不支持。网关不合成设备证明，不伪装 SDK
