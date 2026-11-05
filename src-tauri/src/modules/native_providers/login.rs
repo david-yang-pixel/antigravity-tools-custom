@@ -312,8 +312,30 @@ fn needs_refresh_before_import(a: &Account, at: i64) -> bool {
         || (refreshable && a.expires_at > 0 && a.expires_at <= at + 60)
 }
 
+/// Imports use a new login route, not an existing account's refresh transaction.
+/// Reject known credentials before any network I/O: rotating one and then failing
+/// identity validation or the egress check would strand the saved refresh token.
+/// Check all saved regions, including when the administrator selected the wrong one.
+fn reject_saved_credentials(a: &Account, saved: &[Account]) -> Result<(), String> {
+    let supplied = &a.credentials;
+    if saved.iter().any(|previous| {
+        let credentials = &previous.credentials;
+        [
+            (&supplied.access_token, &credentials.access_token),
+            (&supplied.refresh_token, &credentials.refresh_token),
+            (&supplied.personal_token, &credentials.personal_token),
+        ]
+        .into_iter()
+        .any(|(supplied, saved)| !supplied.is_empty() && supplied == saved)
+    }) {
+        return Err("This credential is already saved; refresh or reauthorize the account from its own row instead of importing it again".into());
+    }
+    Ok(())
+}
+
 pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<AccountView, String> {
     let mut a = imported_account(provider, realm, &value);
+    reject_saved_credentials(&a, &store::all(provider)?)?;
     // The account does not exist yet: validate it through the node a new account
     // would take, and keep that node for it.
     let route = egress::login_route(Pool::Native(provider), None).await?;
@@ -403,6 +425,43 @@ mod tests {
         assert!(!needs_refresh_before_import(&a, at));
         a.credentials.access_token.clear();
         assert!(needs_refresh_before_import(&a, at));
+    }
+    #[test]
+    fn saved_tokens_are_rejected_individually_before_import() {
+        let at = now();
+        let mut previous = Account::new(Provider::Qoder, Realm::Cn);
+        previous.credentials.access_token = "saved-access".into();
+        previous.credentials.refresh_token = "saved-refresh".into();
+        previous.credentials.personal_token = "saved-personal".into();
+        let saved = [previous];
+        for auth in [
+            serde_json::json!({"accessToken":"saved-access"}),
+            serde_json::json!({"accessToken":"expired","refreshToken":"saved-refresh","expiresAt":at - 1}),
+            serde_json::json!({"personalToken":"saved-personal"}),
+        ] {
+            for realm in [Realm::Cn, Realm::Global] {
+                let a = imported_account(Provider::Qoder, realm, &auth);
+                let error = reject_saved_credentials(&a, &saved).unwrap_err();
+                assert!(error.contains("already saved"));
+                assert!(error.contains("reauthorize"));
+                assert!(!error.contains("saved-refresh"));
+            }
+        }
+    }
+    #[test]
+    fn empty_tokens_and_device_identifiers_do_not_mark_an_import_as_saved() {
+        let mut previous = Account::new(Provider::Qoder, Realm::Cn);
+        previous.credentials.access_token = "saved-access".into();
+        let a = imported_account(
+            Provider::Qoder,
+            Realm::Cn,
+            &serde_json::json!({
+                "accessToken":"new-access",
+                "machineId":previous.credentials.machine_id,
+                "deviceId":previous.credentials.device_id
+            }),
+        );
+        assert!(reject_saved_credentials(&a, &[previous]).is_ok());
     }
     #[tokio::test]
     async fn cancel_does_not_wait_for_an_in_flight_poll() {

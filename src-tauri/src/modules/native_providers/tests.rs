@@ -1217,3 +1217,39 @@ fn idle_zero_balance_accounts_keep_recovery_until_credits_return() {
     assert_eq!(accounts::work(&a, at), None);
     assert!(accounts::sync_paused(&a, at));
 }
+
+#[tokio::test]
+async fn duplicate_import_is_rejected_before_egress_and_preserves_saved_tokens() {
+    let _sandbox = Sandbox::new();
+    let mut a = account(Provider::Qoder, "duplicate-import");
+    a.expires_at = now() - 3600;
+    let a = store::upsert(a, None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    // Any attempt to obtain a login route fails locally, before networking. The
+    // duplicate-credential guard must run even before that route validation.
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("workbuddy_egress.json"),
+        "invalid egress settings",
+    )
+    .unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"auth":{
+            "accessToken":"expired-import-access",
+            "refreshToken":a.credentials.refresh_token,
+            "expiresAt":a.expires_at
+        }}),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(error.contains("already saved"), "{error}");
+    assert_eq!(store::all(Provider::Qoder).unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}

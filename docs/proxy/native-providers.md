@@ -181,6 +181,11 @@ authentication, not an ordinary inference client key.
 
 Qoder credential import also accepts `personalToken`; it is exchanged for a job
 token. Imported account identity is checked with the provider before persistence.
+An access, refresh or personal token already saved for this provider is rejected
+before obtaining a login route or making a network request, even if the selected
+region differs. Refresh or reauthorize that account from its own row instead;
+this keeps its existing route and avoids discarding a rotated refresh token when
+an import is refused. Fresh credentials continue through normal import validation.
 
 ## Protocol scope and verification
 
