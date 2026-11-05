@@ -232,12 +232,32 @@ fn imported_account(provider: Provider, realm: Realm, value: &Value) -> Account 
     a
 }
 
+/// An imported access token is used as-is only while it is present and unexpired (with a
+/// one-minute margin); otherwise any refresh/personal credential is exchanged first.
+fn needs_refresh_before_import(a: &Account, at: i64) -> bool {
+    let refreshable =
+        !a.credentials.refresh_token.is_empty() || !a.credentials.personal_token.is_empty();
+    a.credentials.access_token.is_empty()
+        || (refreshable && a.expires_at > 0 && a.expires_at <= at + 60)
+}
+
 pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<AccountView, String> {
     let mut a = imported_account(provider, realm, &value);
-    if a.credentials.access_token.is_empty() {
+    let refreshed = needs_refresh_before_import(&a, now());
+    if refreshed {
         qoder::refresh(&mut a).await.map_err(|e| e.to_string())?;
     }
-    qoder::identity(&mut a).await.map_err(|e| e.to_string())?;
+    if let Err(error) = qoder::identity(&mut a).await {
+        // An export may carry an access token that was revoked or expired without a
+        // recorded expiry; retry once with the refresh credential before giving up.
+        let refreshable =
+            !a.credentials.refresh_token.is_empty() || !a.credentials.personal_token.is_empty();
+        if refreshed || !refreshable || !matches!(error.status, 401 | 403) {
+            return Err(error.to_string());
+        }
+        qoder::refresh(&mut a).await.map_err(|e| e.to_string())?;
+        qoder::identity(&mut a).await.map_err(|e| e.to_string())?;
+    }
     let root = value
         .get("auth")
         .filter(|v| v.is_object())
@@ -275,6 +295,28 @@ mod tests {
         assert_eq!(account.credentials.machine_id, "existing-machine");
         assert_eq!(account.credentials.device_id, "existing-device");
         assert_eq!(account.expires_at, 1800000000);
+    }
+    #[test]
+    fn expired_imported_tokens_are_refreshed_before_identity_validation() {
+        let at = 1_800_000_000;
+        let mut a = imported_account(
+            Provider::Qoder,
+            Realm::Cn,
+            &serde_json::json!({"accessToken":"old","refreshToken":"refresh","expiresAt":at - 10}),
+        );
+        assert!(needs_refresh_before_import(&a, at));
+        a.expires_at = at + 30; // within the one-minute margin
+        assert!(needs_refresh_before_import(&a, at));
+        a.expires_at = at + 3600;
+        assert!(!needs_refresh_before_import(&a, at));
+        a.expires_at = 0; // unknown expiry: try the supplied token first
+        assert!(!needs_refresh_before_import(&a, at));
+        // Without a refresh credential an expired token is still tried as-is.
+        a.expires_at = at - 10;
+        a.credentials.refresh_token.clear();
+        assert!(!needs_refresh_before_import(&a, at));
+        a.credentials.access_token.clear();
+        assert!(needs_refresh_before_import(&a, at));
     }
     #[tokio::test]
     async fn cancel_does_not_wait_for_an_in_flight_poll() {

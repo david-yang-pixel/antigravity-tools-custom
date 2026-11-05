@@ -57,15 +57,6 @@ pub enum Realm {
     Global,
 }
 
-impl Realm {
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Cn => "cn",
-            Self::Global => "global",
-        }
-    }
-}
-
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Model {
     pub id: String,
