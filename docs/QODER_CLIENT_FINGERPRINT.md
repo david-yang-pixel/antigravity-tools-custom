@@ -14,6 +14,12 @@ Node/OpenSSL 3.5 的 TLS 配置。实现位于 `src-tauri/crates/qoder-client`�
 ALPN 和 supported groups，避免 Linux/macOS/Windows 系统 TLS 库改变指纹。
 WorkBuddy 仍使用自己的 rquest 配置，其余来源不切换 TLS 客户端。
 
+两套 TLS 库在同一可执行文件中需要隔离 C 符号。`crates/boring-sys2` 对原有
+4.15.15 依赖施加构建补丁，利用 BoringSSL 的前缀头将原生符号命名为 `abv_bssl_*`，
+Rust API 和 TLS 配置保持原样。上游源码包校验后本地解压，无构建时下载；原生构建
+增加一轮符号收集编译。补丁支持解析 ELF/Mach-O/COFF 目标文件，拒绝未隔离符号和
+外部预编译/FIPS 覆盖；许可证和完整来源见该目录 README。
+
 本地捕获测试逐项对比实际发出的 ClientHello 与 Node 24.19.0 / OpenSSL 3.5.7
 对照数据（`tests/fixtures/node-tls-3.5.json`），以下字段一致：
 
@@ -108,7 +114,7 @@ Qoder 账号页显示网关内置版本、官方 npm `latest` 版本和上次成
 ```bash
 python scripts/vendor-qoder-client.py --fixtures
 cd src-tauri
-cargo test -p qoder-client --lib --locked
+cargo test -p qoder-client --tests --locked
 ```
 
 测试向量只使用假账号、固定时间和测试随机数；正式运行始终使用 OS 安全随机数。
@@ -116,6 +122,10 @@ cargo test -p qoder-client --lib --locked
 会话隔离、代理认证/远端 DNS、证书拒绝、压缩和流式截止时间。它们不运行原生 UMID
 程序，也不消耗真实账号额度。真实账号端到端调用以及 macOS/Windows 在线 SDK 行为
 仍需目标环境验证；不能将离线向量通过解释为服务端授权成功。
+
+`tls_coexistence` 集成测试在同一进程中链接并使用 OpenSSL 和 BoringSSL，捕获两者
+握手并核对 Qoder 的 Node 密码套件及 rquest 的 Chrome HTTP/2 协商。新版本检测测试
+覆盖 SemVer、缓存/并发合并、失败保留旧结果、重定向拒绝和响应大小上限。
 
 如需回退，设置 `ABV_QODER_LEGACY_PROTOCOL=true` 后重启。该开关明确选择原来的
 Rust COSY 签名、rustls 传输和账号派生标识，默认版本恢复为 1.1.75；不会调用 UMID。

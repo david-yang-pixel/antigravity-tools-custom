@@ -37,3 +37,5 @@ webpki-root-certs = "1"
 
 [dev-dependencies]
 tempfile = "3"
+rquest = "=5.1.0"
+rquest-util = "=2.2.1"
