@@ -1,0 +1,59 @@
+{
+  "identity": {
+    "uid": "fixture-user",
+    "security_oauth_token": "fixture-token",
+    "organization_id": "",
+    "data_policy_agreed": true
+  },
+  "body": "{\"messages\":[{\"role\":\"user\",\"content\":\"fixture 你好\"}],\"model_config\":{\"key\":\"fixture-model\"}}",
+  "inference": {
+    "url": "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1",
+    "body": "jbuOD)DYBymYKUDxz*l*KOPxiwJxKLGS.bDHFrBE.WQwDSQwBMn*DOLIJZFYD,RzbPRL)uw*eFwrBO.bDHFrx(mYKtDxj^#SJLNYBySkr*NOWrD,ByBEF^DxB*GoKMu(",
+    "headers": {
+      "Accept": "text/event-stream",
+      "Authorization": "Bearer COSY.eyJ2ZXJzaW9uIjoidjEiLCJyZXF1ZXN0SWQiOiIwYzBiMGEwOS0wODA3LTQ2MDUtODQwMy0wMjAxZmZmZWZkZmMiLCJpbmZvIjoiejMvMHZ3bnR6RWk2Rk1MaExLdWc1akxQNW42YUtkKzZadENKQ0xTR0JVRk5aUzlRZXNRbDV1N1pSS2pQWGNlWEZoNENMWWp5bnJFajNVNlFUSFhKcXFWNGhaTnpOMUpNQk4yMDFIbCtJK29GSUUxOWhrQUFoUk01Vmg2RjY5SUxOdS9XVU53UjhVNTJQQWpUTmU2akZ3PT0iLCJjb3N5VmVyc2lvbiI6IjEuMS44MyIsImlkZVZlcnNpb24iOiIifQ==.be163db4b1b2b4c69cc3bb4d98635fb1",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Content-Type": "application/json",
+      "Cosy-Business-Product": "cli",
+      "Cosy-Business-Type": "agent",
+      "Cosy-ClientType": "5",
+      "Cosy-Data-Policy": "agree",
+      "Cosy-Date": "1800000000",
+      "Cosy-Key": "AGGfSGSDeVn7cnwhx7xezDm50H7xFLgIHKirBW14pvGlfyJB47shV5e2ipKnu2Q1vcyaePZD/8JRGd4JGJgIEfnlHkVg7nHUiAcLwnbs6p/UGVvqcqmD+XIQBPimVcDerWO65Qbtd1FHuUc3a00/HzH/ss49ITzQX/Um1n6EImw=",
+      "Cosy-MachineId": "fixture-machine",
+      "Cosy-MachineToken": "fixture-machine",
+      "Cosy-MachineType": "5",
+      "Cosy-Scene": "assistant",
+      "Cosy-User": "fixture-user",
+      "Cosy-Version": "1.1.83",
+      "Login-Version": "v2",
+      "X-Model-Key": "fixture-model",
+      "X-Model-Source": "system"
+    }
+  },
+  "catalog": {
+    "url": "https://api3.qoder.sh/algo/api/v2/model/list",
+    "body": "{}",
+    "headers": {
+      "Accept": "application/json",
+      "Accept-Encoding": "identity",
+      "Authorization": "Bearer COSY.eyJ2ZXJzaW9uIjoidjEiLCJyZXF1ZXN0SWQiOiIxYzFiMWExOS0xODE3LTQ2MTUtOTQxMy0xMjExMTAwZjBlMGQiLCJpbmZvIjoiejMvMHZ3bnR6RWk2Rk1MaExLdWc1akxQNW42YUtkKzZadENKQ0xTR0JVRk5aUzlRZXNRbDV1N1pSS2pQWGNlWEZoNENMWWp5bnJFajNVNlFUSFhKcXFWNGhaTnpOMUpNQk4yMDFIbCtJK29GSUUxOWhrQUFoUk01Vmg2RjY5SUxOdS9XVU53UjhVNTJQQWpUTmU2akZ3PT0iLCJjb3N5VmVyc2lvbiI6IjEuMS44MyIsImlkZVZlcnNpb24iOiIifQ==.5d8930235858349e9bd6a44a0c0f7dac",
+      "Content-Type": "application/json",
+      "Cosy-Business-Product": "cli",
+      "Cosy-Business-Type": "agent",
+      "Cosy-ClientIp": "fixture-machine",
+      "Cosy-ClientType": "5",
+      "Cosy-Data-Policy": "agree",
+      "Cosy-Date": "1800000000",
+      "Cosy-Key": "AGGfSGSDeVn7cnwhx7xezDm50H7xFLgIHKirBW14pvGlfyJB47shV5e2ipKnu2Q1vcyaePZD/8JRGd4JGJgIEfnlHkVg7nHUiAcLwnbs6p/UGVvqcqmD+XIQBPimVcDerWO65Qbtd1FHuUc3a00/HzH/ss49ITzQX/Um1n6EImw=",
+      "Cosy-MachineId": "fixture-machine",
+      "Cosy-MachineToken": "fixture-machine",
+      "Cosy-MachineType": "5",
+      "Cosy-Scene": "assistant",
+      "Cosy-User": "fixture-user",
+      "Cosy-Version": "1.1.83",
+      "Login-Version": "v2"
+    }
+  }
+}

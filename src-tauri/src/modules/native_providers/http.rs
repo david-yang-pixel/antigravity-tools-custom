@@ -42,7 +42,7 @@ impl From<&str> for Failure {
 /// Clients by owner (an account id, or `login`) with the route each was built for.
 /// Accounts never share a connection pool: one socket never carries two accounts'
 /// tokens, and a route change rebuilds only that account's client.
-static CLIENTS: LazyLock<Mutex<HashMap<String, (String, reqwest::Client)>>> =
+static CLIENTS: LazyLock<Mutex<HashMap<String, (String, qoder_client::transport::Client)>>> =
     LazyLock::new(Default::default);
 
 /// The proxy behind `exit`. With egress off this is the gateway's own upstream proxy
@@ -63,29 +63,22 @@ fn proxy_url(exit: &Exit) -> String {
 /// No overall timeout: callers bound each request by its own deadline, which also covers
 /// long streams. Redirects are never followed so credentials cannot be replayed to another
 /// host, and environment proxies are ignored.
-fn build(proxy: &str) -> Result<reqwest::Client, Failure> {
-    let builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .pool_max_idle_per_host(2);
-    let builder = if proxy.is_empty() {
-        builder.no_proxy()
+fn build(proxy: &str) -> Result<qoder_client::transport::Client, Failure> {
+    let build = if super::qoder::sign::legacy() {
+        qoder_client::transport::Client::legacy
     } else {
-        builder.proxy(
-            reqwest::Proxy::all(proxy).map_err(|_| Failure::new(502, "Invalid outbound proxy"))?,
-        )
+        qoder_client::transport::Client::new
     };
-    builder
-        .build()
-        .map_err(|_| Failure::new(502, "Cannot initialize provider connection"))
+    build(proxy).map_err(|_| Failure::new(502, "Cannot initialize Qoder connection"))
 }
-fn cached(owner: &str, exit: &Exit) -> Result<reqwest::Client, Failure> {
+fn cached(owner: &str, exit: &Exit) -> Result<qoder_client::transport::Client, Failure> {
     let route = proxy_url(exit);
+    let fingerprint = format!("{}:{route}", super::qoder::sign::legacy());
     let mut clients = CLIENTS
         .lock()
         .map_err(|_| Failure::new(503, "Provider connections unavailable"))?;
     if let Some((built_for, client)) = clients.get(owner) {
-        if *built_for == route {
+        if *built_for == fingerprint {
             return Ok(client.clone());
         }
     }
@@ -93,21 +86,27 @@ fn cached(owner: &str, exit: &Exit) -> Result<reqwest::Client, Failure> {
     if clients.len() >= 1024 {
         clients.clear();
     }
-    clients.insert(owner.to_owned(), (route, client.clone()));
+    clients.insert(owner.to_owned(), (fingerprint, client.clone()));
     Ok(client)
 }
 /// Client for one saved account: its own egress node, `DIRECT`, or (egress off) the
 /// gateway's usual outbound path. A bound account whose node is unusable fails here.
-pub async fn client_for(account: &Account) -> Result<reqwest::Client, Failure> {
+pub async fn client_for(account: &Account) -> Result<qoder_client::transport::Client, Failure> {
     let exit = egress::exit_for(Pool::Native(account.provider), &account.id).await?;
     cached(&account.id, &exit)
 }
 /// Client for one saved account on an already resolved route.
-pub fn client_on(account: &Account, exit: &Exit) -> Result<reqwest::Client, Failure> {
+pub fn client_on(
+    account: &Account,
+    exit: &Exit,
+) -> Result<qoder_client::transport::Client, Failure> {
     cached(&account.id, exit)
 }
 /// Client for an authorization that has no saved account yet.
-pub fn login_client(provider: Provider, exit: &Exit) -> Result<reqwest::Client, Failure> {
+pub fn login_client(
+    provider: Provider,
+    exit: &Exit,
+) -> Result<qoder_client::transport::Client, Failure> {
     cached(&format!("{}:login", provider.key()), exit)
 }
 /// Drops a removed account's connections.
@@ -152,7 +151,7 @@ pub fn official_url(provider: Provider, raw: &str) -> Result<url::Url, Failure> 
     Ok(url)
 }
 pub async fn json(
-    client: &reqwest::Client,
+    client: &qoder_client::transport::Client,
     provider: Provider,
     method: Method,
     url: &str,
@@ -196,7 +195,11 @@ pub async fn read_json(response: reqwest::Response) -> Result<Value, Failure> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value: Value = serde_json::from_slice(&bytes)
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| Failure::new(502, "Provider returned invalid text"))?;
+    let text = qoder_client::signing::decrypt(text)
+        .map_err(|_| Failure::new(502, "Cannot decrypt Qoder response"))?;
+    let value: Value = serde_json::from_str(&text)
         .map_err(|_| Failure::new(502, "Provider returned invalid JSON"))?;
     if value
         .pointer("/ResponseMetadata/Error")

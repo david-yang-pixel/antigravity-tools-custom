@@ -1117,6 +1117,42 @@ fn cosy_client_ip_and_hostname_are_stable_per_account_and_differ_between_account
 }
 
 #[test]
+fn modern_qoder_hostname_and_encoded_sse_follow_the_official_protocol() {
+    assert_eq!(
+        qoder::sign::normalize_hostname("  dev-host.local  "),
+        "dev-host.local"
+    );
+    assert_eq!(
+        qoder::sign::normalize_hostname("München.local"),
+        "xn--mnchen-3ya.local"
+    );
+    let name = qoder::sign::normalize_hostname(&format!("{}\r\nheader: injected", "x".repeat(110)));
+    assert!(name.len() <= 96 && !name.contains(['\r', '\n']));
+    let chunk = serde_json::json!({"choices":[{"delta":{"content":"decoded"}}]});
+    let encoded = qoder::sign::encode(chunk.to_string().as_bytes());
+    let decoded = wire::event(Provider::Qoder, &encoded).unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), chunk);
+    let envelope = serde_json::json!({"statusCodeValue":200,"body":encoded});
+    assert_eq!(
+        wire::event(Provider::Qoder, &envelope.to_string()).unwrap(),
+        Some(decoded)
+    );
+    let done = qoder::sign::encode(b"[DONE]");
+    assert_eq!(
+        wire::event(Provider::Qoder, &done).unwrap(),
+        Some("[DONE]".into())
+    );
+    assert_eq!(
+        wire::event(
+            Provider::Qoder,
+            &serde_json::json!({"body":done}).to_string()
+        )
+        .unwrap(),
+        Some("[DONE]".into())
+    );
+}
+
+#[test]
 fn idle_accounts_only_renew_near_expiry_and_new_catalogs_are_always_fetched() {
     let at = now();
     let mut a = account(Provider::Qoder, "idle");

@@ -136,6 +136,10 @@ pub struct Credentials {
     pub organization_id: String,
     #[serde(default)]
     pub organization_name: String,
+    #[serde(default)]
+    pub organization_tags: Option<Value>,
+    #[serde(default)]
+    pub data_policy_agreed: Option<bool>,
 }
 
 /// This value is persisted only inside an authenticated, encrypted vault. Never serialize

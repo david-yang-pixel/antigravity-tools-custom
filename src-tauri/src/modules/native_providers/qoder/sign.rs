@@ -24,7 +24,141 @@ const STANDARD_ALPHABET: &[u8] =
 const SERVER_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc\n4k6Pz1EaDicBMpdpxKduSZu5OANqUq8er4GM95omAGIOPOh+Nx0spthYA2BqGz+l\n6HRkPJ7S236FZz73In/KVuLnwI8JJ2CbuJap8kvheCCZpmAWpb/cPx/3Vr/J6I17\nXcW+ML9FoCI6AOvOzwIDAQAB\n-----END PUBLIC KEY-----";
 
 pub fn version() -> String {
-    std::env::var("ABV_QODER_VERSION").unwrap_or_else(|_| "1.1.75".into())
+    std::env::var("ABV_QODER_VERSION").unwrap_or_else(|_| {
+        if legacy() {
+            "1.1.75"
+        } else {
+            qoder_client::CLI_VERSION
+        }
+        .into()
+    })
+}
+/// Explicit rollback only. A failed modern signature/identity must never silently
+/// downgrade an already rejected request or replay it through another protocol.
+pub fn legacy() -> bool {
+    std::env::var("ABV_QODER_LEGACY_PROTOCOL")
+        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+}
+
+type WasmCache = BTreeMap<String, (String, qoder_client::signing::Signer)>;
+static WASM_SIGNERS: LazyLock<Mutex<WasmCache>> = LazyLock::new(Default::default);
+
+pub fn forget(id: &str) {
+    if let Ok(mut cache) = WASM_SIGNERS.lock() {
+        cache.remove(id);
+    }
+    if let Ok(mut cache) = SIGNERS.lock() {
+        cache.remove(id);
+    }
+}
+
+pub fn normalize_hostname(value: &str) -> String {
+    let value = value.trim();
+    fn shorten(value: &str) -> String {
+        if value.len() <= 96 {
+            return value.into();
+        }
+        let hash = format!("{:x}", Sha256::digest(value.as_bytes()));
+        let prefix = value[..87].trim_end_matches(|c: char| c == '-' || c.is_ascii_whitespace());
+        format!(
+            "{}-{}",
+            if prefix.is_empty() { "unknown" } else { prefix },
+            &hash[..8]
+        )
+    }
+    if value.bytes().all(|b| (32..=126).contains(&b)) {
+        return shorten(value);
+    }
+    if let Ok(url::Host::Domain(ascii)) = url::Host::parse(value) {
+        if !ascii.is_empty() && ascii.bytes().all(|b| (32..=126).contains(&b)) {
+            return shorten(&ascii);
+        }
+    }
+    let hash = format!("{:x}", Sha256::digest(value.as_bytes()));
+    let mut safe = String::new();
+    for c in value.chars() {
+        let c = if c.is_ascii() && ('!'..='~').contains(&c) {
+            c
+        } else {
+            '-'
+        };
+        if c != '-' || !safe.ends_with('-') {
+            safe.push(c);
+        }
+    }
+    let prefix = safe.trim_matches('-');
+    shorten(&format!(
+        "{}-{}",
+        if prefix.is_empty() { "unknown" } else { prefix },
+        &hash[..8]
+    ))
+}
+
+pub async fn prepare(
+    a: &Account,
+    body: String,
+    inference: Option<&str>,
+) -> Result<qoder_client::signing::PreparedRequest, Failure> {
+    let endpoint = super::gateway(a.realm);
+    if legacy() {
+        let encoded = encode(body.as_bytes());
+        let path = if inference.is_some() {
+            "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+        } else {
+            "/algo/api/v2/model/list?Encode=1"
+        };
+        let url = format!("{endpoint}{path}");
+        let headers = headers(
+            a,
+            &encoded,
+            &url,
+            inference.unwrap_or(""),
+            inference.is_some(),
+        )?;
+        return Ok(qoder_client::signing::PreparedRequest {
+            url,
+            body: Some(encoded),
+            headers: headers
+                .iter()
+                .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_owned())))
+                .collect(),
+        });
+    }
+    let root = crate::modules::account::get_data_dir()?;
+    let machine = qoder_client::identity::machine(&root, a.realm == super::super::Realm::Cn, &a.uid).await
+        .map_err(|_| Failure::new(503, "Official Qoder machine identity unavailable; check the runtime helper or explicitly select the legacy protocol"))?;
+    let a = a.clone();
+    let model = inference.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        let version = version();
+        let mut identity = json!({"uid":a.uid,"security_oauth_token":a.credentials.access_token,"organization_id":a.credentials.organization_id});
+        if let Some(tags) = &a.credentials.organization_tags { identity["organization_tags"] = tags.clone(); }
+        if let Some(agreed) = a.credentials.data_policy_agreed { identity["data_policy_agreed"] = json!(agreed); }
+        let fingerprint = format!("{:x}", Sha256::digest(format!("{}:{}:{}", a.credentials.machine_id, version, identity)));
+        let mut cache = WASM_SIGNERS.lock().map_err(|_| Failure::new(503, "Qoder signer unavailable"))?;
+        if cache.get(&a.id).is_none_or(|(old, _)| old != &fingerprint) {
+            let signer = qoder_client::signing::Signer::new(&a.credentials.machine_id, &version, identity)
+                .map_err(|_| Failure::new(502, "Cannot initialize Qoder WASM identity"))?;
+            if cache.len() >= 64 { cache.clear(); }
+            cache.insert(a.id.clone(), (fingerprint, signer));
+        }
+        let signer = &mut cache.get_mut(&a.id).ok_or("Qoder signer unavailable")?.1;
+        let mut request = match &model {
+            Some(model) => signer.inference(endpoint, &body, model),
+            None => signer.request(endpoint, "/api/v2/model/list", "GET", Some(&body)),
+        }.map_err(|_| Failure::new(502, "Qoder WASM signing failed"))?;
+        // UMID middleware follows WASM signing in the official CLI.
+        for (name, value) in [
+            ("Cosy-Version", version), ("Cosy-ClientType", "5".into()),
+            ("Cosy-MachineOS", format!("{}_{}", if std::env::consts::ARCH == "aarch64" { "aarch64" } else { "x86_64" }, if cfg!(windows) { "win32" } else if cfg!(target_os="macos") { "darwin" } else { "linux" })),
+            ("Cosy-MachineCode", machine.machine_code), ("Cosy-MachineToken", machine.machine_token), ("Cosy-MachineType", machine.machine_type),
+        ] { request.headers.retain(|k, _| !k.eq_ignore_ascii_case(name)); request.headers.insert(name.into(), value); }
+        if model.is_some() {
+            let host = normalize_hostname(&sysinfo::System::host_name().unwrap_or_default());
+            if !host.is_empty() { request.headers.insert("Cosy-MachineHostname".into(), host); }
+        }
+        Ok(request)
+    }).await.map_err(|_| Failure::new(502, "Qoder signer task failed"))?
 }
 pub fn encode(bytes: &[u8]) -> String {
     let s = STANDARD.encode(bytes);

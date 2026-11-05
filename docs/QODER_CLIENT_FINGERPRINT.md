@@ -1,69 +1,98 @@
-# Qoder 官方客户端指纹对照（qodercli 1.1.83）
+# Qoder CLI 1.1.83 协议与客户端指纹
 
-记录官方 Qoder CLI 的 TLS ClientHello 与请求头，并与网关当前的 Qoder 客户端对照，供后续对齐使用。采集日期 2026-11-05。
+默认路径已接入官方 1.1.83 WASM 签名/响应解码、原生 UMID 机器标识和
+Node/OpenSSL 3.5 的 TLS 配置。实现位于 `src-tauri/crates/qoder-client`；
+网关只负责账号、出口和协议适配，不在通用 Gemini pipeline 中加入这些差异。
 
-## 采集方法
+## TLS
 
-1. 从 npm 获取 `@qoder-ai/qodercli@1.1.83`（`bundle/qodercli.js`；同包 `qoder-worker-runtime.mjs` 中的相关函数相同），只做静态阅读。
-2. 静态确认 CLI 的 HTTP 栈：
-   - 启动时 `setGlobalDispatcher` 安装内置 **undici 7.1.3** 的 `Agent`；连接参数只有 keepAlive、超时和可选的额外 CA，**没有自定义 ciphers / ecdhCurve / sigalgs / secureOptions**。
-   - 内置 undici 连接器：`allowH2 = allowH2 ?? false`，调用
-     `tls.connect({highWaterMark:16384, servername, session, ALPNProtocols:["http/1.1"], port:443, host})`。
-   - 因此 ClientHello 完全由 **用户本机 Node 的 TLS 默认值** + ALPN `http/1.1` + SNI 决定。
-3. 将 Qoder 域名指向 `127.0.0.1`，本地 443 端口只读取并解析 ClientHello（不完成握手），分别用以下两者发起连接：
-   - 系统 Node `v22.23.4`（官方构建，内置 OpenSSL 3.5.9）按上面完全相同的参数调用 `tls.connect`；
-   - 与 `native_providers::http::build` 相同配置的 `reqwest 0.12.28 + rustls`（网关当前的 Qoder 客户端）。
+官方 CLI 使用内置 undici 7.1.3，TLS 采用当前 Node 的默认配置，ALPN 只包含
+`http/1.1`。官方用户的 Node/OpenSSL 版本不唯一，因此这里明确对齐 **OpenSSL 3.5
+系列的 Node 默认配置**，不声称复制任意 Node 版本的 ClientHello。
 
-未直接运行官方 CLI 本体（本次采集环境的安全策略不允许执行下载的第三方代码）。由于其 TLS 参数已静态确认为 Node 默认值，按相同参数调用 `tls.connect` 得到的 ClientHello 与 CLI 一致；首次连接之后的会话复用（PSK/session ticket）未覆盖。
+网关为 Qoder 单独使用 vendored OpenSSL 3.5.5，固定 Node 的 cipher list、TLS 1.2–1.3、
+ALPN 和 supported groups，避免 Linux/macOS/Windows 系统 TLS 库改变指纹。
+WorkBuddy 仍使用自己的 rquest 配置，其余来源不切换 TLS 客户端。
 
-## TLS 对照
+本地捕获测试逐项对比实际发出的 ClientHello 与 Node 24.19.0 / OpenSSL 3.5.7
+对照数据（`tests/fixtures/node-tls-3.5.json`），以下字段一致：
 
-| 项 | 官方 CLI（Node 22.23.4 / OpenSSL 3.5.9） | 网关当前（reqwest + rustls） |
+| 字段 | 对齐结果 |
+| --- | --- |
+| 密码套件 | 同顺序的 52 项，含 DHE、ARIA、CCM、CBC |
+| 扩展 | renegotiation_info、server_name、ec_point_formats、supported_groups、session_ticket、alpn、encrypt_then_mac、extended_master_secret、signature_algorithms、supported_versions、psk_kex_modes、key_share |
+| supported groups | X25519MLKEM768、X25519、P-256、X448、P-384、P-521、ffdhe2048、ffdhe3072 |
+| 签名算法 | 同顺序的 26 项，含 ML-DSA |
+| EC 点格式 | uncompressed、ansiX962_prime、ansiX962_char2 |
+| ALPN | http/1.1 |
+| TLS 版本 | 1.3、1.2 |
+
+随机数、密钥份额和会话票据不固定。账号内保留 TLS 会话复用；账号之间的 HTTP 连接池
+和会话缓存独立。本地 TLS 服务测试验证了同一账号第二次握手复用、另一账号不复用。
+HTTP/HTTPS CONNECT、SOCKS4/4a/5/5h 出口仍进行目标域名证书校验；禁止重定向和
+传输层自动重放。代理认证只发送给代理。整体请求截止时间覆盖响应体，压缩响应按
+undici 的 gzip/deflate/br 行为解码。
+
+## 请求头与机器身份
+
+原研究只搜索了 JavaScript 字符串，遗漏了 WASM 生成的头。运行官方 WASM 后确认：
+
+| 字段 | 推理请求 | 模型列表请求 |
 | --- | --- | --- |
-| JA4 | `t13d5212h1_b262b3658495_8e6e362c5eac` | `t13d1011h1_61a7ad8aa9b6_3fcd1a44f3e3` |
-| JA3 (md5) | `d67b094811e5145139d7cea5f014309f` | `2d01bb186df08a190a589d4438fa5765` |
-| ClientHello 长度 | 1612 字节（含 ML-KEM 混合密钥份额） | 262 字节 |
-| ALPN | `http/1.1` | `http/1.1` |
-| 版本 | TLS 1.3, 1.2 | TLS 1.3, 1.2 |
-| 密码套件 | 52 个（含 DHE、ARIA、CCM、CBC） | 10 个（含 `0x00ff` SCSV） |
-| 扩展（顺序） | renegotiation_info, server_name, ec_point_formats, supported_groups, session_ticket, alpn, encrypt_then_mac, extended_master_secret, signature_algorithms, supported_versions, psk_kex_modes, key_share | psk_kex_modes, key_share, ec_point_formats, supported_groups, supported_versions, signature_algorithms, server_name, status_request, session_ticket, extended_master_secret, alpn |
-| 曲线/组 | X25519MLKEM768 (`0x11ec`), X25519, P-256, X448, P-384, P-521, ffdhe2048, ffdhe3072 | X25519, P-256, P-384 |
-| 签名算法 | 26 个（含 ML-DSA `0x0904–0x0906`） | 9 个 |
-| EC 点格式 | uncompressed, ansiX962_prime, ansiX962_char2 | uncompressed |
+| `Cosy-ClientIp` | 不发送 | 官方 WASM 仍生成，值来自持久化 machine ID |
+| `Cosy-MachineCode` / `Cosy-MachineToken` / `Cosy-MachineType` | 官方 UMID 输出 | 官方 UMID 输出 |
+| `Cosy-MachineHostname` | 当前主机名，按官方规则规范化并限制长度 | 不附加 |
+| `Cosy-MachineId` | 账号持久化 machine ID | 账号持久化 machine ID |
+| `Cosy-Version` | 默认 1.1.83 | 默认 1.1.83 |
 
-官方 CLI 完整 JA3 字符串：
+UMID 不是可用随机字符串替代的字段。程序嵌入该版本官方平台组件，执行前检查
+SHA-256，再提取到 `<data-dir>/qoder-runtime/1.1.83-<platform>/`。支持 Linux/macOS
+x64、ARM64 和 Windows x64；Windows 同时携带官方 `sgsdk.dll`。不要求安装 Node，
+不在运行时下载组件，也不把伪造的机器码作为失败兜底。
+
+组件按真实机器生成身份，同一台主机上的账号可能拥有相同的机器特征。成功结果按
+账号/区域缓存，使用时才检查是否需更新；组件执行、输出大小和退出等待有上限。
+SDK 自己的设备身份初始化独立于网关 HTTP 栈，**其流量不受账号出口配置控制**。
+网关的登录轮询、凭证刷新、模型、额度和推理 HTTP 请求仍走账号绑定出口。
+
+## 签名与响应
+
+`qoder_auth.wasm` 直接提取自 npm `@qoder-ai/qodercli@1.1.83`：
 
 ```
-771,4866-4867-4865-49199-49195-49200-49196-158-49191-103-49192-107-163-159-52393-52392-52394-49325-49311-49245-49249-49239-49235-162-49324-49310-49244-49248-49238-49234-49188-106-49187-64-49162-49172-57-56-49161-49171-51-50-157-49309-49233-156-49308-49232-61-60-53-47,65281-0-11-10-35-16-22-23-13-43-45-51,4588-29-23-30-24-25-256-257,0-1-2
+SHA-256 c7a14b11d6c23b94ac39f6868ebd3dd6a70492efe87c864c33857adadb9f0951
 ```
 
-签名算法：`0905 0906 0904 0403 0503 0603 0807 0808 081a 081b 081c 0809 080a 080b 0804 0805 0806 0401 0501 0601 0303 0301 0302 0402 0502 0602`
+Rust 使用 wasmi 执行该模块，提供 wasm-bindgen 所需的字符串、Map、字节数组、时间和
+OS 安全随机数。WASM 没有文件、网络和进程接口，设置了内存、指令预算及输入大小上限。
 
-### 版本差异（未实测）
+1. `generate_runtime_auth_fields` 生成当前账号的加密认证字段。
+2. `QoderContext.prepareInferRequest` 返回推理 URL、请求体和签名头。
+3. `QoderContext.prepareRequest` 处理模型列表请求；不再强行套用旧版 Encode 查询参数。
+4. `decrypt_server_response` 在 JSON/SSE 归一化前解码响应，兼容明文 JSON 和 `[DONE]`。
 
-指纹随用户的 Node 版本变化（CLI 要求 Node ≥ 20）。X25519MLKEM768 组和 ML-DSA 签名算法来自 OpenSSL 3.5；使用 OpenSSL 3.0 的 Node 版本不会带这些字段，JA4 也会不同。真实用户群因此不是单一指纹，上表对应的是内置 OpenSSL 3.5 的 Node。
+签名上下文按账号缓存；Token、machine ID、版本、组织信息或数据策略变化时重建，删除
+账号时清理。WASM 生成的 URL 仍需通过官方 HTTPS 域名校验，不能由响应或导入数据指定
+任意凭证接收地址。
 
-### 对齐可行性
+## 来源、验证与回退
 
-- rustls 不支持 DHE、ARIA、CCM、FFDHE，也无法照搬 OpenSSL 的扩展顺序，无法通过配置得到上表指纹。
-- WorkBuddy 使用的 rquest（BoringSSL）可以定制密码套件、曲线、签名算法和扩展顺序，但 BoringSSL 同样不支持 DHE/ARIA/CCM/FFDHE，只能近似、无法完全一致。
-- 要完全一致，需要用 OpenSSL 3.5 本身（如 `openssl` crate 的 vendored 构建，配合 Node 的默认 cipher 列表与组）。代价是三个平台都要编译 OpenSSL（Windows 需额外工具链），需要单独评估。
+上游 npm integrity、各文件 SHA-256、Apache-2.0 许可证与 NOTICE 存于
+`crates/qoder-client/vendor/`。可重新验证提取，并用官方 JS glue 生成独立测试向量：
 
-## 请求头对照
+```bash
+python scripts/vendor-qoder-client.py --fixtures
+cd src-tauri
+cargo test -p qoder-client --lib --locked
+```
 
-| 头 | 官方 1.1.83 | 网关当前 |
-| --- | --- | --- |
-| `Cosy-ClientIp` | **不发送**（代码中不存在） | 发送（按账号派生的 169.254.x.y） |
-| `Cosy-MachineCode` | 发送 | 不发送 |
-| `Cosy-MachineHostname` | 真实 `os.hostname()`（规范化为可用作头的值），仅推理流式请求携带 | 按账号派生，仅 SSE 请求携带 |
-| `Cosy-Version` / `Cosy-ClientType` / `Cosy-MachineOS` / `Cosy-MachineToken` / `Cosy-MachineType` / `Cosy-MachineId` | 发送 | 发送（版本默认 `1.1.75`） |
+测试向量只使用假账号、固定时间和测试随机数；正式运行始终使用 OS 安全随机数。
+专项测试覆盖官方签名 URL/请求体/完整请求头、响应解码、WASM 资源释放、TLS 捕获、
+会话隔离、代理认证/远端 DNS、证书拒绝、压缩和流式截止时间。它们不运行原生 UMID
+程序，也不消耗真实账号额度。真实账号端到端调用以及 macOS/Windows 在线 SDK 行为
+仍需目标环境验证；不能将离线向量通过解释为服务端授权成功。
 
-## 签名流程变化
-
-1.1.83 的推理请求经过 **WASM 签名器**（`wasmInferSigningMeta` / `getWasmSigner`），响应经过解密器（`getResponseDecryptor`）。网关当前的 COSY 签名沿用 qoder2api-hub 记录的旧流程，版本号默认 `1.1.75`。服务端目前仍接受旧流程；若改为强制新签名，旧流程会失效，并且旧流程本身也是可区分的特征。
-
-## 结论
-
-1. TLS：网关与官方客户端的指纹差异显著（密码套件 10 对 52、扩展顺序不同、缺少 ML-KEM 组）。完全一致需要换用 OpenSSL 栈。
-2. 请求头：应停止发送 `Cosy-ClientIp`、补上 `Cosy-MachineCode`，并更新默认版本号。
-3. 签名：需要单独评估迁移到 1.1.83 的 WASM 签名流程。
+如需回退，设置 `ABV_QODER_LEGACY_PROTOCOL=true` 后重启。该开关明确选择原来的
+Rust COSY 签名、rustls 传输和账号派生标识，默认版本恢复为 1.1.75；不会调用 UMID。
+现代路径失败时不会自动降级或跨协议重放。`ABV_QODER_VERSION` 可显式覆盖客户端版本，
+但不会替换固定的 WASM/UMID 组件；升级这些组件必须同时更新 provenance 和测试向量。

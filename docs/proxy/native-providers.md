@@ -97,7 +97,8 @@ Provider settings have this shape:
 | --- | --- | --- |
 | `ABV_QODER_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
 | `ABV_QODER_MAX_CONCURRENCY` | `1` | Active requests per account, clamped to 1–8 |
-| `ABV_QODER_VERSION` | `1.1.75` | COSY/client protocol version |
+| `ABV_QODER_VERSION` | `1.1.83` | Qoder client version (defaults to `1.1.75` in legacy mode) |
+| `ABV_QODER_LEGACY_PROTOCOL` | `false` | Explicit rollback to the previous Rust COSY signer and rustls transport; restart after changing |
 
 Without egress, the normal gateway upstream-proxy setting applies to native account
 traffic. Credential-bearing requests validate HTTPS service hosts and do not follow
@@ -105,9 +106,12 @@ redirects.
 
 ## Account isolation and egress nodes
 
-- Every account has its own HTTP connection pool (no socket carries two accounts'
-  tokens), its own random machine/device ids, and a COSY client address and host
-  name derived from its device id, so no client value is shared by all accounts.
+- Every account has its own HTTP connection pool and TLS session cache (no socket
+  carries two accounts' tokens), and persisted machine/device ids. The default
+  1.1.83 protocol uses the official UMID machine code/token/type and the server's
+  normalized hostname. These describe the real host; separate accounts on the
+  same host are not presented as different physical machines. The older derived
+  address/hostname is used only with the explicit legacy protocol setting.
 - **Accounts → Qoder → Egress nodes** routes each account through one node of an
   airport subscription, like WorkBuddy (see `docs/WORKBUDDY_UPSTREAM.md`). The
   subscription link, node filters and auto-assign are shared with WorkBuddy, and
@@ -119,6 +123,10 @@ redirects.
   new account keeps it; reauthorization uses the account's bound node. A sign-in or
   import of a saved account through a different node is refused. A bound account
   whose node is unusable fails instead of falling back to the server's address.
+- The official native UMID component initializes its own device identity outside
+  this HTTP transport; its SDK traffic is not covered by the per-account proxy.
+  It is invoked lazily, uses a bounded process lifetime and caches successful
+  results, rather than introducing another background account heartbeat.
 - `DIRECT` sends that account from this server's own address. With egress off the
   upstream-proxy setting applies, as before.
 - Bindings are stored under `pools.qoder` in `workbuddy_egress.json` (the file keeps
@@ -170,6 +178,7 @@ Run focused checks on a development machine with the normal Rust/Tauri dependenc
 cd src-tauri
 cargo test --lib native_providers
 cargo test --lib proxy::upstream::native::tests
+cargo test -p qoder-client --lib --locked
 ```
 
 Frontend checks:
@@ -190,9 +199,23 @@ platform dependencies and CI.
 
 - [qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub): device token
   exchange, COSY public key/encoding, model catalog and quota wire layout (MIT).
+- `@qoder-ai/qodercli@1.1.83`: pinned Apache-2.0 WASM signer/decoder and native
+  UMID components. Provenance, npm integrity, per-file checksums and license are
+  in `src-tauri/crates/qoder-client/vendor/`. See
+  [client compatibility](../QODER_CLIENT_FINGERPRINT.md) for the transport profile,
+  offline evidence, runtime requirements and rollback setting.
 
 The integration uses independently implemented Rust state management and protocol
 adapters; it does not bundle or run the referenced gateway.
+
+The modern Qoder protocol embeds OpenSSL 3.5, the WASM module and the native
+identity helper for the build target. No Node installation or runtime downloads
+are needed. The first model/inference request extracts the verified helper under
+`<data-dir>/qoder-runtime/`; that directory must be writable and permit execution.
+The official helper supports Linux/macOS x64 and ARM64, and Windows x64. For a
+protocol regression or unsupported helper platform, set
+`ABV_QODER_LEGACY_PROTOCOL=true` and restart to select the previous COSY/rustls
+path. Modern failures do not automatically downgrade or replay the request.
 
 ## Rolling back the integration
 

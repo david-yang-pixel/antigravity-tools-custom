@@ -103,6 +103,7 @@ pub async fn delete_native_account(request: AccountRequest) -> Result<(), String
     native::store::remove(request.provider, &request.id)?;
     egress::forget(Pool::Native(request.provider), &request.id);
     native::http::forget(&request.id);
+    native::qoder::sign::forget(&request.id);
     Ok(())
 }
 
