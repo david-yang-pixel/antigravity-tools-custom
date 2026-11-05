@@ -506,6 +506,8 @@ mod tests {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
         let status = Arc::new(AtomicU16::new(403));
         let calls = Arc::new(AtomicUsize::new(0));
+        let unexpected = Arc::new(AtomicUsize::new(0));
+        let unhandled = unexpected.clone();
         let (s, c) = (status.clone(), calls.clone());
         let app = Router::new()
             .route(
@@ -523,7 +525,13 @@ mod tests {
                     }
                 }),
             )
-            .fallback(|| async { panic!("Check-in must not poll other endpoints") });
+            .fallback(move || {
+                let unhandled = unhandled.clone();
+                async move {
+                    unhandled.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         std::env::set_var(
             "STELLAR_TEST_WORKBUDDY_BASE",
@@ -585,6 +593,11 @@ mod tests {
                 assert!(run(&id, false, true, false).await.is_err());
             }
             assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+            assert_eq!(
+                unexpected.load(Ordering::SeqCst),
+                0,
+                "Check-in must not poll other endpoints"
+            );
             accounts::set_enabled(&id, false).unwrap();
             assert!(run(&id, false, true, false).await.is_err());
         }

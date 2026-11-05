@@ -664,6 +664,48 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn workbuddy_conversation_identity_is_stable_within_an_account_and_isolated_between_accounts(
+    ) {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "STELLAR_TEST_WORKBUDDY_BASE",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let app = Router::new().route(
+            "/v2/chat/completions",
+            post(|headers: HeaderMap| async move {
+                Json(
+                    json!({"conversation":headers["x-conversation-id"].to_str().unwrap(),
+                "message":headers["x-conversation-message-id"].to_str().unwrap(),
+                "request":headers["x-request-id"].to_str().unwrap()}),
+                )
+            }),
+        );
+        let _mock = Mock(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        async fn send(account: &Account) -> Value {
+            chat(account, "same-downstream-session",
+                json!({"messages":[{"role":"system","content":"Use supplied context."},{"role":"user","content":"test input"}]}),
+                "test-model", tokio::time::Instant::now() + Duration::from_secs(3))
+                .await.unwrap().json().await.unwrap()
+        }
+        let a =
+            super::super::accounts::parse_import(json!({"uid":"identity-a","accessToken":"test"}))
+                .unwrap();
+        let b =
+            super::super::accounts::parse_import(json!({"uid":"identity-b","accessToken":"test"}))
+                .unwrap();
+        let first = send(&a).await;
+        let repeated = send(&a).await;
+        let other = send(&b).await;
+        assert_eq!(first["conversation"], repeated["conversation"]);
+        assert_ne!(first["conversation"], other["conversation"]);
+        assert_eq!(first["message"], first["request"]);
+        assert_ne!(first["request"], repeated["request"]);
+    }
+    #[tokio::test]
     async fn workbuddy_request_deadline_bounds_refresh_wait_and_preserves_rotated_tokens() {
         use super::super::accounts;
         use tokio::{sync::Notify, time::Instant};
