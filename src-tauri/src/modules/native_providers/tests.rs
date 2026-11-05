@@ -18,6 +18,7 @@ impl Sandbox {
         let overrides = [
             "ABV_QODER_ENABLED",
             "ABV_QODER_MAX_CONCURRENCY",
+            "ABV_QODER_EGRESS_ENABLED",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -1248,6 +1249,49 @@ async fn duplicate_import_is_rejected_before_egress_and_preserves_saved_tokens()
     .unwrap();
     assert!(error.contains("already saved"), "{error}");
     assert_eq!(store::all(Provider::Qoder).unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() {
+    let _sandbox = Sandbox::new();
+    // If the duplicate guard regresses, client creation fails locally rather
+    // than letting this test contact a real Qoder endpoint.
+    let mut config = crate::models::AppConfig::default();
+    config.proxy.upstream_proxy.enabled = true;
+    config.proxy.upstream_proxy.url = "http://127.0.0.1:invalid".into();
+    crate::modules::config::save_app_config(&config).unwrap();
+    let route = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::modules::egress::login_route(
+            crate::modules::egress::Pool::Native(Provider::Qoder),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let a = account(Provider::Qoder, "concurrent-import");
+    let import = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":a.credentials.refresh_token}),
+    );
+    tokio::pin!(import);
+    // The vault is empty at the first guard; suspend at the held login lock.
+    assert!(futures::poll!(&mut import).is_pending());
+    let a = store::upsert(a, None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    drop(route);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), &mut import)
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+    assert!(error.contains("already saved"), "{error}");
     assert_eq!(
         serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
         before

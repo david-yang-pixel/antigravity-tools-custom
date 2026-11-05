@@ -339,6 +339,9 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
     // The account does not exist yet: validate it through the node a new account
     // would take, and keep that node for it.
     let route = egress::login_route(Pool::Native(provider), None).await?;
+    // Another import may have saved these credentials while we waited for the
+    // serialized login route. Recheck under that route's guard before using them.
+    reject_saved_credentials(&a, &store::all(provider)?)?;
     let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
     let refreshed = needs_refresh_before_import(&a, now());
     if refreshed {
