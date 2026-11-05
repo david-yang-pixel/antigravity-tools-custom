@@ -65,11 +65,15 @@ unconstrained; `tool_choice: none` is honored by sending no tools.
   held through upstream streaming and is released on cancellation.
 - Authentication failures, rate limits and transient failures cool the affected
   account. A request moves to another account only when nothing reached the
-  upstream (refresh or route failure), or once after a connection failure without
-  an HTTP response. An upstream answer — 401/403 after one refresh, 429, 5xx, or a
+  upstream (refresh, route or request-preparation failure), or once after a
+  connection failure without an HTTP response. Unsent attempts do not consume
+  that connection retry allowance; the five-account limit and shared deadline
+  still apply. An upstream answer — 401/403 after one refresh, 429, 5xx, or a
   stream error before output — is returned to the client and is not replayed on
   other accounts; a later request is scheduled away from the cooling account.
-  A partially delivered generation is never replayed.
+  A failure during the same-account authorization retry retains the original
+  rejection, even if that retry fails before sending. A partially delivered
+  generation is never replayed.
 - A known, recent zero balance excludes credit-consuming models from scheduling.
   Models that official metadata marks as free remain eligible, with the same
   concurrency, authorization and cooldown limits. Unknown or stale quota data

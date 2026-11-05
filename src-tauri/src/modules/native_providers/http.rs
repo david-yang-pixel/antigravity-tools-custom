@@ -39,6 +39,25 @@ impl From<&str> for Failure {
         Self::new(502, message)
     }
 }
+/// Inference preparation failures are safe to move to another account. Once the
+/// transport is invoked, delivery is uncertain and the connection retry cap applies.
+#[derive(Debug)]
+pub enum DispatchFailure {
+    Preparation(Failure),
+    Connection(Failure),
+}
+impl From<Failure> for DispatchFailure {
+    fn from(error: Failure) -> Self {
+        Self::Preparation(error)
+    }
+}
+impl From<DispatchFailure> for Failure {
+    fn from(error: DispatchFailure) -> Self {
+        match error {
+            DispatchFailure::Preparation(error) | DispatchFailure::Connection(error) => error,
+        }
+    }
+}
 /// Clients by owner (an account id, or `login`) with the route each was built for.
 /// Accounts never share a connection pool: one socket never carries two accounts'
 /// tokens, and a route change rebuilds only that account's client.

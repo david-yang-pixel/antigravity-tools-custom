@@ -4,7 +4,7 @@ pub mod releases;
 #[path = "qoder/sign.rs"]
 pub mod sign;
 use super::{
-    http::{self, Failure},
+    http::{self, DispatchFailure, Failure},
     *,
 };
 use reqwest::{header::HeaderMap, Method};
@@ -293,7 +293,7 @@ pub async fn chat(
     model: &str,
     payload: Value,
     timeout: std::time::Duration,
-) -> Result<reqwest::Response, Failure> {
+) -> Result<reqwest::Response, DispatchFailure> {
     let deadline = tokio::time::Instant::now() + timeout;
     let body = super::wire::qoder_request(a, model, payload)?;
     let signed = tokio::time::timeout_at(
@@ -304,7 +304,7 @@ pub async fn chat(
     .map_err(|_| Failure::new(504, "Qoder request preparation timed out"))??;
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
-        return Err(Failure::new(504, "Qoder request timed out before dispatch"));
+        return Err(Failure::new(504, "Qoder request timed out before dispatch").into());
     }
     client
         .post(http::official_url(Provider::Qoder, &signed.url)?)
@@ -313,7 +313,9 @@ pub async fn chat(
         .timeout(remaining)
         .send()
         .await
-        .map_err(|_| Failure::new(502, "Qoder inference connection failed"))
+        .map_err(|_| {
+            DispatchFailure::Connection(Failure::new(502, "Qoder inference connection failed"))
+        })
 }
 
 fn signed_headers(values: &BTreeMap<String, String>) -> Result<HeaderMap, Failure> {
