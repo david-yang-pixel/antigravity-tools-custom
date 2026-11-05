@@ -446,7 +446,7 @@ pub fn run() {
                     modules::scheduler::start_scheduler(None, proxy_state.clone());
                     modules::workbuddy::maintenance::start();
                     modules::native_providers::accounts::start();
-                    modules::workbuddy::egress::start();
+                    modules::egress::start();
                     info!("Smart scheduler (7-Day Weekly Reset Warmup) started in headless mode.");
                 }
                 Err(e) => {
@@ -610,7 +610,7 @@ pub fn run() {
             modules::scheduler::start_scheduler(Some(app.handle().clone()), scheduler_state.inner().clone());
             modules::workbuddy::maintenance::start();
             modules::native_providers::accounts::start();
-            modules::workbuddy::egress::start();
+            modules::egress::start();
             info!("Smart scheduler (7-Day Weekly Reset Warmup) initialized.");
 
             // [PHASE 1] 已整合至 Axum 端口 (8045)，不再单独启动 19527 端口

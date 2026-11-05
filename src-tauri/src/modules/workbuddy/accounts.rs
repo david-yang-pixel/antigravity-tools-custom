@@ -266,7 +266,7 @@ fn write(accounts: &[Account]) -> Result<(), String> {
     crate::utils::fs::write_atomic(&path()?, &data)
         .map_err(|_| "Cannot save WorkBuddy accounts".into())
 }
-pub(super) fn all() -> Result<Vec<Account>, String> {
+pub(crate) fn all() -> Result<Vec<Account>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "WorkBuddy account store unavailable")?;
