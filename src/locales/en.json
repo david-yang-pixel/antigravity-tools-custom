@@ -1,5 +1,21 @@
 {
   "nativeProviders": {
+    "clientVersion": {
+      "title": "Qoder CLI version",
+      "bundled": "Bundled {{version}}",
+      "latest": "Official latest {{version}}",
+      "checking": "Checking",
+      "failed": "Check failed",
+      "available": "Official update available",
+      "current": "No newer release found",
+      "unknown": "Not checked yet",
+      "check": "Check official version",
+      "hint": "Checks the official npm release. Compatibility updates are verified and delivered with this application.",
+      "checkedAt": "Last successful check: {{time}}",
+      "failureHint": "Could not query the official version. Try again later or check the network and upstream proxy settings.",
+      "legacy": "Legacy protocol ({{version}}) is active; release checks still compare against the bundled components.",
+      "override": "The advertised version is overridden to {{version}}; release checks compare against the actual bundled components."
+    },
     "title": "{{provider}} accounts",
     "description": "Authorize accounts, view official balances, and use automatic renewal and account rotation.",
     "import": "Import credentials",

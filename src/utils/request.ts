@@ -163,6 +163,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'update_native_account': { url: '/api/native-accounts/update', method: 'POST' },
   'delete_native_account': { url: '/api/native-accounts/delete', method: 'POST' },
   'get_native_provider_settings': { url: '/api/native-providers/settings', method: 'POST' },
+  'check_native_client_version': { url: '/api/native-providers/client-version', method: 'POST' },
   'save_native_provider_settings': { url: '/api/native-providers/settings/save', method: 'POST' },
   'start_native_login': { url: '/api/native-login/start', method: 'POST' },
   'poll_native_login': { url: '/api/native-login/poll', method: 'POST' },

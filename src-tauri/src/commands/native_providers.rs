@@ -10,6 +10,20 @@ pub struct ProviderRequest {
     pub provider: Provider,
 }
 #[derive(Deserialize)]
+pub struct ClientVersionRequest {
+    pub provider: Provider,
+    #[serde(default)]
+    pub refresh: bool,
+}
+#[tauri::command]
+pub async fn check_native_client_version(
+    request: ClientVersionRequest,
+) -> Result<native::qoder::releases::ClientVersionView, String> {
+    match request.provider {
+        Provider::Qoder => Ok(native::qoder::releases::check(request.refresh).await),
+    }
+}
+#[derive(Deserialize)]
 pub struct SettingsRequest {
     pub provider: Provider,
     pub enabled: bool,

@@ -7,6 +7,7 @@ import { isTauri } from '../../utils/env';
 import ModalDialog from '../common/ModalDialog';
 import { showToast } from '../common/ToastContainer';
 import WorkBuddyEgressPanel, { WorkBuddyEgressCell, egressArgs, nativeEgress, type EgressView } from './WorkBuddyEgress';
+import QoderClientVersion from './QoderClientVersion';
 import { nativeAccountStatus, nativeBalance, type NativeAccount, type NativeLogin, type NativeLoginPoll, type NativeProvider, type NativeRealm, type NativeSettings } from '../../types/nativeProviders';
 
 const input = 'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800';
@@ -120,6 +121,7 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
                     <button className={`${button} !border-blue-600 !bg-blue-600 text-white`} disabled={busy || !!login} onClick={() => { setMode('login'); setTarget(null); setError(''); }}><Plus size={16} />{t('nativeProviders.add')}</button>
                 </div>
             </div>
+            {provider === 'qoder' && <QoderClientVersion />}
             <WorkBuddyEgressPanel view={egress} onChange={setEgress} api={egressApi} description={t('nativeProviders.egressDescription', { provider: label })} />
             {error && <div role="alert" className="flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"><span className="break-all">{error}</span><button aria-label={t('nativeProviders.dismiss')} onClick={() => setError('')}><X size={16} /></button></div>}
             {settings && !settings.enabled && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">{t('nativeProviders.sourceDisabled')} <Link className="underline" to="/api-proxy?section=sources">{t('nativeProviders.sourceSettingsLink')}</Link></p>}

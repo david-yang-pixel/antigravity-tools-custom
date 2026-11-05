@@ -77,6 +77,31 @@ OS 安全随机数。WASM 没有文件、网络和进程接口，设置了内存
 
 ## 来源、验证与回退
 
+### 官方新版本检测
+
+Qoder 账号页显示网关内置版本、官方 npm `latest` 版本和上次成功检测时间。
+打开页面时自动查询，支持手动「检测官方新版本」。比较使用 SemVer，基准始终是
+实际内置的 `CLI_VERSION`；`ABV_QODER_VERSION` 覆盖和旧协议模式单独显示，不会
+让页面把版本号覆盖误认为组件已经升级。
+
+检测只访问 `https://registry.npmjs.org/-/package/@qoder-ai%2fqodercli/dist-tags`，
+使用网关通用上游代理，不使用账号出口或凭据、不调用 UMID。请求禁止重定向，并限制
+等待时间和响应大小。成功结果在进程内缓存 24 小时，失败后自动查询间隔 5 分钟；
+手动刷新可跳过该缓存，但同一网关每分钟至多请求一次。并发检测合并。
+页面关闭后不启动定时轮询。失败保留上次版本与成功时间，并明确显示失败状态。
+
+桌面命令 `check_native_client_version` 与管理员接口
+`POST /api/native-providers/client-version` 共用实现，接口正文为
+`{"provider":"qoder","refresh":false}`，手动刷新使用 `true`。结果包含
+`bundled_version`、`advertised_version`、`legacy_protocol`、`latest_version`、
+`update_available`、`checked_at`、`last_attempt_at` 和 `error`；时间为 Unix 秒，
+未成功查询的版本/时间/更新结论为 `null`。网络失败通过 `error` 表示，不误报为没有新版。
+
+这是发版提示，不代表新版已适配。检测不下载组件、不修改版本配置；更新 WASM、UMID
+或 TLS 配置仍需经过验证后随网关发布。
+
+### 资源验证与回退
+
 上游 npm integrity、各文件 SHA-256、Apache-2.0 许可证与 NOTICE 存于
 `crates/qoder-client/vendor/`。可重新验证提取，并用官方 JS glue 生成独立测试向量：
 

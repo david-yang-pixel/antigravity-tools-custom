@@ -1,4 +1,6 @@
 //! First-party Qoder device authorization, quota API and COSY model/inference service.
+#[path = "qoder/releases.rs"]
+pub mod releases;
 #[path = "qoder/sign.rs"]
 pub mod sign;
 use super::{

@@ -48,7 +48,7 @@ static CLIENTS: LazyLock<Mutex<HashMap<String, (String, qoder_client::transport:
 /// The proxy behind `exit`. With egress off this is the gateway's own upstream proxy
 /// setting (the path native providers used before egress existed); `DIRECT` is this
 /// server's own address; a node is its loopback SOCKS route.
-fn proxy_url(exit: &Exit) -> String {
+pub(super) fn proxy_url(exit: &Exit) -> String {
     match exit {
         Exit::Off => crate::modules::config::load_app_config()
             .ok()

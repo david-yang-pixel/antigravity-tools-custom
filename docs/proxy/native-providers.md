@@ -104,6 +104,15 @@ Without egress, the normal gateway upstream-proxy setting applies to native acco
 traffic. Credential-bearing requests validate HTTPS service hosts and do not follow
 redirects.
 
+The Qoder account page checks the official npm `latest` release when opened and
+offers a manual refresh. It shows the bundled version and last successful check;
+version overrides and legacy mode are displayed separately. Checks use the general
+upstream proxy without account credentials, cache successful results for 24 hours,
+and retain the last successful result if npm is unavailable. Manual requests are
+limited to one per minute per gateway. No component is installed automatically.
+Headless administrators can use `POST /api/native-providers/client-version` with
+`{"provider":"qoder","refresh":false}` (or `true` for manual refresh).
+
 ## Account isolation and egress nodes
 
 - Every account has its own HTTP connection pool and TLS session cache (no socket

@@ -1086,6 +1086,10 @@ impl AxumServer {
                 "/native-providers/settings/save",
                 post(admin_save_native_provider_settings),
             )
+            .route(
+                "/native-providers/client-version",
+                post(admin_check_native_client_version),
+            )
             .route("/native-login/start", post(admin_start_native_login))
             .route("/native-login/poll", post(admin_poll_native_login))
             .route("/native-login/cancel", post(admin_cancel_native_login))
@@ -2892,6 +2896,14 @@ async fn admin_get_native_provider_settings(
     Json(payload): Json<crate::commands::native_providers::ProviderRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::native_providers::get_native_provider_settings(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_check_native_client_version(
+    Json(payload): Json<crate::commands::native_providers::ClientVersionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::check_native_client_version(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)
