@@ -53,6 +53,8 @@ impl AccountSchedulingPolicy {
         }
     }
 
+    /// The half-open probe holds the model's only admission slot, so it must not wait
+    /// for a busy or cooling session account while other accounts are free.
     pub fn for_probe(&self) -> Self {
         let mut policy = self.clone();
         if policy.sticky.mode == SchedulingMode::CacheFirst {
