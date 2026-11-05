@@ -115,33 +115,56 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
     })?)
 }
 pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountView, String> {
+    sync_metadata(provider, id, force, true).await
+}
+async fn fetch_metadata(
+    client: &qoder_client::transport::Client,
+    a: &Account,
+    catalog: bool,
+) -> (Option<Result<Vec<Model>, Failure>>, Result<Quota, Failure>) {
+    match a.provider {
+        Provider::Qoder => tokio::join!(
+            async {
+                if catalog {
+                    Some(qoder::models(client, a).await)
+                } else {
+                    None
+                }
+            },
+            qoder::quota(client, a)
+        ),
+    }
+}
+async fn sync_metadata(
+    provider: Provider,
+    id: &str,
+    force: bool,
+    catalog: bool,
+) -> Result<AccountView, String> {
     let lock = refresh_lock(&format!("metadata:{id}"))?;
     let _guard = lock.lock().await;
     let mut a = fresh(provider, id, force)
         .await
         .map_err(|e| e.to_string())?;
     let client = http::client_for(&a).await.map_err(|e| e.to_string())?;
-    let (mut models, mut quota) = match provider {
-        Provider::Qoder => tokio::join!(qoder::models(&client, &a), qoder::quota(&client, &a)),
-    };
-    if models.as_ref().err().is_some_and(|e| e.status == 401)
+    let (mut models, mut quota) = fetch_metadata(&client, &a, catalog).await;
+    if models
+        .as_ref()
+        .is_some_and(|r| r.as_ref().is_err_and(|e| e.status == 401))
         || quota.as_ref().err().is_some_and(|e| e.status == 401)
     {
         a = fresh(provider, id, true).await.map_err(|e| e.to_string())?;
-        (models, quota) = match provider {
-            Provider::Qoder => {
-                tokio::join!(qoder::models(&client, &a), qoder::quota(&client, &a))
-            }
-        };
+        (models, quota) = fetch_metadata(&client, &a, catalog).await;
     }
     let updated = store::update(provider, id, Some(&a.revision), |stored| {
         match models {
-            Ok(models) => {
+            Some(Ok(models)) => {
                 stored.models = models;
                 stored.models_error = None;
                 stored.models_updated_at = now();
             }
-            Err(error) => stored.models_error = Some(error.to_string()),
+            Some(Err(error)) => stored.models_error = Some(error.to_string()),
+            None => {}
         }
         match quota {
             Ok(quota) => {
@@ -285,26 +308,40 @@ fn recently_active(id: &str, at: i64) -> bool {
     let last = runtime(id).last_generation_at;
     last > 0 && at.saturating_sub(last) < QUIET_AFTER_SECS
 }
-/// Background catalog and quota polls are paused until the account is used again.
+/// An idle account with a last-known zero balance still needs to discover resets
+/// and top-ups. Do not use `Quota::exhausted`: its 15-minute admission TTL must not
+/// disable recovery checks as the snapshot ages (including after a restart).
+fn needs_quota_recovery(a: &Account) -> bool {
+    a.quota
+        .as_ref()
+        .is_some_and(|q| !q.unlimited && q.remaining.is_some_and(|n| n <= 0.0))
+}
+/// Healthy idle accounts pause polls; zero-balance accounts keep quota recovery.
 pub fn sync_paused(a: &Account, at: i64) -> bool {
-    a.models_updated_at > 0 && !recently_active(&a.id, at)
+    a.models_updated_at > 0 && !recently_active(&a.id, at) && !needs_quota_recovery(a)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Work {
     /// Renew if needed, then refresh the catalog and quota.
     Sync,
+    /// Recover an idle account's balance without polling its catalog or running UMID.
+    Quota,
     /// Only renew a token that is about to expire.
     Renew,
 }
 /// What background maintenance should do for an account now. A catalog that was never
 /// fetched is always due (an account without models cannot be scheduled, so it would
-/// never become active); otherwise polls only follow recent use.
+/// never become active). Idle zero-balance accounts retain quota-only recovery at
+/// the same bounded, jittered interval; other polls only follow recent use.
 pub(super) fn work(a: &Account, at: i64) -> Option<Work> {
     if !a.enabled || !a.auto_refresh || a.next_sync_at > at {
         return None;
     }
     if a.models_updated_at == 0 || recently_active(&a.id, at) {
         return Some(Work::Sync);
+    }
+    if needs_quota_recovery(a) {
+        return Some(Work::Quota);
     }
     let refreshable =
         !a.credentials.refresh_token.is_empty() || !a.credentials.personal_token.is_empty();
@@ -347,6 +384,14 @@ pub fn start() {
                     let ok = match work(&a, at) {
                         Some(Work::Sync) => matches!(
                             tokio::time::timeout(limit, sync(provider, &a.id, false)).await,
+                            Ok(Ok(_))
+                        ),
+                        Some(Work::Quota) => matches!(
+                            tokio::time::timeout(
+                                limit,
+                                sync_metadata(provider, &a.id, false, false)
+                            )
+                            .await,
                             Ok(Ok(_))
                         ),
                         Some(Work::Renew) => matches!(

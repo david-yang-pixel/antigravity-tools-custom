@@ -243,7 +243,7 @@ impl From<&Account> for AccountView {
             models_error: a.models_error.clone(),
             auth_error: a.auth_error.clone(),
             last_sync_at: a.last_sync_at,
-            // 0 while idle: background polls resume after the next real use.
+            // Healthy idle accounts pause polls; zero-balance recovery stays scheduled.
             next_sync_at: if accounts::sync_paused(a, now()) {
                 0
             } else {

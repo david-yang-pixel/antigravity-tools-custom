@@ -49,10 +49,14 @@ unconstrained; `tool_choice: none` is honored by sending no tools.
 - Background maintenance checks due accounts every minute. Model and quota polls
   follow real use: they run about every 15–18 minutes (a stable per-account offset)
   while the account completed a generation in the last six hours, and stop when it
-  is idle. Idle accounts are only renewed when their token is within five minutes
-  of expiry. A catalog that was never fetched is always due, and manual sync is
-  unaffected. Activity is tracked in memory, so after a restart polls resume with
-  the first request.
+  is idle. An idle account whose last known balance is zero keeps a quota-only
+  recovery check at the same 15–18 minute interval, including after a restart.
+  This check does not fetch models or initialize UMID, and stops once credits
+  return. The 15-minute quota admission TTL is unchanged. Other idle accounts are
+  only renewed when their token is within five minutes of expiry. A catalog that
+  was never fetched is always due, and manual sync is unaffected. Activity is
+  tracked in memory, so after a restart normal catalog polls resume with the first
+  request. Disabling the source, account or automatic refresh also stops recovery.
 - A token within five minutes of expiry is refreshed before use.
 - Refresh exchanges are serialized per account. Rotating tokens are persisted
   before metadata requests. An HTTP cancellation does not cancel an owned refresh

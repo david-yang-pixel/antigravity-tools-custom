@@ -1172,3 +1172,48 @@ fn idle_accounts_only_renew_near_expiry_and_new_catalogs_are_always_fetched() {
     assert_eq!(accounts::work(&a, at), None);
     assert!((900..1080).contains(&accounts::sync_interval(&a.id)));
 }
+
+#[test]
+fn idle_zero_balance_accounts_keep_recovery_until_credits_return() {
+    let at = now();
+    let mut a = account(Provider::Qoder, "idle-quota-recovery");
+    a.models_updated_at = at - 86400;
+    a.next_sync_at = at - 1;
+    a.quota = Some(
+        qoder::parse_quota(&json!({"userQuota":{"total":100,"remaining":0,"used":100}})).unwrap(),
+    );
+    // No in-memory activity, as after a restart. Recovery also survives expiry
+    // of the quota's admission TTL; it never becomes a catalog poll.
+    for age in [0, 901, 86400] {
+        a.quota.as_mut().unwrap().updated_at = at - age;
+        assert_eq!(accounts::work(&a, at), Some(accounts::Work::Quota));
+        assert!(!accounts::sync_paused(&a, at));
+        assert_eq!(AccountView::from(&a).next_sync_at, a.next_sync_at);
+    }
+    assert!(!a.quota.as_ref().unwrap().exhausted());
+    // Existing due time and operator switches still bound recovery work.
+    a.next_sync_at = at + accounts::sync_interval(&a.id);
+    assert_eq!(accounts::work(&a, at), None);
+    assert_eq!(
+        accounts::work(&a, a.next_sync_at),
+        Some(accounts::Work::Quota)
+    );
+    a.next_sync_at = at - 1;
+    a.enabled = false;
+    assert_eq!(accounts::work(&a, at), None);
+    a.enabled = true;
+    a.auto_refresh = false;
+    assert_eq!(accounts::work(&a, at), None);
+    a.auto_refresh = true;
+    // A successful recovery stops the idle heartbeat again. Unknown and
+    // unlimited balances also do not start a zero-balance recovery loop.
+    for remaining in [Some(20.0), None] {
+        a.quota.as_mut().unwrap().remaining = remaining;
+        assert_eq!(accounts::work(&a, at), None);
+        assert!(accounts::sync_paused(&a, at));
+    }
+    a.quota.as_mut().unwrap().remaining = Some(0.0);
+    a.quota.as_mut().unwrap().unlimited = true;
+    assert_eq!(accounts::work(&a, at), None);
+    assert!(accounts::sync_paused(&a, at));
+}
