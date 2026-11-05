@@ -92,10 +92,6 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
     const change = (account: NativeAccount, patch: { enabled?: boolean; auto_refresh?: boolean; refresh?: boolean }) => run(async () => {
         await request('update_native_account', { request: { provider, id: account.id, ...patch } });
     });
-    const saveSettings = (patch: Partial<NativeSettings>) => run(async () => {
-        if (!settings) return;
-        await request('save_native_provider_settings', { request: { provider, enabled: settings.enabled, preferred_account_id: settings.preferred_account_id, ...patch } });
-    });
     const begin = () => run(async () => {
         const result = await request<NativeLogin>('start_native_login', { request: { provider, realm: target?.realm || realm, account_id: target?.id || null } });
         if (alive.current) { sessionRef.current = result; setLogin(result); }
@@ -112,24 +108,13 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <div><h1 className="text-xl font-semibold">{t('nativeProviders.title', { provider: label })}</h1><p className="mt-2 max-w-3xl text-sm text-gray-500">{t('nativeProviders.description')}</p></div>
                 <div className="flex gap-2">
+                    <button className={button} disabled={busy || loading} aria-label={t('nativeProviders.reload')} title={t('nativeProviders.reload')} onClick={() => void run(load)}><RefreshCw size={16} /></button>
                     <button className={button} disabled={busy || !!login} onClick={() => { setMode('import'); setTarget(null); setError(''); }}><Upload size={16} />{t('nativeProviders.import')}</button>
                     <button className={`${button} !border-blue-600 !bg-blue-600 text-white`} disabled={busy || !!login} onClick={() => { setMode('login'); setTarget(null); setError(''); }}><Plus size={16} />{t('nativeProviders.add')}</button>
                 </div>
             </div>
             {error && <div role="alert" className="flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"><span className="break-all">{error}</span><button aria-label={t('nativeProviders.dismiss')} onClick={() => setError('')}><X size={16} /></button></div>}
-            {settings && <div className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-xl border border-gray-200 p-4 text-sm dark:border-gray-700">
-                <label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" disabled={busy || settings.env_locked} checked={settings.enabled} onChange={e => void saveSettings({ enabled: e.target.checked })} />{t('nativeProviders.enableSource')}</label>
-                <label className="flex flex-wrap items-center gap-2">{t('nativeProviders.preferred')}
-                    <select className={`${input} !w-auto`} value={settings.preferred_account_id || ''} disabled={busy || settings.env_locked} onChange={e => void saveSettings({ preferred_account_id: e.target.value || null })}>
-                        <option value="">{t('nativeProviders.automatic')}</option>
-                        {settings.preferred_account_id && !accounts.some(a => a.id === settings.preferred_account_id) && <option value={settings.preferred_account_id} disabled>{t('nativeProviders.removedAccount')}</option>}
-                        {accounts.map(a => <option key={a.id} value={a.id} disabled={!a.enabled}>{a.nickname || a.uid} · {t(`nativeProviders.${a.realm}`)}</option>)}
-                    </select>
-                </label>
-                {settings.env_locked && <span className="text-gray-500">{t('nativeProviders.envLocked')}</span>}
-                <button className={`${button} ml-auto`} disabled={busy || loading} onClick={() => void run(load)}><RefreshCw size={15} />{t('nativeProviders.reload')}</button>
-            </div>}
-            {settings && <p className="text-xs leading-relaxed text-gray-500">{t('nativeProviders.schedulingHint')} <Link className="text-blue-600 underline" to="/api-proxy">{t('nativeProviders.schedulingLink')}</Link></p>}
+            {settings && !settings.enabled && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">{t('nativeProviders.sourceDisabled')} <Link className="underline" to="/api-proxy?section=sources">{t('nativeProviders.sourceSettingsLink')}</Link></p>}
             {mode && <div className="space-y-4 rounded-xl border border-blue-200 p-4 dark:border-blue-900">
                 <div className="flex items-center justify-between"><h2 className="font-medium">{mode === 'import' ? t('nativeProviders.import') : target ? t('nativeProviders.reauthorize') : t('nativeProviders.add')}</h2><button className={button} disabled={busy} onClick={() => void close()}>{t('nativeProviders.cancel')}</button></div>
                 {!login && <div className="flex flex-wrap items-center gap-4">

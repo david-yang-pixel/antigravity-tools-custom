@@ -5,13 +5,8 @@
     "import": "Import credentials",
     "add": "Add account",
     "dismiss": "Dismiss",
-    "enableSource": "Enable source",
-    "preferred": "Fixed account",
-    "automatic": "Automatic (use global scheduling)",
-    "schedulingHint": "Automatic selection follows the global Cache First, Balance or Performance mode, wait limits and circuit breaker in API Proxy. A fixed account applies only to this source and prevents switching to another account.",
-    "schedulingLink": "View global scheduling settings",
-    "removedAccount": "Previous account removed",
-    "envLocked": "Managed by environment variables",
+    "sourceDisabled": "This source is disabled; its accounts are not used for API requests.",
+    "sourceSettingsLink": "Open API Proxy → Models → Source configuration",
     "reload": "Reload",
     "cancel": "Cancel",
     "region": "Account region",
@@ -2349,13 +2344,6 @@
       "item_failed": "Failed",
       "item_unknown": "Result unconfirmed",
       "item_skipped": "Skipped"
-    },
-    "scheduling": {
-      "fixed_account": "WorkBuddy fixed account",
-      "refresh_accounts": "Refresh WorkBuddy accounts",
-      "automatic": "Automatic (use the scheduling mode above)",
-      "unavailable": "Selected account was removed; select another",
-      "hint": "Pinning restricts WorkBuddy requests to this account without affecting Antigravity. Cache First waits up to the configured limit; Balance switches away from cooling accounts on subsequent requests."
     },
     "egress": {
       "title": "Egress nodes (airport subscription)",

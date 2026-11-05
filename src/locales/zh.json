@@ -5,13 +5,8 @@
     "import": "导入凭证",
     "add": "添加账号",
     "dismiss": "关闭提示",
-    "enableSource": "启用此来源",
-    "preferred": "固定账号",
-    "automatic": "自动调度（遵循全局模式）",
-    "schedulingHint": "自动调度遵循 API 反代中的缓存优先、平衡轮换或性能优先模式，以及全局等待和熔断设置。固定账号只作用于当前来源，选定后不使用其他账号。",
-    "schedulingLink": "查看全局调度设置",
-    "removedAccount": "原账号已移除",
-    "envLocked": "由环境变量管理",
+    "sourceDisabled": "此来源已停用，账号不会参与 API 调度。",
+    "sourceSettingsLink": "前往 API 反代 → 模型配置 → 来源配置",
     "reload": "刷新列表",
     "cancel": "取消",
     "region": "账号地区",
@@ -2315,13 +2310,6 @@
       "item_failed": "失败",
       "item_unknown": "结果未确认",
       "item_skipped": "已跳过"
-    },
-    "scheduling": {
-      "fixed_account": "WorkBuddy 固定账号",
-      "refresh_accounts": "刷新 WorkBuddy 账号列表",
-      "automatic": "自动调度（遵循上方调度模式）",
-      "unavailable": "已选账号已删除，请重新选择",
-      "hint": "选择账号后，WorkBuddy 请求仅使用该账号；不会影响 Antigravity 账号。缓存优先按上方时长等待，超时返回不可用；平衡模式在后续请求中切换冷却账号。"
     },
     "egress": {
       "title": "出口节点（机场订阅）",

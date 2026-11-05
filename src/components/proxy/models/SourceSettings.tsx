@@ -4,6 +4,7 @@ import { Loader2, RefreshCw, Save } from 'lucide-react';
 import { request } from '../../../utils/request';
 import { registryError } from './registryLogic';
 import CustomUpstreamSettings from './CustomUpstreamSettings';
+import NativeSourceSettings from './NativeSourceSettings';
 
 interface Settings {
     enabled: boolean;
@@ -94,6 +95,7 @@ export default function SourceSettings() {
             </>}
             {!settings && busy && <p className="registry-muted" role="status">正在读取来源配置 / Loading source…</p>}
         </div>
+        <NativeSourceSettings provider="qoder" />
         <CustomUpstreamSettings />
         {dirty && <p role="status" className="registry-muted">来源配置草稿尚未保存。 / Unsaved source settings.</p>}
         {feedback && <p role={feedback.error ? 'alert' : 'status'} className={`registry-notice ${feedback.error ? 'registry-notice-error' : ''}`}>{feedback.message}</p>}
