@@ -8,10 +8,7 @@ use super::{
 use crate::modules::native_providers::{
     self as native, accounts, http::Failure, Account, Provider,
 };
-use crate::proxy::{
-    session_manager::SessionManager,
-    sticky_config::{AccountSchedulingPolicy, SchedulingMode},
-};
+use crate::proxy::{session_manager::SessionManager, sticky_config::AccountSchedulingPolicy};
 use axum::{
     body::to_bytes,
     extract::{Request, State},
@@ -249,6 +246,27 @@ async fn until_output(events: &mut NativeEvents) -> Result<Vec<String>, Failure>
     }
     Err(Failure::new(502, "Provider returned an empty completion"))
 }
+/// How far a failed attempt got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reached {
+    /// Nothing was sent: the account's refresh or route failed first.
+    Nothing,
+    /// The request was sent but no HTTP response arrived.
+    Connection,
+    /// The upstream answered (an HTTP error, or a stream error before output).
+    Upstream,
+}
+/// Extra accounts tried after connection failures. An upstream answer, including 401,
+/// 403, 429 and a stream error, stays on the account that received it: replaying the
+/// same request elsewhere spreads one rejection across the pool.
+const MAX_CONNECTION_FAILOVERS: usize = 1;
+fn may_fail_over(reached: Reached, connection_failovers: usize) -> bool {
+    match reached {
+        Reached::Nothing => true,
+        Reached::Connection => connection_failovers < MAX_CONNECTION_FAILOVERS,
+        Reached::Upstream => false,
+    }
+}
 async fn open(
     provider: Provider,
     model: &str,
@@ -262,6 +280,7 @@ async fn open(
     let mut last = None;
     let mut failover_policy = policy.clone();
     failover_policy.sticky.max_wait_seconds = 0;
+    let mut connection_failovers = 0;
     for _ in 0..5 {
         let admission = if excluded.is_empty() {
             policy
@@ -314,7 +333,11 @@ async fn open(
                     }
                     response = send(&lease.account, model, payload.clone(), remaining).await;
                 }
-                Ok(Err(error)) => response = Err(error),
+                Ok(Err(error)) => {
+                    // The upstream already answered 401/403 for this account.
+                    lease.failure(error.status);
+                    return Err(error);
+                }
                 Err(_) => {
                     return Err(Failure::new(
                         504,
@@ -332,38 +355,41 @@ async fn open(
         let response = match response {
             Ok(r) if r.status().is_success() => r,
             result => {
-                let error = match result {
-                    Ok(r) => Failure::new(
-                        r.status().as_u16(),
-                        format!("{} returned HTTP {}", provider.name(), r.status().as_u16()),
+                let (error, reached) = match result {
+                    Ok(r) => (
+                        Failure::new(
+                            r.status().as_u16(),
+                            format!("{} returned HTTP {}", provider.name(), r.status().as_u16()),
+                        ),
+                        Reached::Upstream,
                     ),
-                    Err(e) => e,
+                    Err(e) => (e, Reached::Connection),
                 };
                 if matches!(error.status, 400 | 413 | 422) {
                     return Err(error);
                 }
                 lease.failure_after(error.status, retry_after);
-                // Cache First keeps a rate-limited conversation on its account;
-                // its next request observes the same global bounded wait policy.
-                if error.status == 429 && policy.sticky.mode == SchedulingMode::CacheFirst {
+                if !may_fail_over(reached, connection_failovers) {
                     return Err(error);
                 }
+                connection_failovers += 1;
+                tracing::warn!(
+                    "{} account connection failed before a response; trying another account",
+                    provider.name()
+                );
                 last = Some(error);
                 continue;
             }
         };
         let mut events = normalize(provider, response);
         // Nothing reaches the client until generation starts, so a failure before then
-        // still fails over (subject to the Cache First 429 exception).
+        // is still returned as a typed error instead of a broken stream.
         let prelude = match until_output(&mut events).await {
             Ok(prelude) => prelude,
             Err(e) => {
+                // The upstream answered; another account would receive the same request.
                 lease.failure(e.status);
-                if e.status == 429 && policy.sticky.mode == SchedulingMode::CacheFirst {
-                    return Err(e);
-                }
-                last = Some(e);
-                continue;
+                return Err(e);
             }
         };
         let account = lease.account.clone();
@@ -578,8 +604,18 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn only_unsent_and_connection_failures_move_to_another_account() {
+        assert!(may_fail_over(Reached::Nothing, 3));
+        assert!(may_fail_over(Reached::Connection, 0));
+        assert!(!may_fail_over(
+            Reached::Connection,
+            MAX_CONNECTION_FAILOVERS
+        ));
+        assert!(!may_fail_over(Reached::Upstream, 0));
+    }
     #[tokio::test]
-    async fn failures_before_generation_output_remain_retryable() {
+    async fn failures_before_generation_output_are_typed_errors() {
         // A role-only chunk, then an upstream error: nothing has been generated yet.
         let mut events = normalize(
             Provider::Qoder,

@@ -46,19 +46,26 @@ unconstrained; `tool_choice: none` is honored by sending no tools.
   also apply to native accounts. Retry-After is a lower bound on backoff. Disabling
   the breaker clears local cooldowns but retains concurrency, model admission and
   account/quota checks. Antigravity-specific 5h/weekly rules are not native credits.
-- Background maintenance checks due accounts every minute. Successful metadata
-  synchronization schedules the next check five minutes later. A token within
-  five minutes of expiry is refreshed before use.
+- Background maintenance checks due accounts every minute. Model and quota polls
+  follow real use: they run about every 15–18 minutes (a stable per-account offset)
+  while the account completed a generation in the last six hours, and stop when it
+  is idle. Idle accounts are only renewed when their token is within five minutes
+  of expiry. A catalog that was never fetched is always due, and manual sync is
+  unaffected. Activity is tracked in memory, so after a restart polls resume with
+  the first request.
+- A token within five minutes of expiry is refreshed before use.
 - Refresh exchanges are serialized per account. Rotating tokens are persisted
   before metadata requests. An HTTP cancellation does not cancel an owned refresh
   task before persistence; a new authorization or deletion rejects stale writes.
 - Default concurrency is one active inference per account. The permit remains
   held through upstream streaming and is released on cancellation.
 - Authentication failures, rate limits and transient failures cool the affected
-  account before another is selected. Failover only occurs before client output;
-  a partially delivered generation is not replayed on another account.
-  Cache First does not move a rate-limited conversation to another account after
-  an upstream 429; a later request observes its bound account's bounded wait.
+  account. A request moves to another account only when nothing reached the
+  upstream (refresh or route failure), or once after a connection failure without
+  an HTTP response. An upstream answer — 401/403 after one refresh, 429, 5xx, or a
+  stream error before output — is returned to the client and is not replayed on
+  other accounts; a later request is scheduled away from the cooling account.
+  A partially delivered generation is never replayed.
 - A known, recent zero balance excludes credit-consuming models from scheduling.
   Models that official metadata marks as free remain eligible, with the same
   concurrency, authorization and cooldown limits. Unknown or stale quota data
@@ -98,8 +105,9 @@ redirects.
 
 ## Account isolation and egress nodes
 
-- Every account has its own HTTP connection pool, so no socket carries two
-  accounts' tokens.
+- Every account has its own HTTP connection pool (no socket carries two accounts'
+  tokens), its own random machine/device ids, and a COSY client address and host
+  name derived from its device id, so no client value is shared by all accounts.
 - **Accounts → Qoder → Egress nodes** routes each account through one node of an
   airport subscription, like WorkBuddy (see `docs/WORKBUDDY_UPSTREAM.md`). The
   subscription link, node filters and auto-assign are shared with WorkBuddy, and

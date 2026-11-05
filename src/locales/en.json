@@ -49,6 +49,7 @@
     "noRefresh": "Reauthorize after expiry",
     "enableAccount": "Use in rotation",
     "autoRefresh": "Background renewal and balance sync",
+    "syncIdle": "Idle: background sync resumes after the next request; tokens are still renewed near expiry",
     "nextSync": "Next maintenance: {{time}}",
     "sync": "Sync balance and models",
     "renew": "Renew now",

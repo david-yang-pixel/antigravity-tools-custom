@@ -93,6 +93,34 @@ fn signer(a: &Account) -> Result<Signer, Failure> {
     cache.insert(a.id.clone(), (fingerprint, signer.clone()));
     Ok(signer)
 }
+/// Per-account bytes derived from the account's random, persisted device id, so the
+/// values below stay stable across restarts and reauthorization (which keeps the device
+/// id) and differ between accounts. A constant shared by every account would link them.
+fn device_seed(a: &Account, label: &str) -> [u8; 32] {
+    Sha256::digest(format!("cosy-{label}:{}", a.credentials.device_id)).into()
+}
+/// Local address reported by the client, in the link-local form the reference capture
+/// used (169.254.0.0/16), one per account.
+pub fn client_ip(a: &Account) -> String {
+    let d = device_seed(a, "client-ip");
+    format!("169.254.{}.{}", 1 + d[0] % 254, 1 + d[1] % 254)
+}
+/// Host name reported by the client: the default form of this server's OS, one per account.
+pub fn hostname(a: &Account) -> String {
+    const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let d = device_seed(a, "hostname");
+    let pick = |n: usize| -> String {
+        d[..n]
+            .iter()
+            .map(|b| ALNUM[*b as usize % ALNUM.len()] as char)
+            .collect()
+    };
+    match std::env::consts::OS {
+        "windows" => format!("DESKTOP-{}", pick(7)),
+        "macos" => format!("MacBook-Pro-{}.local", pick(4)),
+        _ => format!("dev-{}", pick(6).to_ascii_lowercase()),
+    }
+}
 pub fn headers(
     a: &Account,
     body: &str,
@@ -142,7 +170,7 @@ pub fn headers(
         ("cosy-machinetoken", token[..43].into()),
         ("cosy-machinetype", machine_type.chars().take(18).collect()),
         ("cosy-machineos", format!("{arch}_{os}")),
-        ("cosy-clientip", "169.254.198.161".into()),
+        ("cosy-clientip", client_ip(a)),
         ("login-version", "v2".into()),
         ("user-agent", "undici".into()),
         ("content-type", "application/json".into()),
@@ -163,7 +191,7 @@ pub fn headers(
     }
     if sse {
         http::insert(&mut headers, "cache-control", "no-cache")?;
-        http::insert(&mut headers, "cosy-machinehostname", "PC")?;
+        http::insert(&mut headers, "cosy-machinehostname", &hostname(a))?;
     }
     if !model.is_empty() {
         http::insert(&mut headers, "x-model-key", model)?;

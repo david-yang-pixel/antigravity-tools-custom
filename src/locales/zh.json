@@ -49,6 +49,7 @@
     "noRefresh": "到期后需重新授权",
     "enableAccount": "参与轮换",
     "autoRefresh": "后台续期与余额同步",
+    "syncIdle": "空闲中：有调用后恢复后台同步，令牌临近到期时仍会续期",
     "nextSync": "下次维护：{{time}}",
     "sync": "同步余额与模型",
     "renew": "立即续期",

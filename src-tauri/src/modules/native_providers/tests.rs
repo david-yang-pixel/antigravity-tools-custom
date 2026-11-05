@@ -1085,3 +1085,54 @@ async fn registry_refresh_skips_an_unreadable_native_vault_and_still_reports() {
         .iter()
         .any(|n| n.contains("Qoder") && n.contains("已跳过该来源")));
 }
+
+#[test]
+fn cosy_client_ip_and_hostname_are_stable_per_account_and_differ_between_accounts() {
+    let a = account(Provider::Qoder, "ip-a");
+    let b = account(Provider::Qoder, "ip-b");
+    assert_eq!(
+        qoder::sign::client_ip(&a),
+        qoder::sign::client_ip(&a.clone())
+    );
+    assert_eq!(qoder::sign::hostname(&a), qoder::sign::hostname(&a.clone()));
+    assert_ne!(qoder::sign::client_ip(&a), qoder::sign::client_ip(&b));
+    assert_ne!(qoder::sign::hostname(&a), qoder::sign::hostname(&b));
+    assert!(qoder::sign::client_ip(&a).starts_with("169.254."));
+    let headers = qoder::sign::headers(
+        &a,
+        "body",
+        "https://gateway.qoder.com.cn/algo/api/v2/x",
+        "m",
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        headers["cosy-clientip"],
+        qoder::sign::client_ip(&a).as_str()
+    );
+    assert_eq!(
+        headers["cosy-machinehostname"],
+        qoder::sign::hostname(&a).as_str()
+    );
+}
+
+#[test]
+fn idle_accounts_only_renew_near_expiry_and_new_catalogs_are_always_fetched() {
+    let at = now();
+    let mut a = account(Provider::Qoder, "idle");
+    a.next_sync_at = at - 1;
+    // Never fetched: due so the account can become schedulable at all.
+    assert_eq!(accounts::work(&a, at), Some(accounts::Work::Sync));
+    a.models_updated_at = at - 3600;
+    // Fetched before and unused since: no catalog/quota heartbeat.
+    assert_eq!(accounts::work(&a, at), None);
+    assert!(accounts::sync_paused(&a, at));
+    a.expires_at = at + 120;
+    assert_eq!(accounts::work(&a, at), Some(accounts::Work::Renew));
+    a.credentials.refresh_token.clear();
+    assert_eq!(accounts::work(&a, at), None);
+    a.auto_refresh = false;
+    a.models_updated_at = 0;
+    assert_eq!(accounts::work(&a, at), None);
+    assert!((900..1080).contains(&accounts::sync_interval(&a.id)));
+}

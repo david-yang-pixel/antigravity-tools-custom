@@ -239,7 +239,12 @@ impl From<&Account> for AccountView {
             models_error: a.models_error.clone(),
             auth_error: a.auth_error.clone(),
             last_sync_at: a.last_sync_at,
-            next_sync_at: a.next_sync_at,
+            // 0 while idle: background polls resume after the next real use.
+            next_sync_at: if accounts::sync_paused(a, now()) {
+                0
+            } else {
+                a.next_sync_at
+            },
             in_flight: runtime.in_flight,
             cooldown_until: runtime.cooldown_until,
             last_error: runtime.last_error,
