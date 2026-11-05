@@ -260,6 +260,7 @@ impl Service<Uri> for Connector {
 pub struct Client {
     inner: Option<HyperClient<Connector, Full<Bytes>>>,
     legacy: Option<reqwest::Client>,
+    proxied: bool,
 }
 impl Client {
     pub fn new(proxy: &str) -> Result<Self, Error> {
@@ -279,6 +280,7 @@ impl Client {
         Ok(Self {
             inner: None,
             legacy: Some(legacy),
+            proxied: !proxy.is_empty(),
         })
     }
     fn with_tls(proxy: &str, mut tls: SslConnectorBuilder) -> Result<Self, Error> {
@@ -315,6 +317,7 @@ impl Client {
             }
         });
         Ok(Self {
+            proxied: proxy.is_some(),
             inner: Some(builder.build(Connector {
                 tls: Arc::new(tls.build()),
                 proxy,
@@ -334,6 +337,9 @@ impl Client {
             timeout: Duration::from_secs(20),
             error: None,
         }
+    }
+    pub fn uses_proxy(&self) -> bool {
+        self.proxied
     }
     pub fn get(&self, url: impl AsRef<str>) -> RequestBuilder {
         self.request(Method::GET, url)

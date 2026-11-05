@@ -98,6 +98,7 @@ pub async fn prepare(
     a: &Account,
     body: String,
     inference: Option<&str>,
+    proxy_in_use: bool,
 ) -> Result<qoder_client::signing::PreparedRequest, Failure> {
     let endpoint = super::gateway(a.realm);
     if legacy() {
@@ -124,6 +125,10 @@ pub async fn prepare(
                 .collect(),
         });
     }
+    let allow_direct = std::env::var("ABV_QODER_ALLOW_DIRECT_UMID")
+        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"));
+    qoder_client::identity::check_network_policy(proxy_in_use, allow_direct)
+        .map_err(|e| Failure::new(503, e.to_string()))?;
     let root = crate::modules::account::get_data_dir()?;
     let machine = qoder_client::identity::machine(&root, a.realm == super::super::Realm::Cn, &a.uid).await
         .map_err(|_| Failure::new(503, "Official Qoder machine identity unavailable; check the runtime helper or explicitly select the legacy protocol"))?;

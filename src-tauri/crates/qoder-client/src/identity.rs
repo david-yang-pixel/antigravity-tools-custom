@@ -18,6 +18,15 @@ use tokio::{
     sync::Mutex,
 };
 
+/// The native SDK does not honor our HTTP proxy. Check this before invoking it,
+/// including when a previous machine result exists in the in-memory cache.
+pub fn check_network_policy(proxy_in_use: bool, allow_direct: bool) -> Result<(), Error> {
+    if proxy_in_use && !allow_direct {
+        return Err("Official Qoder UMID needs a direct connection outside the configured proxy. Set ABV_QODER_ALLOW_DIRECT_UMID=true to explicitly allow it, or use ABV_QODER_LEGACY_PROTOCOL=true.".into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineInfo {
@@ -248,6 +257,14 @@ pub async fn machine(root: &Path, cn: bool, uid: &str) -> Result<MachineInfo, Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proxied_accounts_require_an_explicit_direct_sdk_opt_in() {
+        let direct = crate::transport::Client::new("").unwrap();
+        let proxied = crate::transport::Client::new("socks5h://127.0.0.1:9").unwrap();
+        assert!(check_network_policy(direct.uses_proxy(), false).is_ok());
+        assert!(check_network_policy(proxied.uses_proxy(), false).is_err());
+        assert!(check_network_policy(proxied.uses_proxy(), true).is_ok());
+    }
     #[test]
     fn packaged_helper_is_verified_and_repaired_before_execution() {
         let root = tempfile::tempdir().unwrap();

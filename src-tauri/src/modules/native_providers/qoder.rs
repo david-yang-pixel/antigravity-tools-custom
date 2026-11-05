@@ -176,7 +176,7 @@ pub async fn models(
     client: &qoder_client::transport::Client,
     a: &Account,
 ) -> Result<Vec<Model>, Failure> {
-    let signed = sign::prepare(a, "{}".into(), None).await?;
+    let signed = sign::prepare(a, "{}".into(), None, client.uses_proxy()).await?;
     let response = client
         .get(http::official_url(Provider::Qoder, &signed.url)?)
         .headers(signed_headers(&signed.headers)?)
@@ -296,14 +296,21 @@ pub async fn chat(
 ) -> Result<reqwest::Response, Failure> {
     let deadline = tokio::time::Instant::now() + timeout;
     let body = super::wire::qoder_request(a, model, payload)?;
-    let signed = tokio::time::timeout_at(deadline, sign::prepare(a, body.to_string(), Some(model)))
-        .await
-        .map_err(|_| Failure::new(504, "Qoder request preparation timed out"))??;
+    let signed = tokio::time::timeout_at(
+        deadline,
+        sign::prepare(a, body.to_string(), Some(model), client.uses_proxy()),
+    )
+    .await
+    .map_err(|_| Failure::new(504, "Qoder request preparation timed out"))??;
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(Failure::new(504, "Qoder request timed out before dispatch"));
+    }
     client
         .post(http::official_url(Provider::Qoder, &signed.url)?)
         .headers(signed_headers(&signed.headers)?)
         .body(signed.body.unwrap_or_default())
-        .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        .timeout(remaining)
         .send()
         .await
         .map_err(|_| Failure::new(502, "Qoder inference connection failed"))

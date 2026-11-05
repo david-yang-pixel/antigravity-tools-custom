@@ -62,7 +62,7 @@ fn proxied(proxy_url: &str) -> Result<rquest::Client, String> {
 pub async fn client_for(account: &Account) -> Result<rquest::Client, String> {
     match shared::exit_for(POOL, &account.id).await? {
         Exit::Off | Exit::Direct => direct_for(&account.id),
-        Exit::Proxy(url) => proxied(&url),
+        Exit::Proxy { url, .. } => proxied(&url),
     }
 }
 
@@ -79,7 +79,7 @@ pub async fn login_route(preferred: Option<&str>) -> Result<LoginRoute, String> 
     let mut route = shared::login_route(POOL, preferred).await?;
     let client = match &route.exit {
         Exit::Off | Exit::Direct => direct()?,
-        Exit::Proxy(url) => proxied(url)?,
+        Exit::Proxy { url, .. } => proxied(url)?,
     };
     Ok(LoginRoute {
         client,

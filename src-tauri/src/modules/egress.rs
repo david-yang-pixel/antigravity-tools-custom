@@ -223,7 +223,7 @@ pub enum Exit {
     /// The account was explicitly set to `DIRECT`: this server's own address.
     Direct,
     /// Loopback SOCKS route through the account's own selector.
-    Proxy(String),
+    Proxy { url: String, node: String },
 }
 
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
@@ -509,7 +509,10 @@ pub async fn exit_for(pool: Pool, account_id: &str) -> Result<Exit, String> {
         return Ok(Exit::Direct);
     }
     let route = mihomo::route(&settings, &pool.user(account_id), &node).await?;
-    Ok(Exit::Proxy(route.proxy_url))
+    Ok(Exit::Proxy {
+        url: route.proxy_url,
+        node,
+    })
 }
 
 /// A login's route; holding it keeps the pool's login selector on `node`.
@@ -565,7 +568,10 @@ pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRou
     }
     let route = mihomo::route(&settings, &pool.login_user(), &node).await?;
     Ok(LoginRoute {
-        exit: Exit::Proxy(route.proxy_url),
+        exit: Exit::Proxy {
+            url: route.proxy_url,
+            node: node.clone(),
+        },
         node: Some(node),
         hold,
         _guard: guard,

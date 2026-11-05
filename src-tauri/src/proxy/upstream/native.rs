@@ -170,10 +170,17 @@ async fn send(
     payload: Value,
     timeout: Duration,
 ) -> Result<reqwest::Response, Failure> {
+    let deadline = tokio::time::Instant::now() + timeout;
     match account.provider {
         Provider::Qoder => {
-            let client = native::http::client_for(account).await?;
-            native::qoder::chat(&client, account, model, payload, timeout).await
+            let client = tokio::time::timeout_at(deadline, native::http::client_for(account))
+                .await
+                .map_err(|_| Failure::new(504, "Qoder egress resolution timed out"))??;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Failure::new(504, "Qoder request timed out before dispatch"));
+            }
+            native::qoder::chat(&client, account, model, payload, remaining).await
         }
     }
 }

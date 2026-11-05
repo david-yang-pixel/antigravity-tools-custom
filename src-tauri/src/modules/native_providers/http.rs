@@ -42,7 +42,8 @@ impl From<&str> for Failure {
 /// Clients by owner (an account id, or `login`) with the route each was built for.
 /// Accounts never share a connection pool: one socket never carries two accounts'
 /// tokens, and a route change rebuilds only that account's client.
-static CLIENTS: LazyLock<Mutex<HashMap<String, (String, qoder_client::transport::Client)>>> =
+type ClientRoute = (bool, String, Option<String>);
+static CLIENTS: LazyLock<Mutex<HashMap<String, (ClientRoute, qoder_client::transport::Client)>>> =
     LazyLock::new(Default::default);
 
 /// The proxy behind `exit`. With egress off this is the gateway's own upstream proxy
@@ -57,7 +58,7 @@ pub(super) fn proxy_url(exit: &Exit) -> String {
             .map(|proxy| proxy.url.trim().to_owned())
             .unwrap_or_default(),
         Exit::Direct => String::new(),
-        Exit::Proxy(url) => url.clone(),
+        Exit::Proxy { url, .. } => url.clone(),
     }
 }
 /// No overall timeout: callers bound each request by its own deadline, which also covers
@@ -73,7 +74,13 @@ fn build(proxy: &str) -> Result<qoder_client::transport::Client, Failure> {
 }
 fn cached(owner: &str, exit: &Exit) -> Result<qoder_client::transport::Client, Failure> {
     let route = proxy_url(exit);
-    let fingerprint = format!("{}:{route}", super::qoder::sign::legacy());
+    // Mihomo's URL identifies the selector, not its selected node. A node change
+    // must discard keep-alive connections even if that URL remains identical.
+    let node = match exit {
+        Exit::Proxy { node, .. } => Some(node.clone()),
+        _ => None,
+    };
+    let fingerprint = (super::qoder::sign::legacy(), route.clone(), node);
     let mut clients = CLIENTS
         .lock()
         .map_err(|_| Failure::new(503, "Provider connections unavailable"))?;

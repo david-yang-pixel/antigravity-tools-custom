@@ -99,10 +99,16 @@ Provider settings have this shape:
 | `ABV_QODER_MAX_CONCURRENCY` | `1` | Active requests per account, clamped to 1–8 |
 | `ABV_QODER_VERSION` | `1.1.83` | Qoder client version (defaults to `1.1.75` in legacy mode) |
 | `ABV_QODER_LEGACY_PROTOCOL` | `false` | Explicit rollback to the previous Rust COSY signer and rustls transport; restart after changing |
+| `ABV_QODER_ALLOW_DIRECT_UMID` | `false` | Explicitly allow the official identity SDK to connect directly when Qoder uses a proxy; exposes the host network/machine identity outside that proxy |
 
 Without egress, the normal gateway upstream-proxy setting applies to native account
 traffic. Credential-bearing requests validate HTTPS service hosts and do not follow
 redirects.
+
+The official native UMID SDK uses its own network stack. When Qoder uses an account
+egress node or the general upstream proxy, modern model/inference signing fails
+before starting that SDK unless `ABV_QODER_ALLOW_DIRECT_UMID=true` is explicitly
+set. Alternatively, use the legacy protocol. Release detection does not invoke UMID.
 
 The Qoder account page checks the official npm `latest` release when opened and
 offers a manual refresh. It shows the bundled version and last successful check;
