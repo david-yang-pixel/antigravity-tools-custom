@@ -451,21 +451,27 @@ pub async fn probe(
         .map(|a| a.id)
         .collect();
     let mut lease = accounts::select_for_probe(provider, model, &excluded, account_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(probe_failure)?;
     let a = accounts::fresh(provider, &lease.account.id, false)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(probe_failure)?;
     let payload = json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}],"stream":true,"max_tokens":64});
     let response = match send(&a, model, payload, Duration::from_secs(25)).await {
         Ok(response) => response,
         Err(error) => {
             let error = Failure::from(error);
             lease.failure(error.status);
-            return Err(error.to_string());
+            return Err(probe_failure(error));
         }
     };
     if !response.status().is_success() {
         lease.failure(response.status().as_u16());
+        tracing::warn!(
+            "Model probe for {} rejected by {}: HTTP {}",
+            model,
+            provider.name(),
+            response.status().as_u16()
+        );
         return Ok((
             "failed".into(),
             "上游调用失败；已有验证证据保留。".into(),
@@ -480,7 +486,7 @@ pub async fn probe(
             Ok(event) => event,
             Err(error) => {
                 lease.failure(error.status);
-                return Err(error.to_string());
+                return Err(probe_failure(error));
             }
         };
         if event == "[DONE]" {
@@ -505,12 +511,23 @@ pub async fn probe(
             Some(a.id),
         ))
     } else {
+        tracing::warn!(
+            "Model probe for {} returned incomplete text: provider={}, text={}, complete={}",
+            model,
+            provider.name(),
+            text,
+            complete
+        );
         Ok((
             "failed".into(),
             "上游未返回完整文本；已有验证证据保留。".into(),
             Some(a.id),
         ))
     }
+}
+
+fn probe_failure(error: Failure) -> String {
+    format!("{} (status {})", error.message, error.status)
 }
 
 #[cfg(test)]

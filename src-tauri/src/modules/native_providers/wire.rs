@@ -98,7 +98,9 @@ pub fn event(provider: Provider, data: &str) -> Result<Option<String>, Failure> 
                 if status != 200.0 {
                     return Err(Failure::new(
                         status as u16,
-                        "Qoder rejected the inference request",
+                        // Keep the upstream's numeric code for diagnosis. The body may
+                        // echo prompts or credentials and must not enter logs/responses.
+                        format!("Qoder rejected the inference request (upstream status {status})"),
                     ));
                 }
             }
@@ -114,9 +116,12 @@ pub fn event(provider: Provider, data: &str) -> Result<Option<String>, Failure> 
                 let inner: Value = serde_json::from_str(&decoded)
                     .map_err(|_| Failure::new(502, "Invalid Qoder stream envelope"))?;
                 if inner.get("error").is_some() {
-                    return Err(Failure::new(502, "Qoder returned an inference error"));
+                    return Err(inference_error(&inner["error"]));
                 }
                 return Ok(Some(inner.to_string()));
+            }
+            if let Some(error) = v.get("error") {
+                return Err(inference_error(error));
             }
             if v.get("choices").is_some() || v.get("usage").is_some() {
                 return Ok(Some(v.to_string()));
@@ -124,4 +129,14 @@ pub fn event(provider: Provider, data: &str) -> Result<Option<String>, Failure> 
             Ok(None)
         }
     }
+}
+
+fn inference_error(error: &Value) -> Failure {
+    // Business error codes are not necessarily HTTP status codes. Retain only
+    // integer codes; never copy arbitrary upstream messages or string identifiers.
+    let message = match error.get("code").and_then(Value::as_i64) {
+        Some(code) => format!("Qoder returned an inference error (upstream code {code})"),
+        None => "Qoder returned an inference error".into(),
+    };
+    Failure::new(502, message)
 }

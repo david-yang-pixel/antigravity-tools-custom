@@ -730,6 +730,33 @@ fn provider_streams_preserve_text_tools_usage_and_surface_envelope_errors() {
         429
     );
 }
+
+#[test]
+fn qoder_rejection_diagnostics_keep_codes_without_echoing_upstream_content() {
+    let secret = "private prompt and Bearer secret-token";
+    let rejected = wire::event(
+        Provider::Qoder,
+        &json!({"statusCodeValue":403,"body":secret}).to_string(),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.status, 403);
+    assert!(rejected.message.contains("upstream status 403"));
+    assert!(!rejected.message.contains(secret));
+
+    let error = json!({"error":{"code":10042,"message":secret}});
+    for event in [
+        error.clone(),
+        json!({"statusCodeValue":200,"body":error.to_string()}),
+    ] {
+        let failure = wire::event(Provider::Qoder, &event.to_string()).unwrap_err();
+        assert_eq!(failure.status, 502);
+        assert!(failure.message.contains("upstream code 10042"));
+        assert!(!failure.message.contains(secret));
+    }
+    let error = json!({"error":{"code":secret,"message":secret}});
+    let failure = wire::event(Provider::Qoder, &error.to_string()).unwrap_err();
+    assert_eq!(failure.message, "Qoder returned an inference error");
+}
 #[test]
 fn payload_translation_keeps_tool_history_and_provider_model_identity() {
     let payload = wire::qoder_request(
