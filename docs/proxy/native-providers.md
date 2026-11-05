@@ -152,15 +152,6 @@ platform dependencies and CI.
 The integration uses independently implemented Rust state management and protocol
 adapters; it does not bundle or run the referenced gateway.
 
-## Removed TRAE source
-
-An earlier beta also integrated TRAE (`trae:default`). It has been removed. Existing
-`trae_accounts.enc` / `trae_settings.json` files are no longer read and can be deleted.
-Stored model-registry candidates and publications that reference `trae:default` still
-load, so the registry stays readable, but they never route: inference on such a
-publication returns 503 ("Model source is not integrated"), and discovery or a new
-publication on that source is refused. Unpublish those models to clean them up.
-
 ## Rolling back the integration
 
 Before reverting to a version that does not recognize the native Qoder source,
