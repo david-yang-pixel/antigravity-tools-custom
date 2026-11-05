@@ -46,6 +46,14 @@ pub struct Node {
     /// `Some(false)` when the last test failed.
     pub alive: Option<bool>,
 }
+impl Node {
+    /// Direct routing is an explicit administrator choice, never a subscription
+    /// candidate. The controller's name must not alias our stored DIRECT sentinel.
+    pub(super) fn is_subscription_proxy(&self) -> bool {
+        !self.name.trim().eq_ignore_ascii_case(super::DIRECT)
+            && !self.kind.trim().eq_ignore_ascii_case("Direct")
+    }
+}
 
 pub(super) fn group(user: &str) -> String {
     format!("wb-{user}")
@@ -254,6 +262,7 @@ pub(super) fn parse_nodes(value: &Value) -> Vec<Node> {
                 alive: delay.map(|d| d > 0),
             })
         })
+        .filter(Node::is_subscription_proxy)
         .collect()
 }
 
@@ -636,5 +645,17 @@ mod tests {
         assert_eq!((nodes[0].delay, nodes[0].alive), (None, None));
         assert_eq!((nodes[1].delay, nodes[1].alive), (None, Some(false)));
         assert_eq!((nodes[2].delay, nodes[2].alive), (Some(120), Some(true)));
+    }
+
+    #[test]
+    fn subscription_nodes_cannot_alias_explicit_direct_routing() {
+        let nodes = parse_nodes(&json!({"proxies": [
+            {"name":"DIRECT", "type":"Trojan", "history":[{"delay":1}]},
+            {"name":" direct ", "type":"Vmess"},
+            {"name":"fast-node", "type":"Direct", "history":[{"delay":1}]},
+            {"name":"direct-proxy", "type":"Trojan", "history":[{"delay":20}]}
+        ]}));
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "direct-proxy");
     }
 }

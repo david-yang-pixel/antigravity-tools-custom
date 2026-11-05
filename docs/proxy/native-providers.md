@@ -152,6 +152,10 @@ Headless administrators can use `POST /api/native-providers/client-version` with
   results, rather than introducing another background account heartbeat.
 - `DIRECT` sends that account from this server's own address. With egress off the
   upstream-proxy setting applies, as before.
+- Subscription entries named `DIRECT` (case/whitespace variants included), or
+  reported as type `Direct`, are excluded from the node list and auto-assignment.
+  If no proxy candidates remain, assignment fails instead of selecting direct.
+  Administrators can still explicitly choose `DIRECT` for an account.
 - Bindings are stored under `pools.qoder` in `workbuddy_egress.json` (the file keeps
   its name; older versions ignore the new field).
 

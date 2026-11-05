@@ -412,7 +412,8 @@ fn choose(nodes: &[Node], settings: &Settings, pool: Pool) -> Option<String> {
         .iter()
         .enumerate()
         .filter(|(_, n)| {
-            n.alive != Some(false)
+            n.is_subscription_proxy()
+                && n.alive != Some(false)
                 && eligible(&n.name, &include, &exclude)
                 && !used.contains(n.name.as_str())
                 && !held.contains(&n.name)
@@ -840,6 +841,38 @@ mod tests {
         assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("HK 01"));
         settings.include = "^SG".into();
         assert_eq!(choose(&nodes, &settings, WB), None);
+    }
+
+    #[test]
+    fn auto_assignment_never_chooses_a_subscription_direct_entry() {
+        let direct = node(DIRECT, Some(1), Some(true));
+        let mixed_case = node(" direct ", Some(1), Some(true));
+        let mut renamed = node("fast-direct-node", Some(1), Some(true));
+        renamed.kind = "Direct".into();
+        // Even explicit include filters cannot turn a subscription entry into
+        // the administrator's direct-route selection.
+        let settings = Settings {
+            include: ".*".into(),
+            exclude: String::new(),
+            ..Default::default()
+        };
+        for pool in [WB, QODER] {
+            for rejected in [&direct, &mixed_case, &renamed] {
+                assert_eq!(
+                    choose(std::slice::from_ref(rejected), &settings, pool),
+                    None
+                );
+                assert_eq!(
+                    choose(
+                        &[rejected.clone(), node("proxy", Some(50), Some(true))],
+                        &settings,
+                        pool
+                    )
+                    .as_deref(),
+                    Some("proxy")
+                );
+            }
+        }
     }
 
     #[test]
