@@ -123,7 +123,8 @@ export default function ApiProxy() {
 
     const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
     const [searchParams] = useSearchParams();
-    const showWorkBuddy = searchParams.get('section') === 'workbuddy';
+    // `workbuddy` predates the shared source card; both open it.
+    const showWorkBuddy = ['workbuddy', 'sources'].includes(searchParams.get('section') ?? '');
     const [activeMenuTab, setActiveMenuTab] = useState<'settings' | 'models' | 'protocols'>(showWorkBuddy ? 'models' : 'settings');
     useEffect(() => { if (showWorkBuddy) setActiveMenuTab('models'); }, [showWorkBuddy]);
     const [configLoading, setConfigLoading] = useState(true);

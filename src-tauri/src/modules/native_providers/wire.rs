@@ -85,7 +85,12 @@ pub fn event(provider: Provider, data: &str) -> Result<Option<String>, Failure> 
     if data.trim().is_empty() {
         return Ok(None);
     }
-    let v: Value = serde_json::from_str(data)
+    let decoded = qoder_client::signing::decrypt(data)
+        .map_err(|_| Failure::new(502, "Cannot decrypt Qoder stream event"))?;
+    if decoded.trim() == "[DONE]" {
+        return Ok(Some("[DONE]".into()));
+    }
+    let v: Value = serde_json::from_str(&decoded)
         .map_err(|_| Failure::new(502, "Invalid provider stream event"))?;
     match provider {
         Provider::Qoder => {
@@ -101,7 +106,12 @@ pub fn event(provider: Provider, data: &str) -> Result<Option<String>, Failure> 
                 if body == "[DONE]" {
                     return Ok(Some(body.into()));
                 }
-                let inner: Value = serde_json::from_str(body)
+                let decoded = qoder_client::signing::decrypt(body)
+                    .map_err(|_| Failure::new(502, "Cannot decrypt Qoder stream envelope"))?;
+                if decoded.trim() == "[DONE]" {
+                    return Ok(Some("[DONE]".into()));
+                }
+                let inner: Value = serde_json::from_str(&decoded)
                     .map_err(|_| Failure::new(502, "Invalid Qoder stream envelope"))?;
                 if inner.get("error").is_some() {
                     return Err(Failure::new(502, "Qoder returned an inference error"));

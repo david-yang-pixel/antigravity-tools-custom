@@ -6,12 +6,11 @@ use super::{
     error_response, published_request,
 };
 use crate::modules::native_providers::{
-    self as native, accounts, http::Failure, Account, Provider,
+    self as native, accounts,
+    http::{DispatchFailure, Failure},
+    Account, Provider,
 };
-use crate::proxy::{
-    session_manager::SessionManager,
-    sticky_config::{AccountSchedulingPolicy, SchedulingMode},
-};
+use crate::proxy::{session_manager::SessionManager, sticky_config::AccountSchedulingPolicy};
 use axum::{
     body::to_bytes,
     extract::{Request, State},
@@ -172,9 +171,19 @@ async fn send(
     model: &str,
     payload: Value,
     timeout: Duration,
-) -> Result<reqwest::Response, Failure> {
+) -> Result<reqwest::Response, DispatchFailure> {
+    let deadline = tokio::time::Instant::now() + timeout;
     match account.provider {
-        Provider::Qoder => native::qoder::chat(account, model, payload, timeout).await,
+        Provider::Qoder => {
+            let client = tokio::time::timeout_at(deadline, native::http::client_for(account))
+                .await
+                .map_err(|_| Failure::new(504, "Qoder egress resolution timed out"))??;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Failure::new(504, "Qoder request timed out before dispatch").into());
+            }
+            native::qoder::chat(&client, account, model, payload, remaining).await
+        }
     }
 }
 fn normalize(provider: Provider, response: reqwest::Response) -> NativeEvents {
@@ -246,6 +255,46 @@ async fn until_output(events: &mut NativeEvents) -> Result<Vec<String>, Failure>
     }
     Err(Failure::new(502, "Provider returned an empty completion"))
 }
+/// How far a failed attempt got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reached {
+    /// Inference was not sent: refresh, routing or request preparation failed first.
+    Nothing,
+    /// Transport was invoked but no HTTP response arrived; delivery is uncertain.
+    Connection,
+    /// The upstream answered (an HTTP error, or a stream error before output).
+    Upstream,
+}
+/// Extra accounts tried after connection failures. An upstream answer, including 401,
+/// 403, 429 and a stream error, stays on the account that received it: replaying the
+/// same request elsewhere spreads one rejection across the pool.
+const MAX_CONNECTION_FAILOVERS: usize = 1;
+fn allow_failover(reached: Reached, connection_failovers: &mut usize) -> bool {
+    match reached {
+        Reached::Nothing => true,
+        Reached::Connection if *connection_failovers < MAX_CONNECTION_FAILOVERS => {
+            *connection_failovers += 1;
+            true
+        }
+        Reached::Connection | Reached::Upstream => false,
+    }
+}
+fn dispatch_failure(error: DispatchFailure, upstream_answered: bool) -> (Failure, Reached) {
+    let (error, reached) = match error {
+        DispatchFailure::Preparation(error) => (error, Reached::Nothing),
+        DispatchFailure::Connection(error) => (error, Reached::Connection),
+    };
+    // A failed same-account authorization retry must not erase the original
+    // upstream rejection and allow a replay on another account.
+    (
+        error,
+        if upstream_answered {
+            Reached::Upstream
+        } else {
+            reached
+        },
+    )
+}
 async fn open(
     provider: Provider,
     model: &str,
@@ -259,6 +308,7 @@ async fn open(
     let mut last = None;
     let mut failover_policy = policy.clone();
     failover_policy.sticky.max_wait_seconds = 0;
+    let mut connection_failovers = 0;
     for _ in 0..5 {
         let admission = if excluded.is_empty() {
             policy
@@ -297,10 +347,10 @@ async fn open(
             return Err(Failure::new(504, "Native upstream request timed out"));
         }
         let mut response = send(&lease.account, model, payload.clone(), remaining).await;
-        if response
+        let upstream_answered = response
             .as_ref()
-            .is_ok_and(|r| matches!(r.status().as_u16(), 401 | 403))
-        {
+            .is_ok_and(|r| matches!(r.status().as_u16(), 401 | 403));
+        if upstream_answered {
             let refresh_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
             match tokio::time::timeout(refresh_budget, accounts::fresh(provider, &id, true)).await {
                 Ok(Ok(account)) => {
@@ -311,7 +361,11 @@ async fn open(
                     }
                     response = send(&lease.account, model, payload.clone(), remaining).await;
                 }
-                Ok(Err(error)) => response = Err(error),
+                Ok(Err(error)) => {
+                    // The upstream already answered 401/403 for this account.
+                    lease.failure(error.status);
+                    return Err(error);
+                }
                 Err(_) => {
                     return Err(Failure::new(
                         504,
@@ -329,38 +383,41 @@ async fn open(
         let response = match response {
             Ok(r) if r.status().is_success() => r,
             result => {
-                let error = match result {
-                    Ok(r) => Failure::new(
-                        r.status().as_u16(),
-                        format!("{} returned HTTP {}", provider.name(), r.status().as_u16()),
+                let (error, reached) = match result {
+                    Ok(r) => (
+                        Failure::new(
+                            r.status().as_u16(),
+                            format!("{} returned HTTP {}", provider.name(), r.status().as_u16()),
+                        ),
+                        Reached::Upstream,
                     ),
-                    Err(e) => e,
+                    Err(e) => dispatch_failure(e, upstream_answered),
                 };
                 if matches!(error.status, 400 | 413 | 422) {
                     return Err(error);
                 }
                 lease.failure_after(error.status, retry_after);
-                // Cache First keeps a rate-limited conversation on its account;
-                // its next request observes the same global bounded wait policy.
-                if error.status == 429 && policy.sticky.mode == SchedulingMode::CacheFirst {
+                if !allow_failover(reached, &mut connection_failovers) {
                     return Err(error);
                 }
+                tracing::warn!(
+                    "{} account attempt failed at {:?}; trying another account",
+                    provider.name(),
+                    reached
+                );
                 last = Some(error);
                 continue;
             }
         };
         let mut events = normalize(provider, response);
         // Nothing reaches the client until generation starts, so a failure before then
-        // still fails over (subject to the Cache First 429 exception).
+        // is still returned as a typed error instead of a broken stream.
         let prelude = match until_output(&mut events).await {
             Ok(prelude) => prelude,
             Err(e) => {
+                // The upstream answered; another account would receive the same request.
                 lease.failure(e.status);
-                if e.status == 429 && policy.sticky.mode == SchedulingMode::CacheFirst {
-                    return Err(e);
-                }
-                last = Some(e);
-                continue;
+                return Err(e);
             }
         };
         let account = lease.account.clone();
@@ -402,6 +459,7 @@ pub async fn probe(
     let response = match send(&a, model, payload, Duration::from_secs(25)).await {
         Ok(response) => response,
         Err(error) => {
+            let error = Failure::from(error);
             lease.failure(error.status);
             return Err(error.to_string());
         }
@@ -575,8 +633,58 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn only_unsent_and_connection_failures_move_to_another_account() {
+        let mut used = 0;
+        for _ in 0..3 {
+            assert!(allow_failover(Reached::Nothing, &mut used));
+        }
+        assert_eq!(used, 0);
+        assert!(allow_failover(Reached::Connection, &mut used));
+        assert_eq!(used, MAX_CONNECTION_FAILOVERS);
+        assert!(allow_failover(Reached::Nothing, &mut used));
+        assert!(!allow_failover(Reached::Connection, &mut used));
+        assert!(!allow_failover(Reached::Upstream, &mut 0));
+    }
     #[tokio::test]
-    async fn failures_before_generation_output_remain_retryable() {
+    async fn route_failures_stay_unsent_and_preserve_the_connection_retry_allowance() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        std::fs::write(
+            crate::modules::account::get_data_dir()
+                .unwrap()
+                .join("workbuddy_egress.json"),
+            "invalid egress settings",
+        )
+        .unwrap();
+        let mut used = 0;
+        // Both accounts fail route resolution before HTTP or the UMID helper.
+        for _ in 0..2 {
+            let a = Account::new(Provider::Qoder, native::Realm::Cn);
+            let error = send(&a, "model", json!({}), Duration::from_secs(1))
+                .await
+                .unwrap_err();
+            let (error, reached) = dispatch_failure(error, false);
+            assert!(error.message.contains("egress"));
+            assert_eq!(reached, Reached::Nothing);
+            assert!(allow_failover(reached, &mut used));
+            assert_eq!(used, 0);
+        }
+        // A later account can still use the one connection failover if needed.
+        assert!(allow_failover(Reached::Connection, &mut used));
+    }
+    #[test]
+    fn authorization_retry_failure_does_not_replay_an_upstream_rejection() {
+        for error in [
+            DispatchFailure::Preparation(Failure::new(503, "route unavailable")),
+            DispatchFailure::Connection(Failure::new(502, "connection failed")),
+        ] {
+            let (_, reached) = dispatch_failure(error, true);
+            assert_eq!(reached, Reached::Upstream);
+            assert!(!allow_failover(reached, &mut 0));
+        }
+    }
+    #[tokio::test]
+    async fn failures_before_generation_output_are_typed_errors() {
         // A role-only chunk, then an upstream error: nothing has been generated yet.
         let mut events = normalize(
             Provider::Qoder,

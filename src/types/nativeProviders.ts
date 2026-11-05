@@ -1,5 +1,15 @@
 export type NativeProvider = 'qoder';
 export type NativeRealm = 'cn' | 'global';
+export interface NativeClientVersion {
+    bundled_version: string;
+    advertised_version: string;
+    legacy_protocol: boolean;
+    latest_version: string | null;
+    update_available: boolean | null;
+    checked_at: number | null;
+    last_attempt_at: number | null;
+    error: 'network' | 'http' | 'invalid_metadata' | 'proxy' | 'timeout' | 'busy' | null;
+}
 export interface NativeModel { id: string; name: string; context_window: number; vision: boolean; reasoning: boolean; is_free?: boolean }
 export interface NativeQuotaPack { name: string; total: number | null; remaining: number | null; used: number | null; unlimited: boolean; expires_at: number | null }
 export interface NativeQuota { unit: string; total: number | null; remaining: number | null; used: number | null; unlimited: boolean; updated_at: number; packs: NativeQuotaPack[] }

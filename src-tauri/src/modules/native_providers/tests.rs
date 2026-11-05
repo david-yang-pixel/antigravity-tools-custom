@@ -18,6 +18,7 @@ impl Sandbox {
         let overrides = [
             "ABV_QODER_ENABLED",
             "ABV_QODER_MAX_CONCURRENCY",
+            "ABV_QODER_EGRESS_ENABLED",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -1084,4 +1085,215 @@ async fn registry_refresh_skips_an_unreadable_native_vault_and_still_reports() {
         .notices
         .iter()
         .any(|n| n.contains("Qoder") && n.contains("已跳过该来源")));
+}
+
+#[test]
+fn cosy_client_ip_and_hostname_are_stable_per_account_and_differ_between_accounts() {
+    let a = account(Provider::Qoder, "ip-a");
+    let b = account(Provider::Qoder, "ip-b");
+    assert_eq!(
+        qoder::sign::client_ip(&a),
+        qoder::sign::client_ip(&a.clone())
+    );
+    assert_eq!(qoder::sign::hostname(&a), qoder::sign::hostname(&a.clone()));
+    assert_ne!(qoder::sign::client_ip(&a), qoder::sign::client_ip(&b));
+    assert_ne!(qoder::sign::hostname(&a), qoder::sign::hostname(&b));
+    assert!(qoder::sign::client_ip(&a).starts_with("169.254."));
+    let headers = qoder::sign::headers(
+        &a,
+        "body",
+        "https://gateway.qoder.com.cn/algo/api/v2/x",
+        "m",
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        headers["cosy-clientip"],
+        qoder::sign::client_ip(&a).as_str()
+    );
+    assert_eq!(
+        headers["cosy-machinehostname"],
+        qoder::sign::hostname(&a).as_str()
+    );
+}
+
+#[test]
+fn modern_qoder_hostname_and_encoded_sse_follow_the_official_protocol() {
+    assert_eq!(
+        qoder::sign::normalize_hostname("  dev-host.local  "),
+        "dev-host.local"
+    );
+    assert_eq!(
+        qoder::sign::normalize_hostname("München.local"),
+        "xn--mnchen-3ya.local"
+    );
+    let name = qoder::sign::normalize_hostname(&format!("{}\r\nheader: injected", "x".repeat(110)));
+    assert!(name.len() <= 96 && !name.contains(['\r', '\n']));
+    let chunk = serde_json::json!({"choices":[{"delta":{"content":"decoded"}}]});
+    let encoded = qoder::sign::encode(chunk.to_string().as_bytes());
+    let decoded = wire::event(Provider::Qoder, &encoded).unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), chunk);
+    let envelope = serde_json::json!({"statusCodeValue":200,"body":encoded});
+    assert_eq!(
+        wire::event(Provider::Qoder, &envelope.to_string()).unwrap(),
+        Some(decoded)
+    );
+    let done = qoder::sign::encode(b"[DONE]");
+    assert_eq!(
+        wire::event(Provider::Qoder, &done).unwrap(),
+        Some("[DONE]".into())
+    );
+    assert_eq!(
+        wire::event(
+            Provider::Qoder,
+            &serde_json::json!({"body":done}).to_string()
+        )
+        .unwrap(),
+        Some("[DONE]".into())
+    );
+}
+
+#[test]
+fn idle_accounts_only_renew_near_expiry_and_new_catalogs_are_always_fetched() {
+    let at = now();
+    let mut a = account(Provider::Qoder, "idle");
+    a.next_sync_at = at - 1;
+    // Never fetched: due so the account can become schedulable at all.
+    assert_eq!(accounts::work(&a, at), Some(accounts::Work::Sync));
+    a.models_updated_at = at - 3600;
+    // Fetched before and unused since: no catalog/quota heartbeat.
+    assert_eq!(accounts::work(&a, at), None);
+    assert!(accounts::sync_paused(&a, at));
+    a.expires_at = at + 120;
+    assert_eq!(accounts::work(&a, at), Some(accounts::Work::Renew));
+    a.credentials.refresh_token.clear();
+    assert_eq!(accounts::work(&a, at), None);
+    a.auto_refresh = false;
+    a.models_updated_at = 0;
+    assert_eq!(accounts::work(&a, at), None);
+    assert!((900..1080).contains(&accounts::sync_interval(&a.id)));
+}
+
+#[test]
+fn idle_zero_balance_accounts_keep_recovery_until_credits_return() {
+    let at = now();
+    let mut a = account(Provider::Qoder, "idle-quota-recovery");
+    a.models_updated_at = at - 86400;
+    a.next_sync_at = at - 1;
+    a.quota = Some(
+        qoder::parse_quota(&json!({"userQuota":{"total":100,"remaining":0,"used":100}})).unwrap(),
+    );
+    // No in-memory activity, as after a restart. Recovery also survives expiry
+    // of the quota's admission TTL; it never becomes a catalog poll.
+    for age in [0, 901, 86400] {
+        a.quota.as_mut().unwrap().updated_at = at - age;
+        assert_eq!(accounts::work(&a, at), Some(accounts::Work::Quota));
+        assert!(!accounts::sync_paused(&a, at));
+        assert_eq!(AccountView::from(&a).next_sync_at, a.next_sync_at);
+    }
+    assert!(!a.quota.as_ref().unwrap().exhausted());
+    // Existing due time and operator switches still bound recovery work.
+    a.next_sync_at = at + accounts::sync_interval(&a.id);
+    assert_eq!(accounts::work(&a, at), None);
+    assert_eq!(
+        accounts::work(&a, a.next_sync_at),
+        Some(accounts::Work::Quota)
+    );
+    a.next_sync_at = at - 1;
+    a.enabled = false;
+    assert_eq!(accounts::work(&a, at), None);
+    a.enabled = true;
+    a.auto_refresh = false;
+    assert_eq!(accounts::work(&a, at), None);
+    a.auto_refresh = true;
+    // A successful recovery stops the idle heartbeat again. Unknown and
+    // unlimited balances also do not start a zero-balance recovery loop.
+    for remaining in [Some(20.0), None] {
+        a.quota.as_mut().unwrap().remaining = remaining;
+        assert_eq!(accounts::work(&a, at), None);
+        assert!(accounts::sync_paused(&a, at));
+    }
+    a.quota.as_mut().unwrap().remaining = Some(0.0);
+    a.quota.as_mut().unwrap().unlimited = true;
+    assert_eq!(accounts::work(&a, at), None);
+    assert!(accounts::sync_paused(&a, at));
+}
+
+#[tokio::test]
+async fn duplicate_import_is_rejected_before_egress_and_preserves_saved_tokens() {
+    let _sandbox = Sandbox::new();
+    let mut a = account(Provider::Qoder, "duplicate-import");
+    a.expires_at = now() - 3600;
+    let a = store::upsert(a, None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    // Any attempt to obtain a login route fails locally, before networking. The
+    // duplicate-credential guard must run even before that route validation.
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("workbuddy_egress.json"),
+        "invalid egress settings",
+    )
+    .unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"auth":{
+            "accessToken":"expired-import-access",
+            "refreshToken":a.credentials.refresh_token,
+            "expiresAt":a.expires_at
+        }}),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(error.contains("already saved"), "{error}");
+    assert_eq!(store::all(Provider::Qoder).unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() {
+    let _sandbox = Sandbox::new();
+    // If the duplicate guard regresses, client creation fails locally rather
+    // than letting this test contact a real Qoder endpoint.
+    let mut config = crate::models::AppConfig::default();
+    config.proxy.upstream_proxy.enabled = true;
+    config.proxy.upstream_proxy.url = "http://127.0.0.1:invalid".into();
+    crate::modules::config::save_app_config(&config).unwrap();
+    let route = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::modules::egress::login_route(
+            crate::modules::egress::Pool::Native(Provider::Qoder),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let a = account(Provider::Qoder, "concurrent-import");
+    let import = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":a.credentials.refresh_token}),
+    );
+    tokio::pin!(import);
+    // The vault is empty at the first guard; suspend at the held login lock.
+    assert!(futures::poll!(&mut import).is_pending());
+    let a = store::upsert(a, None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    drop(route);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), &mut import)
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+    assert!(error.contains("already saved"), "{error}");
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
 }

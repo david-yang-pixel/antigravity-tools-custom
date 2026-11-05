@@ -1,4 +1,5 @@
 //! Desktop and authenticated Web admin commands share the same native provider service.
+use crate::modules::egress::{self, Pool};
 use crate::modules::native_providers::{
     self as native, AccountView, Provider, Realm, Settings, SettingsView,
 };
@@ -7,6 +8,20 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 pub struct ProviderRequest {
     pub provider: Provider,
+}
+#[derive(Deserialize)]
+pub struct ClientVersionRequest {
+    pub provider: Provider,
+    #[serde(default)]
+    pub refresh: bool,
+}
+#[tauri::command]
+pub async fn check_native_client_version(
+    request: ClientVersionRequest,
+) -> Result<native::qoder::releases::ClientVersionView, String> {
+    match request.provider {
+        Provider::Qoder => Ok(native::qoder::releases::check(request.refresh).await),
+    }
 }
 #[derive(Deserialize)]
 pub struct SettingsRequest {
@@ -99,5 +114,75 @@ pub async fn update_native_account(request: AccountRequest) -> Result<AccountVie
 }
 #[tauri::command]
 pub async fn delete_native_account(request: AccountRequest) -> Result<(), String> {
-    native::store::remove(request.provider, &request.id)
+    native::store::remove(request.provider, &request.id)?;
+    egress::forget(Pool::Native(request.provider), &request.id);
+    native::http::forget(&request.id);
+    native::qoder::sign::forget(&request.id);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct EgressSaveRequest {
+    pub provider: Provider,
+    #[serde(flatten)]
+    pub update: egress::Update,
+}
+#[derive(Deserialize)]
+pub struct AccountEgressRequest {
+    pub provider: Provider,
+    pub id: String,
+    /// Node name, `DIRECT`, or null to let auto-assignment choose.
+    pub node: Option<String>,
+}
+#[tauri::command]
+pub async fn get_native_egress(request: ProviderRequest) -> Result<egress::View, String> {
+    egress::view(Pool::Native(request.provider)).await
+}
+#[tauri::command]
+pub async fn save_native_egress(request: EgressSaveRequest) -> Result<egress::View, String> {
+    egress::save(Pool::Native(request.provider), request.update).await
+}
+#[tauri::command]
+pub async fn refresh_native_egress(request: ProviderRequest) -> Result<egress::View, String> {
+    egress::refresh(Pool::Native(request.provider)).await
+}
+#[tauri::command]
+pub async fn test_native_egress_nodes(request: ProviderRequest) -> Result<egress::View, String> {
+    egress::test_nodes(Pool::Native(request.provider)).await
+}
+#[tauri::command]
+pub async fn set_native_account_egress(
+    request: AccountEgressRequest,
+) -> Result<egress::View, String> {
+    egress::set_account(Pool::Native(request.provider), &request.id, request.node).await
+}
+#[tauri::command]
+pub async fn test_native_account_egress(request: SessionRequest) -> Result<egress::Probe, String> {
+    let account = native::store::get(request.provider, &request.id)?;
+    let url = match request.provider {
+        Provider::Qoder => format!("{}/", native::qoder::gateway(account.realm)),
+    };
+    let direct_url = url.clone();
+    egress::test_account(
+        Pool::Native(request.provider),
+        &request.id,
+        &url,
+        |exit| async move {
+            let started = std::time::Instant::now();
+            native::http::client_on(&account, &exit)
+                .map_err(|e| e.to_string())?
+                .head(&direct_url)
+                .timeout(std::time::Duration::from_secs(8))
+                .send()
+                .await
+                .map(|_| started.elapsed().as_millis() as u64)
+                .map_err(|_| {
+                    format!(
+                        "{} is unreachable from this server",
+                        request.provider.name()
+                    )
+                })
+        },
+    )
+    .await
 }

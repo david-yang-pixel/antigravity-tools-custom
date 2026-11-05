@@ -1,0 +1,21 @@
+Qoder CLI compatibility resources
+
+The files in this directory were extracted without modification (native binaries
+are stored with lossless gzip compression) from @qoder-ai/qodercli version 1.1.83,
+published by Qoder AI. The upstream package distributes them with the Apache
+License, Version 2.0, reproduced in LICENSE-APACHE-2.0.
+
+Package URL, npm integrity and the SHA-256 of each file are in manifest.json.
+The WASM module's wasm-bindgen ABI is hosted by separately written Rust code;
+its cryptographic operations and protocol format are not reimplemented.
+
+The native bridge is Qoder's machine identity (UMID) component. It collects the
+machine identity and can contact the SDK's service, as in the official CLI. Its
+initialization is separate from the gateway's HTTP transport and is not covered
+by the per-account inference proxy. No real credentials or machine identities
+are included in the test fixtures. Tests do not execute these native binaries.
+
+Only the binary for the build target is embedded in the gateway executable.
+Windows x64 also embeds the companion sgsdk.dll. The official package does not
+provide a Windows ARM64 bridge. The explicit legacy setting supports rollback
+without executing a native identity bridge.
