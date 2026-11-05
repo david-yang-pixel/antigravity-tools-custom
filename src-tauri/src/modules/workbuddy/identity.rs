@@ -1,7 +1,6 @@
 //! Stable per-account client identity and schedule salt.
-//! Machine, session and device ids are random values stored with the account.
-//! They are not derived from a published salt, and every account uses one pinned
-//! product version instead of a hash-spread version range.
+//! Machine/session ids persist per account. Device tokens are opaque SDK output,
+//! never a locally generated UUID. See docs/WORKBUDDY_CLIENT_PROFILE.md for evidence.
 use super::accounts::{Account, Realm};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,10 +36,12 @@ fn legacy_machine(account_id: &str) -> String {
 fn legacy_session(account_id: &str) -> String {
     hex_id(&format!("wb2a:session:{account_id}"))
 }
+#[cfg(test)]
 fn legacy_device(account_id: &str) -> String {
     uuid_from(&format!("wb2a:device:{account_id}"))
 }
 
+#[cfg(test)]
 fn uuid_from(seed: &str) -> String {
     let d = digest(seed);
     // RFC-ish layout from hash bytes; stable across restarts, unique per account id.
@@ -65,8 +66,8 @@ fn uuid_from(seed: &str) -> String {
     )
 }
 
-pub const PRODUCT_VERSION: &str = "5.5.4";
-pub const CLI_VERSION: &str = "2.137.1";
+pub const PRODUCT_VERSION: &str = "5.6.2";
+pub const CLI_VERSION: &str = "2.147.0";
 
 pub fn pinned_user_agent(realm: Realm) -> String {
     user_agent(realm, PRODUCT_VERSION, CLI_VERSION)
@@ -87,6 +88,14 @@ fn random_id() -> String {
 /// derivation. A random id, once stored, is kept across restarts and reauthorization.
 pub fn ensure(account: &mut Account) -> bool {
     let mut changed = false;
+    let old_generated_profile = account.client.product_version == "5.5.4"
+        && account.client.cli_version == "2.137.1"
+        && account.client.user_agent == user_agent(account.realm, "5.5.4", "2.137.1");
+    if old_generated_profile {
+        account.client.product_version = PRODUCT_VERSION.into();
+        account.client.cli_version = CLI_VERSION.into();
+        changed = true;
+    }
     if account.client.machine_id.is_empty()
         || account.client.machine_id == legacy_machine(&account.id)
     {
@@ -99,19 +108,25 @@ pub fn ensure(account: &mut Account) -> bool {
         account.client.session_id = random_id();
         changed = true;
     }
-    if account.device_token.is_empty() || account.device_token == legacy_device(&account.id) {
-        account.device_token = uuid::Uuid::new_v4().to_string();
+    // Previous releases generated UUID placeholders for a native SDK risk token.
+    // Remove those recognizable placeholders; preserve opaque client-exported tokens.
+    if uuid::Uuid::parse_str(&account.device_token).is_ok() {
+        account.device_token.clear();
         changed = true;
     }
-    if account.client.product_version != PRODUCT_VERSION {
+    if account.client.product_version.is_empty() {
         account.client.product_version = PRODUCT_VERSION.into();
         changed = true;
     }
-    if account.client.cli_version != CLI_VERSION {
+    if account.client.cli_version.is_empty() {
         account.client.cli_version = CLI_VERSION.into();
         changed = true;
     }
-    let expected = pinned_user_agent(account.realm);
+    let expected = user_agent(
+        account.realm,
+        &account.client.product_version,
+        &account.client.cli_version,
+    );
     if account.client.user_agent != expected {
         account.client.user_agent = expected;
         changed = true;
@@ -162,7 +177,8 @@ mod tests {
         assert_eq!(a.client.user_agent, b.client.user_agent);
         assert_eq!(a.client.user_agent, pinned_user_agent(a.realm));
         assert_ne!(a.client.machine_id, b.client.machine_id);
-        assert_ne!(a.device_token, b.device_token);
+        assert!(a.device_token.is_empty());
+        assert!(b.device_token.is_empty());
         assert_eq!(a.client.machine_id.len(), 32);
         assert_ne!(a.client.machine_id, legacy_machine(&a.id));
         assert_ne!(a.device_token, legacy_device(&a.id));
@@ -176,6 +192,14 @@ mod tests {
         assert!(!ensure(&mut a));
         assert_eq!(a.client.machine_id, machine);
         assert_eq!(a.client.user_agent, ua);
+        a.device_token = "opaque-official-sdk-token".into();
+        a.client.product_version = "5.6.1".into();
+        a.client.cli_version = "2.146.0".into();
+        assert!(ensure(&mut a));
+        assert_eq!(a.device_token, "opaque-official-sdk-token");
+        assert!(a.client.user_agent.contains("WorkBuddy/5.6.1"));
+        assert!(a.client.user_agent.ends_with("CLI/2.146.0"));
+        assert!(!ensure(&mut a));
         assert!(checkin_minute(&a.id) >= 9 * 60 && checkin_minute(&a.id) < 21 * 60);
         assert!(activity_interval_secs(&a.id, 0) >= 7200);
         assert!(activity_interval_secs(&a.id, 2) <= 12 * 3600);

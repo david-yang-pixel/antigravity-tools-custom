@@ -1,6 +1,7 @@
 //! Native billing resources are informational; downstream RMB billing never reads them.
 use super::{
     accounts::{Account, Realm},
+    checkin::{self, Failure, Pause},
     client,
 };
 use serde::{Deserialize, Serialize};
@@ -42,23 +43,15 @@ async fn post(account: &Account, path: &str, body: &Value) -> Result<rquest::Res
         .map_err(|_| "Cannot connect to WorkBuddy account resources".into())
 }
 pub(super) fn headers(account: &Account) -> Result<rquest::header::HeaderMap, String> {
-    // Keep the per-account UA from client::headers; do not collapse every account
-    // onto one shared WorkBuddy build string for billing/activity calls.
-    let mut headers = client::headers(account.realm, Some(account))?;
-    // Billing and check-in use the single-segment product token. The chat
-    // User-Agent, including its CLI segment, stays on inference requests.
-    let version = if account.client.product_version.is_empty() {
-        super::identity::PRODUCT_VERSION
-    } else {
-        account.client.product_version.as_str()
-    };
-    headers.insert(
-        "user-agent",
-        format!("WorkBuddy/{version}")
-            .parse()
-            .map_err(|_| "Invalid WorkBuddy resource header")?,
-    );
+    // Official AuthService uses Axios, not the inference header builder. Keep
+    // billing free of chat-only session/machine/origin/CLI headers.
+    let mut headers = rquest::header::HeaderMap::new();
     for (key, value) in [
+        ("accept", "application/json"),
+        ("content-type", "application/json"),
+        ("user-agent", "axios/1.16.1"),
+        ("authorization", &format!("Bearer {}", account.access_token)),
+        ("x-user-id", account.uid.as_str()),
         ("x-enterprise-id", account.enterprise_id.as_str()),
         ("x-tenant-id", account.enterprise_id.as_str()),
         ("x-domain", account.domain.as_str()),
@@ -164,7 +157,7 @@ pub async fn credits(account: &Account) -> Result<Credits, String> {
     }
     Err("Too many WorkBuddy resource pages; refusing to display a partial balance".into())
 }
-pub async fn checkin(account: &Account) -> Result<&'static str, String> {
+pub async fn checkin(account: &Account) -> Result<&'static str, Failure> {
     if account.realm == Realm::Global {
         return Ok("unsupported");
     }
@@ -172,17 +165,31 @@ pub async fn checkin(account: &Account) -> Result<&'static str, String> {
     checkin_response(response).await
 }
 
-async fn checkin_response(response: rquest::Response) -> Result<&'static str, String> {
+async fn checkin_response(response: rquest::Response) -> Result<&'static str, Failure> {
     let status = response.status();
+    let retry_at = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| checkin::retry_at(value, super::accounts::now()));
+    let pause = match status.as_u16() {
+        401 => Some(Pause::Authorization),
+        408 | 429 | 500..=599 => None,
+        _ if status.is_success() => None,
+        _ => Some(Pause::Rejected),
+    };
     // Tencent returns HTTP 400 for an already completed daily check-in.
     // Inspect only this endpoint's bounded business response, not all HTTP errors.
-    let value = client::read_json_body(response).await.map_err(|error| {
-        if status.is_success() {
-            error
-        } else {
-            format!("WorkBuddy check-in returned HTTP {}", status.as_u16())
-        }
-    })?;
+    let value = client::read_json_body(response)
+        .await
+        .map_err(|_| Failure {
+            message: format!(
+                "WorkBuddy check-in returned HTTP {} without a valid result",
+                status.as_u16()
+            ),
+            pause,
+            retry_at,
+        })?;
     let code = value["code"]
         .as_i64()
         .or_else(|| value["code"].as_str().and_then(|v| v.parse().ok()));
@@ -201,21 +208,96 @@ async fn checkin_response(response: rquest::Response) -> Result<&'static str, St
     if status.is_success() && code == Some(0) {
         return Ok("success");
     }
+    // Unknown business rejections are not proof of a ban. Pause this optional
+    // operation for review instead of probing the endpoint until it accepts.
+    let pause = if status.is_success() {
+        Some(Pause::Rejected)
+    } else {
+        pause
+    };
     // Include safe diagnostic codes, never relay a body that could contain credentials.
-    match code {
-        Some(code) => Err(format!(
-            "WorkBuddy check-in rejected (HTTP {}, code {code})",
-            status.as_u16()
-        )),
-        None => Err(format!(
-            "WorkBuddy check-in returned HTTP {} without a result code",
-            status.as_u16()
-        )),
-    }
+    Err(Failure {
+        message: match code {
+            Some(code) => format!(
+                "WorkBuddy check-in rejected (HTTP {}, code {code})",
+                status.as_u16()
+            ),
+            None => format!(
+                "WorkBuddy check-in returned HTTP {} without a result code",
+                status.as_u16()
+            ),
+        },
+        pause,
+        retry_at,
+    })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workbuddy_billing_headers_follow_auth_service_and_do_not_inherit_chat_identity() {
+        let mut account = super::super::accounts::parse_import(json!({
+            "uid":"profile-user", "accessToken":"test-access", "auth": {"accessToken":"test-access", "deviceToken":"opaque-native-device-token"},
+            "client":{"product_version":"5.6.2", "cli_version":"2.147.0", "machine_id":"imported-machine", "session_id":"imported-session"}
+        })).unwrap();
+        super::super::identity::ensure(&mut account);
+        let billing_headers = headers(&account).unwrap();
+        assert_eq!(billing_headers["authorization"], "Bearer test-access");
+        assert_eq!(
+            billing_headers["x-device-token"],
+            "opaque-native-device-token"
+        );
+        assert_eq!(billing_headers["user-agent"], "axios/1.16.1");
+        for name in [
+            "x-machine-id",
+            "x-session-id",
+            "origin",
+            "referer",
+            "x-requested-with",
+            "x-ide-version",
+        ] {
+            assert!(
+                !billing_headers.contains_key(name),
+                "unexpected billing header {name}"
+            );
+        }
+        assert_eq!(account.client.machine_id, "imported-machine");
+        assert_eq!(account.client.session_id, "imported-session");
+        assert_eq!(account.client.product_version, "5.6.2");
+        account.device_token = uuid::Uuid::new_v4().to_string();
+        super::super::identity::ensure(&mut account);
+        assert!(!headers(&account).unwrap().contains_key("x-device-token"));
+    }
+    #[tokio::test]
+    async fn workbuddy_checkin_classifies_rejections_and_retains_retry_after_without_a_json_body() {
+        for (status, pause) in [
+            (401, Some(Pause::Authorization)),
+            (403, Some(Pause::Rejected)),
+            (400, Some(Pause::Rejected)),
+            (429, None),
+            (503, None),
+        ] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .header("retry-after", "172800")
+                .body("not JSON: secret_diagnostic")
+                .unwrap()
+                .into();
+            let before = super::super::accounts::now();
+            let failure = checkin_response(response).await.unwrap_err();
+            assert_eq!(failure.pause, pause);
+            assert!(failure.retry_at.unwrap() >= before + 172800);
+            assert!(!failure.message.contains("secret_diagnostic"));
+        }
+        let response = axum::http::Response::builder()
+            .status(200)
+            .body(json!({"code":12345,"msg":"secret_diagnostic"}).to_string())
+            .unwrap()
+            .into();
+        let failure = checkin_response(response).await.unwrap_err();
+        assert_eq!(failure.pause, Some(Pause::Rejected));
+        assert!(!failure.message.contains("secret_diagnostic"));
+    }
     #[tokio::test]
     async fn workbuddy_checkin_recognizes_already_without_hiding_real_errors() {
         for (status, body, expected) in [
@@ -256,8 +338,8 @@ mod tests {
                 Some(value) => assert_eq!(result.unwrap(), value),
                 None => {
                     let error = result.unwrap_err();
-                    assert!(error.contains(&format!("HTTP {status}")));
-                    assert!(!error.contains("secret_diagnostic"));
+                    assert!(error.message.contains(&format!("HTTP {status}")));
+                    assert!(!error.message.contains("secret_diagnostic"));
                 }
             }
         }

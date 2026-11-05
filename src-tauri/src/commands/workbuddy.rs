@@ -49,6 +49,8 @@ pub struct AccountAction {
     pub activity: Option<workbuddy::activity::Action>,
     #[serde(default)]
     pub checkin: bool,
+    #[serde(default)]
+    pub resume_checkin: bool,
 }
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -90,6 +92,9 @@ pub async fn update_workbuddy_account(request: AccountAction) -> Result<AccountV
     }
     if let Some(action) = request.activity {
         return workbuddy::activity::start(&request.id, action);
+    }
+    if request.resume_checkin {
+        return workbuddy::maintenance::resume_checkin(&request.id).await;
     }
     if request.checkin {
         return workbuddy::maintenance::run(&request.id, false, true, false).await;

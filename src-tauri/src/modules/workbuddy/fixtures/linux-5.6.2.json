@@ -1,0 +1,142 @@
+{
+  "release": {
+    "version": "5.6.2.40046327",
+    "url": "https://download.codebuddy.cn/workbuddy/saas/linux-x64-deb/WorkBuddy-linux-x64-deb-5.6.2.40046327-c7b525f3.deb",
+    "productVersion": "5.6.2.40046327",
+    "sha256hash": "12149ad8c0cd748fd5062d8f62c7827d688d8095427ada99b1ae9e7019897523",
+    "timestamp": 1790769527,
+    "hash": "",
+    "name": "",
+    "supportsFastUpdate": false
+  },
+  "runtime": {
+    "electron": "37.10.3",
+    "node": "22.21.1",
+    "chrome": "138.0.7204.251",
+    "undici": "6.22.0",
+    "openssl": "0.0.0 (Electron BoringSSL)"
+  },
+  "source_sha256": {
+    "main/tar.js": "b3c5f099bfe59551c78547a7a8d47ba3743f89313330d18953e189ecc534b65c",
+    "main/daemon-bootstrap.js": "3203e0e69909d0bd85960dffe6b5476f27cd6430b96d5bc71a40eb7708056a6b",
+    "main/index.js": "cfb8e7f5b1779829bbef14c9ca3b38d40c178e4e22b93646d9a1e89ddfd2f063",
+    "main/axios.js": "1be998e1727f66ce7ac1fed00678e8424e20e4e993c85612edcff4de9ff55743"
+  },
+  "cli_version": "2.147.0",
+  "axios_version": "1.16.1",
+  "tls": {
+    "https": {
+      "ciphers": [
+        4865,
+        4866,
+        4867,
+        49199,
+        49195,
+        49200,
+        49196,
+        49191,
+        52393,
+        52392,
+        49161,
+        49171,
+        49162,
+        49172,
+        156,
+        157,
+        47,
+        53
+      ],
+      "extensions": [
+        0,
+        23,
+        65281,
+        10,
+        11,
+        35,
+        13,
+        51,
+        45,
+        43
+      ],
+      "groups": [
+        29,
+        23,
+        24
+      ],
+      "signature_algorithms": [
+        1027,
+        2052,
+        1025,
+        1283,
+        2053,
+        1281,
+        2054,
+        1537,
+        513
+      ],
+      "versions": [
+        772,
+        771
+      ]
+    },
+    "fetch": {
+      "ciphers": [
+        4865,
+        4866,
+        4867,
+        49199,
+        49195,
+        49200,
+        49196,
+        49191,
+        52393,
+        52392,
+        49161,
+        49171,
+        49162,
+        49172,
+        156,
+        157,
+        47,
+        53
+      ],
+      "extensions": [
+        0,
+        23,
+        65281,
+        10,
+        11,
+        35,
+        16,
+        13,
+        51,
+        45,
+        43,
+        21
+      ],
+      "groups": [
+        29,
+        23,
+        24
+      ],
+      "alpn": [
+        "http/1.1"
+      ],
+      "signature_algorithms": [
+        1027,
+        2052,
+        1025,
+        1283,
+        2053,
+        1281,
+        2054,
+        1537,
+        513
+      ],
+      "versions": [
+        772,
+        771
+      ]
+    }
+  }
+}

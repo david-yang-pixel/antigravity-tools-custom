@@ -1,12 +1,14 @@
 //! Built-in WorkBuddy accounts and model routes. No external Manager is required.
 pub mod accounts;
 pub mod activity;
+pub mod checkin;
 pub mod client;
 pub mod egress;
 pub mod identity;
 pub mod login;
 pub mod maintenance;
 pub mod resources;
+pub mod transport;
 pub mod verification;
 
 use serde::{Deserialize, Serialize};

@@ -9,10 +9,14 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
 /// Connection settings shared by direct and egress clients.
-/// System and Antigravity proxies are ignored. TLS and HTTP/2 follow Chrome 123,
-/// without that profile's browser headers, so each request keeps the WorkBuddy
-/// User-Agent and identity headers supplied by the caller.
+/// Uses the captured official Electron/Node HTTP/1.1 profile. The former Chrome
+/// profile remains an explicit administrator rollback, never an automatic replay.
 pub fn builder() -> rquest::ClientBuilder {
+    if !std::env::var("ABV_WORKBUDDY_LEGACY_CHROME")
+        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+    {
+        return super::transport::builder();
+    }
     rquest::Client::builder()
         .emulation(
             rquest_util::EmulationOption::builder()
@@ -527,7 +531,8 @@ pub async fn chat(
     }
     require_leading_system(&mut payload)?;
     neutralize_system_openings(&mut payload);
-    let conversation = upstream_conversation_id(&session_key(scope, &payload));
+    let conversation =
+        upstream_conversation_id(&format!("{}:{}", account.id, session_key(scope, &payload)));
     let mut h = headers(account.realm, Some(account)).map_err(ChatError::Account)?;
     add(&mut h, "accept", "application/json, text/event-stream").map_err(ChatError::Account)?;
     let product_version = if account.client.product_version.is_empty() {
@@ -537,6 +542,9 @@ pub async fn chat(
     };
     for (name, value) in [
         ("x-agent-purpose", "conversation"),
+        ("x-agent-intent", "craft"),
+        ("x-agent-type", "main"),
+        ("x-private-data", "true"),
         ("x-ide-name", "WorkBuddy"),
         ("x-ide-type", "WorkBuddy"),
         ("x-ide-version", product_version),
@@ -544,17 +552,16 @@ pub async fn chat(
     ] {
         add(&mut h, name, value).map_err(ChatError::Account)?;
     }
+    // Official buildConversationHeaders shares one generated message/request ID.
+    let message_id = uuid::Uuid::new_v4().simple().to_string();
     for (name, value) in [
         ("x-conversation-id", conversation),
         (
             "x-conversation-request-id",
             uuid::Uuid::new_v4().simple().to_string(),
         ),
-        (
-            "x-conversation-message-id",
-            uuid::Uuid::new_v4().simple().to_string(),
-        ),
-        ("x-request-id", uuid::Uuid::new_v4().simple().to_string()),
+        ("x-conversation-message-id", message_id.clone()),
+        ("x-request-id", message_id),
         (
             "x-root-request-id",
             uuid::Uuid::new_v4().simple().to_string(),
@@ -937,8 +944,9 @@ mod tests {
                     .map(|name| headers[name].to_str().unwrap().to_owned());
                     assert_eq!(
                         ids.iter().collect::<std::collections::HashSet<_>>().len(),
-                        6
+                        5
                     );
+                    assert_eq!(ids[2], ids[3]);
                     assert_eq!(ids[0].len(), 32);
                     assert_eq!(
                         headers["accept"].to_str().unwrap(),
