@@ -13,6 +13,8 @@ use std::{
 use crate::modules::{account, custom_upstream, native_providers, workbuddy};
 use crate::utils::fs::{file_stamp, write_atomic, FileStamp};
 
+/// Upper bound of additional native IDs one publication may pool besides its primary target.
+pub const MAX_EXTRA_NATIVE_MODELS: usize = 16;
 pub const ANTIGRAVITY_SOURCE: &str = "antigravity:default";
 pub const WORKBUDDY_SOURCE: &str = "workbuddy:default";
 pub const MAX_PUBLISHED_MODELS: usize = 5_000;
@@ -66,8 +68,25 @@ pub struct PublishedModel {
     pub display_name: String,
     pub source_id: String,
     pub native_model: String,
+    /// Further native IDs of the same source pooled behind this publication; the dispatcher
+    /// treats `[native_model] + extra_native_models` as one ordered target list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_native_models: Vec<String>,
     pub enabled: bool,
     pub legacy: bool,
+}
+impl PublishedModel {
+    /// Primary native ID first, then the extra IDs in stored order.
+    pub fn native_models(&self) -> Vec<&str> {
+        std::iter::once(self.native_model.as_str())
+            .chain(self.extra_native_models.iter().map(String::as_str))
+            .collect()
+    }
+}
+/// Whether the source's dispatcher pools accounts per native model, so a publication may bind
+/// several native IDs. Antigravity and custom upstreams keep exactly one target.
+pub fn pools_native_models(source_id: &str) -> bool {
+    source_id == WORKBUDDY_SOURCE || native_providers::Provider::from_source(source_id).is_some()
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -351,6 +370,22 @@ fn validate_store(store: &StoredRegistry) -> Result<(), String> {
             || !candidates.contains(candidate_id(&model.source_id, &model.native_model).as_str())
         {
             return Err("Invalid or duplicate publication/source/target".into());
+        }
+        if !model.extra_native_models.is_empty() {
+            let mut targets = HashSet::from([model.native_model.as_str()]);
+            if !pools_native_models(&model.source_id)
+                || model.extra_native_models.len() > MAX_EXTRA_NATIVE_MODELS
+            {
+                return Err("Invalid or duplicate publication/source/target".into());
+            }
+            for extra in &model.extra_native_models {
+                validate_native(&model.source_id, extra)?;
+                if !candidates.contains(candidate_id(&model.source_id, extra).as_str())
+                    || !targets.insert(extra.as_str())
+                {
+                    return Err("Invalid or duplicate publication/source/target".into());
+                }
+            }
         }
     }
     let mut ignored = HashSet::new();
@@ -942,6 +977,7 @@ fn initialize(
                 public_id,
                 source_id,
                 native_model,
+                extra_native_models: Vec::new(),
                 enabled: true,
                 legacy: true,
             })
@@ -1283,9 +1319,6 @@ pub fn save(
     for model in &mut publications {
         model.public_id = normalized_public_id(&model.public_id).to_string();
         validate_native(&model.source_id, &model.native_model)?;
-        let candidate = candidate_views
-            .get(&candidate_id(&model.source_id, &model.native_model))
-            .ok_or("Unknown source/native candidate; discover it before publishing")?;
         let old = existing.get(model.id.as_str()).copied();
         let same_binding = old.is_some_and(|old| {
             old.public_id == model.public_id
@@ -1299,13 +1332,33 @@ pub fn save(
                     .into(),
             );
         }
-        let newly_exposed = !same_binding || old.is_some_and(|old| !old.enabled && model.enabled);
-        if newly_exposed && !grandfathered {
+        let reenabled = old.is_some_and(|old| !old.enabled && model.enabled);
+        let gate = |native: &str| -> Result<(), String> {
+            let candidate = candidate_views
+                .get(&candidate_id(&model.source_id, native))
+                .ok_or("Unknown source/native candidate; discover it before publishing")?;
             if candidate.verification_status == "unavailable" {
                 return Err("Definitively unavailable candidates cannot be newly published".into());
             }
             if candidate.verification_status != "verified" && !request.allow_unverified {
                 return Err("Publishing an unverified model requires explicit allow_unverified confirmation".into());
+            }
+            Ok(())
+        };
+        if !candidate_views.contains_key(&candidate_id(&model.source_id, &model.native_model)) {
+            return Err("Unknown source/native candidate; discover it before publishing".into());
+        }
+        if (!same_binding || reenabled) && !grandfathered {
+            gate(&model.native_model)?;
+        }
+        // The legacy exemption covers the primary target only: every extra ID bound by this
+        // save (or all of them on a new binding / re-enable) is gated like a fresh target.
+        for extra in &model.extra_native_models {
+            let unchanged = same_binding
+                && !reenabled
+                && old.is_some_and(|old| old.extra_native_models.contains(extra));
+            if !unchanged {
+                gate(extra)?;
             }
         }
     }

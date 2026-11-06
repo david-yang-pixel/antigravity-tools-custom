@@ -59,6 +59,7 @@ fn publication(public: &str, source: &str, native: &str) -> PublishedModel {
         display_name: public.into(),
         source_id: source.into(),
         native_model: native.into(),
+        extra_native_models: Vec::new(),
         enabled: true,
         legacy: false,
     }
@@ -1018,4 +1019,148 @@ fn custom_openai_upstream_is_a_source_whose_bindings_survive_and_guard_removal()
         .sources
         .iter()
         .all(|s| s.id != source));
+}
+
+fn extra(mut model: PublishedModel, extras: &[&str]) -> PublishedModel {
+    model.extra_native_models = ids(extras);
+    model
+}
+
+#[test]
+fn extra_native_ids_round_trip_and_resolve_in_order() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb("multi", &["Flash", "Flash-sg"], &["Flash", "Flash-sg"], &[]);
+    let registry = view(&[], &HashMap::new()).unwrap();
+    let mut draft = request(&registry);
+    draft.published_models.push(extra(
+        publication("Flash", WORKBUDDY_SOURCE, "Flash"),
+        &["Flash-sg"],
+    ));
+    save(draft, &[], &HashMap::new()).unwrap();
+    let resolved = resolve_existing("Flash").unwrap().unwrap();
+    assert_eq!(resolved.native_models(), vec!["Flash", "Flash-sg"]);
+    assert_eq!(
+        stored().published_models[0].extra_native_models,
+        ["Flash-sg"]
+    );
+}
+
+#[test]
+fn publications_without_extra_ids_serialize_unchanged() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb("plain", &["Flash"], &["Flash"], &[]);
+    let registry = view(&[], &HashMap::new()).unwrap();
+    let mut draft = request(&registry);
+    draft
+        .published_models
+        .push(publication("Flash", WORKBUDDY_SOURCE, "Flash"));
+    save(draft, &[], &HashMap::new()).unwrap();
+    let text = std::fs::read_to_string(registry_path().unwrap()).unwrap();
+    assert!(!text.contains("extra_native_models"));
+    assert_eq!(
+        resolve_existing("Flash").unwrap().unwrap().native_models(),
+        vec!["Flash"]
+    );
+}
+
+#[test]
+fn extra_native_ids_reject_invalid_bindings() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb(
+        "bad",
+        &["Flash", "Flash-sg", "Other"],
+        &["Flash", "Flash-sg", "Other"],
+        &[],
+    );
+    seed_ag(&["same-name", "ag-other"]);
+    let registry = view(&ids(&["same-name", "ag-other"]), &HashMap::new()).unwrap();
+    let wb = |extras: &[&str]| extra(publication("Flash", WORKBUDDY_SOURCE, "Flash"), extras);
+    let many: Vec<String> = (0..17).map(|i| format!("m{i}")).collect();
+    let cases = vec![
+        wb(&["Flash"]),
+        wb(&["Flash-sg", "Flash-sg"]),
+        wb(&["Missing"]),
+        wb(&["same-name"]),
+        extra(
+            publication("AgPub", ANTIGRAVITY_SOURCE, "same-name"),
+            &["ag-other"],
+        ),
+        PublishedModel {
+            extra_native_models: many,
+            ..wb(&[])
+        },
+    ];
+    for model in cases {
+        let mut draft = request(&registry);
+        draft.allow_unverified = true;
+        draft.published_models.push(model.clone());
+        assert!(
+            save(draft, &[], &HashMap::new()).is_err(),
+            "accepted {model:?}"
+        );
+    }
+    assert_eq!(
+        view(&[], &HashMap::new()).unwrap().revision,
+        registry.revision
+    );
+}
+
+#[test]
+fn newly_added_extra_ids_are_gated_like_targets() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb(
+        "gate",
+        &["Flash", "Denied", "Maybe"],
+        &["Flash"],
+        &["Denied"],
+    );
+    let registry = view(&[], &HashMap::new()).unwrap();
+    let publish = |extras: &[&str], allow: bool| {
+        let mut draft = request(&view(&[], &HashMap::new()).unwrap());
+        draft.allow_unverified = allow;
+        draft.published_models.push(extra(
+            publication("Flash", WORKBUDDY_SOURCE, "Flash"),
+            extras,
+        ));
+        save(draft, &[], &HashMap::new())
+    };
+    assert!(publish(&["Denied"], true)
+        .unwrap_err()
+        .contains("unavailable"));
+    assert!(publish(&["Maybe"], false)
+        .unwrap_err()
+        .contains("allow_unverified"));
+    publish(&["Maybe"], true).unwrap();
+    // Unchanged bindings are not re-gated.
+    let current = view(&[], &HashMap::new()).unwrap();
+    assert_ne!(current.revision, registry.revision);
+    save(request(&current), &[], &HashMap::new()).unwrap();
+}
+
+#[test]
+fn legacy_publication_keeps_exemption_when_an_extra_id_is_added() {
+    let _dir = Sandbox::new();
+    settings(&[("Legacy", "Flash")]);
+    seed_wb("leg", &["Flash", "Flash-sg"], &["Flash-sg"], &[]);
+    let registry = view(&ids(&["Legacy"]), &HashMap::new()).unwrap();
+    let legacy = resolve_existing("Legacy").unwrap().unwrap();
+    assert!(legacy.legacy);
+    assert_eq!(
+        find(&registry, WORKBUDDY_SOURCE, "Flash").verification_status,
+        "unverified"
+    );
+    let mut draft = request(&registry);
+    for model in &mut draft.published_models {
+        if model.public_id == "Legacy" {
+            model.extra_native_models = ids(&["Flash-sg"]);
+        }
+    }
+    save(draft, &[], &HashMap::new()).unwrap();
+    let updated = resolve_existing("Legacy").unwrap().unwrap();
+    assert!(updated.legacy);
+    assert_eq!(updated.native_models(), vec!["Flash", "Flash-sg"]);
 }

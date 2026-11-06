@@ -8,8 +8,10 @@ push main, deploy, or make real upstream inference calls during development.
 
 - Discovery, verification, and publication are independent. Newly discovered
   models never become published automatically after the initial migration.
-- A public model explicitly binds one source and one native model. Same-name
-  providers do not silently steal each other's routes.
+- A public model explicitly binds one source and an ordered list of native IDs
+  of that source: the primary `native_model` plus up to 16 `extra_native_models`
+  (WorkBuddy and native account providers only). Same-name providers do not
+  silently steal each other's routes.
 - Initial migration preserves legacy public IDs, their effective provider, and
   existing billing identity. Prices/free-model rules and balances are untouched.
 - Unpublished models are denied at inference entry points, for master and user
@@ -42,6 +44,7 @@ interface CandidateModel {
 interface PublishedModel {
   id: string; public_id: string; display_name: string;
   source_id: string; native_model: string;
+  extra_native_models?: string[]; // omitted when empty; same source, unique, != native_model
   enabled: boolean; legacy: boolean;
 }
 interface ModelRegistryView {

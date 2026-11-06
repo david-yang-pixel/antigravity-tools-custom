@@ -132,6 +132,7 @@ async fn middleware(State(settings): State<Settings>, request: Request, next: Ne
             }
             .into(),
             native_model: "claude-sonnet-4-6".into(),
+            extra_native_models: Vec::new(),
             enabled: true,
             legacy: false,
         });
@@ -1483,6 +1484,7 @@ async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alia
         display_name: "Explicit".into(),
         source_id: crate::modules::model_registry::ANTIGRAVITY_SOURCE.into(),
         native_model: "claude-sonnet-4-6".into(),
+        extra_native_models: Vec::new(),
         enabled: true,
         legacy: false,
     };
