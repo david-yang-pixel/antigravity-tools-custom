@@ -1187,7 +1187,7 @@ async fn send(streaming: bool, policy: Policy) -> Response {
         payload,
         streaming,
         "wb-sonnet",
-        "claude-sonnet-4-6",
+        &["claude-sonnet-4-6".to_owned()],
         codec::Protocol::Chat,
         &codec::Namespaced::default(),
         "scope",
@@ -1471,6 +1471,128 @@ async fn workbuddy_cache_first_probe_does_not_wait_for_its_cooling_session_accou
     let probe = hits(&script);
     assert_eq!(probe.len(), 1);
     assert!(!spent.contains(&probe[0]));
+}
+
+/// Records which native ID each account was sent, and holds the request open so two
+/// concurrent requests cannot share one account.
+async fn recording(
+    State(seen): State<std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    seen.lock().unwrap().push((
+        headers["x-user-id"].to_str().unwrap().to_owned(),
+        body["model"].as_str().unwrap().to_owned(),
+        body["messages"][1]["content"].as_str().unwrap().to_owned(),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"index":0,"delta":{"content":"served"},"finish_reason":"stop"}]}),
+            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}})
+        )))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn workbuddy_group_binding_sends_each_account_its_own_native_id() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    for (uid, native) in [
+        ("uid-cn", "claude-sonnet-4-6"),
+        ("uid-sg", "claude-sonnet-4-6-sg"),
+    ] {
+        let mut account = workbuddy::accounts::parse_import(json!({"uid":uid,"accessToken":format!("token-{uid}"),"expiresAt":workbuddy::accounts::now()+3600})).unwrap();
+        account.models.push(workbuddy::accounts::Model {
+            id: native.into(),
+            name: native.into(),
+        });
+        workbuddy::accounts::upsert(account).unwrap();
+    }
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _mock = serve(
+        Router::new()
+            .route("/v2/chat/completions", post(recording))
+            .with_state(seen.clone()),
+    )
+    .await;
+    let binding = crate::modules::model_registry::PublishedModel {
+        id: "group".into(),
+        public_id: "wb-sonnet".into(),
+        display_name: "Group".into(),
+        source_id: crate::modules::model_registry::WORKBUDDY_SOURCE.into(),
+        native_model: "claude-sonnet-4-6".into(),
+        extra_native_models: vec!["claude-sonnet-4-6-sg".into()],
+        enabled: true,
+        legacy: false,
+    };
+    let mut policy = Policy::default();
+    policy.sticky.mode = crate::proxy::sticky_config::SchedulingMode::PerformanceFirst;
+    let router = Router::new()
+        .route("/v1/chat/completions", post(|| async { "google path" }))
+        .layer(axum::middleware::from_fn(
+            move |request: Request, next: Next| {
+                let (binding, policy) = (binding.clone(), policy.clone());
+                async move { dispatch(settings(), binding, 5, policy, request, next).await }
+            },
+        ));
+    let call = |text: &'static str| {
+        let router = router.clone();
+        async move {
+            let payload = json!({"model":"wb-sonnet","messages":[{"role":"system","content":"caller"},{"role":"user","content":text}]});
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            (text, router.oneshot(request).await.unwrap())
+        }
+    };
+    let (first, second) = tokio::join!(call("one"), call("two"));
+    for (text, response) in [first, second] {
+        let status = response.status();
+        let response = {
+            let (parts, body) = response.into_parts();
+            let bytes = to_bytes(body, 100_000).await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            Response::from_parts(parts, Body::from(bytes))
+        };
+        let mapped = response.headers()["x-mapped-model"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let _ = to_bytes(response.into_body(), 100_000).await.unwrap();
+        // The header names the ID that this request's own account was sent.
+        let sent: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, sent_text)| sent_text == text)
+            .map(|(_, model, _)| model.clone())
+            .collect();
+        assert_eq!(sent, vec![mapped]);
+    }
+    let mut seen: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(uid, model, _)| (uid.clone(), model.clone()))
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("uid-cn".to_owned(), "claude-sonnet-4-6".to_owned()),
+            ("uid-sg".to_owned(), "claude-sonnet-4-6-sg".to_owned()),
+        ]
+    );
 }
 
 #[tokio::test]

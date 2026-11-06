@@ -84,8 +84,13 @@ async fn dispatch(
         return next.run(request).await;
     }
     let path = request.uri().path().to_owned();
+    // Owned before public_id moves out; the primary ID comes first.
+    let targets: Vec<String> = published
+        .native_models()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     let alias = published.public_id;
-    let target = published.native_model;
     if !settings.enabled {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -153,7 +158,7 @@ async fn dispatch(
         payload,
         streaming,
         &alias,
-        &target,
+        &targets,
         protocol,
         &namespaced,
         scope,
@@ -237,7 +242,7 @@ async fn forward(
     payload: Value,
     streaming: bool,
     alias: &str,
-    target: &str,
+    targets: &[String],
     protocol: codec::Protocol,
     namespaced: &codec::Namespaced,
     scope: &str,
@@ -248,26 +253,30 @@ async fn forward(
     let session = workbuddy::client::session_key(scope, &payload);
     // A model the upstream is rate-limiting across accounts is held here, before it can
     // spend another account. The probe guard (if any) lives until this request ends.
-    let probe = match workbuddy::accounts::scheduling::admit_models(&[target], &policy) {
-        Ok(admitted) => admitted.probe,
-        Err(limited) => return model_limited(target, &limited),
+    let all: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let wanted = targets.join(", ");
+    let admitted = match workbuddy::accounts::scheduling::admit_models(&all, &policy) {
+        Ok(admitted) => admitted,
+        Err(limited) => return model_limited(&wanted, &limited),
     };
+    let probe = admitted.probe;
+    let admitted: Vec<&str> = admitted.targets.iter().map(String::as_str).collect();
     let admission = if probe.is_some() {
         policy.for_probe()
     } else {
         policy.clone()
     };
     let mut lease =
-        match workbuddy::accounts::scheduling::acquire(&[target], &session, &admission, timeout)
+        match workbuddy::accounts::scheduling::acquire(&admitted, &session, &admission, timeout)
             .await
         {
             Ok(lease) => lease,
             Err(message) => {
                 // Every account cooling for this model is a rate limit, not an outage.
                 if let Some(limited) =
-                    workbuddy::accounts::scheduling::hold_cooling_models(&[target], &policy)
+                    workbuddy::accounts::scheduling::hold_cooling_models(&all, &policy)
                 {
-                    return model_limited(target, &limited);
+                    return model_limited(&wanted, &limited);
                 }
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -282,8 +291,7 @@ async fn forward(
     loop {
         tried.push(lease.account.id.clone());
         let failure = match attempt(
-            lease, &payload, streaming, alias, target, protocol, namespaced, scope, &policy,
-            deadline,
+            lease, &payload, streaming, alias, protocol, namespaced, scope, &policy, deadline,
         )
         .await
         {
@@ -302,10 +310,7 @@ async fn forward(
         }
         failovers += 1;
         lease = match workbuddy::accounts::scheduling::try_acquire_excluding(
-            &[target],
-            &session,
-            &policy,
-            &tried,
+            &admitted, &session, &policy, &tried,
         ) {
             Ok(Some(next)) => next,
             _ => return failure.response,
@@ -325,13 +330,15 @@ async fn attempt(
     payload: &Value,
     streaming: bool,
     alias: &str,
-    target: &str,
     protocol: codec::Protocol,
     namespaced: &codec::Namespaced,
     scope: &str,
     policy: &Policy,
     deadline: tokio::time::Instant,
 ) -> Result<Response, Failure> {
+    // The native ID this account was leased for; the alias and billing stay public.
+    let target = lease.model().to_owned();
+    let target = target.as_str();
     let account = match workbuddy::accounts::fresh_before(&lease.account.id, deadline).await {
         Ok(Ok(account)) if account.enabled => account,
         Ok(Ok(_)) => {
