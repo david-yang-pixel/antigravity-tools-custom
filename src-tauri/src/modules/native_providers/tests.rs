@@ -119,6 +119,7 @@ fn qoder_catalog_uses_official_free_metadata_and_keeps_disabled_models_unavailab
 #[test]
 fn free_models_with_zero_credits_keep_concurrency_and_failure_cooldowns() {
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     for status in [401, 429] {
         let mut a = account(Provider::Qoder, &format!("free-account-{status}"));
         a.models = qoder::parse_models(&json!({"chat":[
@@ -220,14 +221,33 @@ fn scheduler_rotates_limits_concurrency_and_skips_cooling_or_exhausted_accounts(
     let _sandbox = Sandbox::new();
     let a = store::upsert(account(Provider::Qoder, "a"), None).unwrap();
     let b = store::upsert(account(Provider::Qoder, "b"), None).unwrap();
-    let mut first = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
-    assert_eq!(first.account.id, a.id);
-    let second = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
-    assert_eq!(second.account.id, b.id);
+    let mut leases: Vec<_> = (0..10)
+        .map(|_| accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap())
+        .collect();
+    assert_eq!(leases[0].account.id, a.id);
+    assert_eq!(leases[1].account.id, b.id);
+    assert_eq!(
+        leases
+            .iter()
+            .filter(|lease| lease.account.id == a.id)
+            .count(),
+        5
+    );
+    assert_eq!(
+        leases
+            .iter()
+            .filter(|lease| lease.account.id == b.id)
+            .count(),
+        5
+    );
     assert!(accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).is_err());
+    drop(leases.pop());
+    let replacement = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
+    leases.push(replacement);
+    let mut first = leases.remove(0);
     first.failure(429);
     drop(first);
-    drop(second);
+    drop(leases);
     let next = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
     assert_eq!(next.account.id, b.id);
     drop(next);
@@ -369,6 +389,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     use crate::proxy::sticky_config::{AccountSchedulingPolicy as Policy, SchedulingMode};
     use std::time::Duration;
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     store::upsert(account(Provider::Qoder, "wait-a"), None).unwrap();
     store::upsert(account(Provider::Qoder, "wait-b"), None).unwrap();
     let mut policy = Policy::default();
@@ -487,6 +508,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
 async fn native_fixed_account_never_silently_falls_back() {
     use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     let a = store::upsert(account(Provider::Qoder, "fixed-a"), None).unwrap();
     let b = store::upsert(account(Provider::Qoder, "fixed-b"), None).unwrap();
     store::save_settings(
@@ -575,6 +597,7 @@ async fn native_fixed_account_never_silently_falls_back() {
 async fn native_breaker_and_resets_follow_the_global_manager() {
     use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     let a = store::upsert(account(Provider::Qoder, "breaker-qoder"), None).unwrap();
     let manager = crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
     manager
@@ -679,6 +702,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
 #[tokio::test]
 async fn model_tests_respect_source_disablement_and_in_flight_permits() {
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     let account = store::upsert(account(Provider::Qoder, "probe-user"), None).unwrap();
     let lease = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
     assert!(crate::proxy::upstream::native::probe(

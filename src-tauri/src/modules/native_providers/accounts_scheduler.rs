@@ -92,8 +92,8 @@ pub fn try_acquire(
     let limit = std::env::var(provider.env("MAX_CONCURRENCY"))
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1)
-        .clamp(1, 8);
+        .unwrap_or(5)
+        .clamp(1, MAX_ACCOUNT_CONCURRENCY);
     let key = format!(
         "{}:{}:{model}:{session}",
         crate::modules::account::get_data_dir()?.display(),
