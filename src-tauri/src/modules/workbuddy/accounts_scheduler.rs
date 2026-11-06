@@ -50,55 +50,62 @@ pub fn clear_cooldowns(account_id: Option<&str>) -> bool {
 }
 
 /// None means eligible accounts exist but are busy or cooling down.
+///
+/// `targets` are the native IDs one publication routes to, in binding order. Accounts
+/// supporting any of them form one pool; the lease carries the first target the chosen
+/// account supports and can schedule.
 pub(super) fn try_acquire(
-    model: &str,
+    targets: &[&str],
     session: &str,
     policy: &Policy,
 ) -> Result<Option<Lease>, String> {
-    try_acquire_inner(model, session, policy, false, &[])
+    try_acquire_inner(targets, session, policy, false, &[])
 }
 
 /// Failover for a request whose earlier accounts failed before generation. It never
 /// waits, skips `excluded` (so a session bound to a failed account cannot pin it, even
 /// with the breaker off) and rebinds the session to the account it picks.
 pub fn try_acquire_excluding(
-    model: &str,
+    targets: &[&str],
     session: &str,
     policy: &Policy,
     excluded: &[String],
 ) -> Result<Option<Lease>, String> {
-    try_acquire_inner(model, session, policy, false, excluded)
+    try_acquire_inner(targets, session, policy, false, excluded)
+}
+
+/// Real requests skip models verification found unavailable; explicit verification
+/// (`probe`) may retry any model in the account's catalog.
+fn supports(account: &Account, model: &str, probe: bool) -> bool {
+    if probe {
+        account.models.iter().any(|m| m.id == model)
+    } else {
+        account.supports_model(model)
+    }
 }
 
 fn eligible(
-    model: &str,
+    targets: &[&str],
     policy: &Policy,
     probe: bool,
     excluded: &[String],
 ) -> Result<Vec<Account>, String> {
     Ok(all()?
         .into_iter()
-        .filter(|a| {
-            a.enabled
-                && if probe {
-                    a.models.iter().any(|m| m.id == model)
-                } else {
-                    a.supports_model(model)
-                }
-        })
+        .filter(|a| a.enabled && targets.iter().any(|t| supports(a, t, probe)))
         .filter(|a| policy.preferred.as_ref().is_none_or(|id| &a.id == id))
         .filter(|a| !excluded.contains(&a.id))
         .collect())
 }
 
 fn try_acquire_inner(
-    model: &str,
+    targets: &[&str],
     session: &str,
     policy: &Policy,
     probe: bool,
     excluded: &[String],
 ) -> Result<Option<Lease>, String> {
-    let accounts = eligible(model, policy, probe, excluded)?;
+    let accounts = eligible(targets, policy, probe, excluded)?;
     if accounts.is_empty() {
         return Err("No eligible WorkBuddy account for this model; check the fixed account, enablement and fetch verified models".into());
     }
@@ -108,7 +115,7 @@ fn try_acquire_inner(
         .map_err(|_| "WorkBuddy sessions unavailable")?;
     let now = now();
     sessions.retain(|_, binding| now.saturating_sub(binding.touched) < 3600);
-    let session_key = format!("{}:{model}:{session}", path()?.display());
+    let session_key = format!("{}:{}:{session}", path()?.display(), targets.join(","));
     let sticky = policy.sticky.mode != SchedulingMode::PerformanceFirst && !session.is_empty();
     if !sticky {
         sessions.remove(&session_key);
@@ -123,26 +130,35 @@ fn try_acquire_inner(
     for account in accounts {
         let key = runtime_key(&account.id)?;
         let entry = pool.entry(key.clone()).or_default();
-        let available =
-            entry.in_flight < 2 && (!policy.breaker.enabled || entry.schedulable(model, now));
+        // The first target, in binding order, this account supports and can schedule.
+        // Ranking below ignores which target matched: the group is one equal pool.
+        let pick = targets
+            .iter()
+            .copied()
+            .find(|t| {
+                supports(&account, t, probe)
+                    && (!policy.breaker.enabled || entry.schedulable(t, now))
+            })
+            .filter(|_| entry.in_flight < 2);
         if bound.as_ref() == Some(&account.id)
-            && !available
+            && pick.is_none()
             && policy.sticky.mode == SchedulingMode::CacheFirst
         {
             return Ok(None);
         }
-        if available {
+        if let Some(pick) = pick {
             candidates.push((
                 bound.as_ref() != Some(&account.id),
                 entry.in_flight,
                 entry.last_used,
                 account,
                 key,
+                pick,
             ));
         }
     }
-    candidates.sort_by_key(|(unbound, load, last, _, _)| (*unbound, *load, *last));
-    let Some((_, _, _, account, key)) = candidates.into_iter().next() else {
+    candidates.sort_by_key(|(unbound, load, last, _, _, _)| (*unbound, *load, *last));
+    let Some((_, _, _, account, key, model)) = candidates.into_iter().next() else {
         return Ok(None);
     };
     let next = pool
@@ -247,8 +263,61 @@ impl Drop for ModelProbe {
     }
 }
 
+/// What a request may dispatch to after its targets pass their model circuits.
+#[derive(Debug)]
+pub struct Admission {
+    /// Targets still admitted, in binding order.
+    pub targets: Vec<String>,
+    /// Set when the only admitted target is a half-open circuit's probe; release it
+    /// when the request ends.
+    pub probe: Option<ModelProbe>,
+}
+
+/// Admission for a publication's targets before any account is leased. Held targets are
+/// dropped. Healthy targets win over half-open ones, so no probe is spent while a healthy
+/// target exists; otherwise the first half-open target goes through as the probe. When
+/// every target is held, the shortest hold is reported.
+pub fn admit_models(targets: &[&str], policy: &Policy) -> Result<Admission, ModelLimited> {
+    let mut healthy = Vec::new();
+    let mut probe = None;
+    let mut held: Option<ModelLimited> = None;
+    for target in targets {
+        match admit_model(target, policy) {
+            Ok(None) => healthy.push((*target).to_owned()),
+            // Probe guards after the first drop here, releasing their probe slot at once.
+            Ok(Some(guard)) => {
+                probe.get_or_insert(((*target).to_owned(), guard));
+            }
+            Err(limited) => {
+                if held
+                    .as_ref()
+                    .is_none_or(|h| limited.retry_after < h.retry_after)
+                {
+                    held = Some(limited);
+                }
+            }
+        }
+    }
+    if healthy.is_empty() {
+        if let Some((target, guard)) = probe {
+            return Ok(Admission {
+                targets: vec![target],
+                probe: Some(guard),
+            });
+        }
+        if let Some(limited) = held {
+            return Err(limited);
+        }
+    }
+    // Any probe guard taken above drops here, so a healthy target never spends a probe.
+    Ok(Admission {
+        targets: healthy,
+        probe: None,
+    })
+}
+
 /// Admission for a model before any account is leased. `Ok(Some(_))` marks the probe.
-pub fn admit_model(model: &str, policy: &Policy) -> Result<Option<ModelProbe>, ModelLimited> {
+fn admit_model(model: &str, policy: &Policy) -> Result<Option<ModelProbe>, ModelLimited> {
     if !policy.breaker.enabled {
         return Ok(None);
     }
@@ -294,7 +363,7 @@ pub fn record_model_limit(
         return None;
     }
     // A pool of one has nobody left to try, so its first rejection is already model-wide.
-    let threshold = eligible(model, policy, false, &[])
+    let threshold = eligible(&[model], policy, false, &[])
         .map(|accounts| accounts.len())
         .unwrap_or(0)
         .clamp(1, STRIKE_ACCOUNTS);
@@ -345,11 +414,11 @@ pub fn record_model_limit(
 /// its circuit until the first account frees up, so callers get a 429 with Retry-After
 /// rather than a 503, and a half-open circuit does not keep admitting a probe that has
 /// no account to go to. Accounts that are only busy are not a rate limit: `None`.
-pub fn hold_cooling_model(model: &str, policy: &Policy) -> Option<ModelLimited> {
+fn hold_cooling_model(model: &str, policy: &Policy) -> Option<ModelLimited> {
     if !policy.breaker.enabled {
         return None;
     }
-    let accounts = eligible(model, policy, false, &[]).ok()?;
+    let accounts = eligible(&[model], policy, false, &[]).ok()?;
     if accounts.is_empty() {
         return None;
     }
@@ -394,6 +463,20 @@ pub fn hold_cooling_model(model: &str, policy: &Policy) -> Option<ModelLimited> 
     })
 }
 
+/// `hold_cooling_model` for a publication's targets: the request is rate-limited only
+/// when every target is. Each target is evaluated, so every cooling target is held on
+/// its own circuit; the shortest hold is reported.
+pub fn hold_cooling_models(targets: &[&str], policy: &Policy) -> Option<ModelLimited> {
+    let held: Vec<_> = targets
+        .iter()
+        .map(|target| hold_cooling_model(target, policy))
+        .collect();
+    held.into_iter()
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .min_by_key(|limited| limited.retry_after)
+}
+
 #[cfg(test)]
 pub(crate) fn expire_model_circuits() {
     if let Ok(mut circuits) = CIRCUITS.lock() {
@@ -423,7 +506,7 @@ pub async fn acquire_probe(account: &Account, model: &str) -> Result<Lease, Stri
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(lease) = try_acquire_inner(model, "", &policy, true, &[])? {
+        if let Some(lease) = try_acquire_inner(&[model], "", &policy, true, &[])? {
             if lease.account.revision != account.revision {
                 return Err("WorkBuddy credentials changed while waiting to verify models".into());
             }
@@ -437,7 +520,7 @@ pub async fn acquire_probe(account: &Account, model: &str) -> Result<Lease, Stri
 }
 
 pub async fn acquire(
-    model: &str,
+    targets: &[&str],
     session: &str,
     policy: &Policy,
     timeout: u64,
@@ -453,7 +536,7 @@ pub async fn acquire(
         let notified = CHANGED.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if let Some(lease) = try_acquire(model, session, policy)? {
+        if let Some(lease) = try_acquire(targets, session, policy)? {
             return Ok(lease);
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -473,14 +556,191 @@ mod tests {
     use serde_json::json;
 
     fn seed(uid: &str) -> String {
+        seed_with(uid, &["model"])
+    }
+
+    fn seed_with(uid: &str, models: &[&str]) -> String {
         let mut account =
             parse_import(json!({"uid": uid, "accessToken": "test", "expiresAt": now()+3600}))
                 .unwrap();
-        account.models.push(Model {
-            id: "model".into(),
-            name: "Model".into(),
-        });
+        for id in models {
+            account.models.push(Model {
+                id: (*id).into(),
+                name: (*id).into(),
+            });
+        }
         upsert(account).unwrap().id
+    }
+
+    fn cool(id: &str, model: &str, until: i64) {
+        RUNTIME
+            .lock()
+            .unwrap()
+            .entry(runtime_key(id).unwrap())
+            .or_default()
+            .models
+            .insert(
+                model.into(),
+                super::super::ModelCooldown {
+                    until,
+                    reason: "limited".into(),
+                    consecutive: 1,
+                },
+            );
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_pools_accounts_with_different_native_ids() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let cn = seed_with("cn", &["flash"]);
+        let global = seed_with("global", &["flash-sg"]);
+        let mut policy = Policy::default();
+        policy.sticky.mode = SchedulingMode::PerformanceFirst;
+        let group = ["flash", "flash-sg"];
+        let first = acquire(&group, "session", &policy, 5).await.unwrap();
+        let second = acquire(&group, "session", &policy, 5).await.unwrap();
+        let mut picked = vec![
+            (first.account.id.clone(), first.model().to_owned()),
+            (second.account.id.clone(), second.model().to_owned()),
+        ];
+        picked.sort();
+        let mut expected = vec![(cn, "flash".to_owned()), (global, "flash-sg".to_owned())];
+        expected.sort();
+        assert_eq!(picked, expected);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_prefers_first_target_on_accounts_listing_both() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        seed_with("a", &["flash", "flash-sg"]);
+        let policy = Policy::default();
+        for _ in 0..3 {
+            let lease = acquire(&["flash", "flash-sg"], "", &policy, 5)
+                .await
+                .unwrap();
+            assert_eq!(lease.model(), "flash");
+        }
+        // Binding order decides, not the account's catalog order.
+        let lease = acquire(&["flash-sg", "flash"], "", &policy, 5)
+            .await
+            .unwrap();
+        assert_eq!(lease.model(), "flash-sg");
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_rate_limit_on_one_target_keeps_the_other() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let id = seed_with("a", &["flash", "flash-sg"]);
+        let policy = Policy::default();
+        let lease = acquire(&["flash", "flash-sg"], "", &policy, 5)
+            .await
+            .unwrap();
+        assert_eq!(lease.model(), "flash");
+        lease.model_failure("limited", 60);
+        drop(lease);
+        let lease = acquire(&["flash", "flash-sg"], "", &policy, 5)
+            .await
+            .unwrap();
+        assert_eq!(lease.account.id, id);
+        assert_eq!(lease.model(), "flash-sg");
+        drop(lease);
+        assert!(try_acquire(&["flash"], "", &policy).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn workbuddy_single_target_session_key_is_unchanged() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        seed("a");
+        seed("b");
+        let policy = Policy::default();
+        let first = acquire(&["model"], "session", &policy, 5).await.unwrap();
+        let id = first.account.id.clone();
+        drop(first);
+        let key = format!("{}:model:session", path().unwrap().display());
+        assert_eq!(
+            SESSIONS
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|b| b.account_id.clone()),
+            Some(id.clone())
+        );
+        let same = acquire(&["model"], "session", &policy, 5).await.unwrap();
+        assert_eq!(same.account.id, id);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_admission_skips_held_targets_and_reports_min_retry() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed_with("a", &["flash", "flash-sg"]);
+        let b = seed_with("b", &["flash", "flash-sg"]);
+        let policy = Policy::default();
+        let group = ["flash", "flash-sg"];
+        let admission = admit_models(&group, &policy).unwrap();
+        assert_eq!(admission.targets, group);
+        assert!(admission.probe.is_none());
+        record_model_limit("flash", &a, "code 1", 120, &policy);
+        assert_eq!(
+            record_model_limit("flash", &b, "code 1", 120, &policy),
+            Some(120)
+        );
+        let admission = admit_models(&group, &policy).unwrap();
+        assert_eq!(admission.targets, ["flash-sg"]);
+        assert!(admission.probe.is_none());
+        record_model_limit("flash-sg", &a, "code 2", 60, &policy);
+        assert_eq!(
+            record_model_limit("flash-sg", &b, "code 2", 60, &policy),
+            Some(60)
+        );
+        let limited = admit_models(&group, &policy).unwrap_err();
+        assert!((59..=60).contains(&limited.retry_after));
+        assert_eq!(limited.reason, "code 2");
+        assert_eq!(limited.accounts, 2);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_half_open_probe_only_when_no_healthy_target() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed_with("a", &["flash", "flash-sg"]);
+        let b = seed_with("b", &["flash", "flash-sg"]);
+        let policy = Policy::default();
+        let group = ["flash", "flash-sg"];
+        for model in group {
+            record_model_limit(model, &a, "code 1", 60, &policy);
+            record_model_limit(model, &b, "code 1", 60, &policy);
+        }
+        expire_model_circuits();
+        // Both half-open: the first target is the probe, the other is not spent.
+        let admission = admit_models(&group, &policy).unwrap();
+        assert_eq!(admission.targets, ["flash"]);
+        assert!(admission.probe.is_some());
+        let solo = admit_models(&["flash-sg"], &policy).unwrap();
+        assert!(solo.probe.is_some());
+        drop(solo);
+        drop(admission);
+        // A healthy target admits without spending a probe on the half-open one.
+        model_accepted("flash-sg");
+        let admission = admit_models(&group, &policy).unwrap();
+        assert_eq!(admission.targets, ["flash-sg"]);
+        assert!(admission.probe.is_none());
+        assert!(admit_model("flash", &policy).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_hold_requires_every_target_cooling() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed_with("a", &["flash"]);
+        let b = seed_with("b", &["flash-sg"]);
+        let policy = Policy::default();
+        cool(&a, "flash", now() + 300);
+        // Every target is evaluated, so the cooling one is held on its circuit even
+        // though another target still has a free account.
+        assert!(hold_cooling_models(&["flash-sg", "flash"], &policy).is_none());
+        assert!(admit_model("flash", &policy).is_err());
+        assert!(hold_cooling_models(&["flash", "flash-sg"], &policy).is_none());
+        cool(&b, "flash-sg", now() + 90);
+        let limited = hold_cooling_models(&["flash", "flash-sg"], &policy).unwrap();
+        assert!((89..=90).contains(&limited.retry_after));
     }
 
     #[tokio::test]
@@ -489,36 +749,36 @@ mod tests {
         seed("a");
         seed("b");
         let mut policy = Policy::default();
-        let first = acquire("model", "user-a:conversation", &policy, 5)
+        let first = acquire(&["model"], "user-a:conversation", &policy, 5)
             .await
             .unwrap();
         let id = first.account.id.clone();
         drop(first);
-        let same = acquire("model", "user-a:conversation", &policy, 5)
+        let same = acquire(&["model"], "user-a:conversation", &policy, 5)
             .await
             .unwrap();
         assert_eq!(same.account.id, id);
-        let other_user = acquire("model", "user-b:conversation", &policy, 5)
+        let other_user = acquire(&["model"], "user-b:conversation", &policy, 5)
             .await
             .unwrap();
         assert_ne!(other_user.account.id, id);
         drop(other_user);
         same.failure("limited", 60);
         drop(same);
-        let fallback = acquire("model", "user-a:conversation", &policy, 5)
+        let fallback = acquire(&["model"], "user-a:conversation", &policy, 5)
             .await
             .unwrap();
         assert_ne!(fallback.account.id, id);
         drop(fallback);
         clear_cooldowns(None);
         policy.sticky.mode = SchedulingMode::PerformanceFirst;
-        let a = acquire("model", "same", &policy, 5)
+        let a = acquire(&["model"], "same", &policy, 5)
             .await
             .unwrap()
             .account
             .id
             .clone();
-        let b = acquire("model", "same", &policy, 5)
+        let b = acquire(&["model"], "same", &policy, 5)
             .await
             .unwrap()
             .account
@@ -535,36 +795,36 @@ mod tests {
         let mut policy = Policy::default();
         policy.sticky.mode = SchedulingMode::CacheFirst;
         policy.sticky.max_wait_seconds = 1;
-        let first = acquire("model", "session", &policy, 5).await.unwrap();
+        let first = acquire(&["model"], "session", &policy, 5).await.unwrap();
         let id = first.account.id.clone();
-        let second = acquire("model", "session", &policy, 5).await.unwrap();
+        let second = acquire(&["model"], "session", &policy, 5).await.unwrap();
         assert_eq!(id, second.account.id);
         let release = async {
             tokio::time::sleep(Duration::from_millis(30)).await;
             drop(first);
         };
-        let (result, _) = tokio::join!(acquire("model", "session", &policy, 5), release);
+        let (result, _) = tokio::join!(acquire(&["model"], "session", &policy, 5), release);
         assert_eq!(result.as_ref().unwrap().account.id, id);
         drop(result);
         drop(second);
-        let limited = acquire("model", "session", &policy, 5).await.unwrap();
+        let limited = acquire(&["model"], "session", &policy, 5).await.unwrap();
         limited.failure("limited", 60);
         drop(limited);
         let started = tokio::time::Instant::now();
-        assert!(acquire("model", "session", &policy, 5).await.is_err());
+        assert!(acquire(&["model"], "session", &policy, 5).await.is_err());
         assert!(started.elapsed() >= Duration::from_millis(900));
         assert!(started.elapsed() < Duration::from_secs(3));
         policy.sticky.max_wait_seconds = 0;
         assert!(tokio::time::timeout(
             Duration::from_millis(100),
-            acquire("model", "session", &policy, 5)
+            acquire(&["model"], "session", &policy, 5)
         )
         .await
         .unwrap()
         .is_err());
         clear_sessions();
         assert_ne!(
-            acquire("model", "session", &policy, 5)
+            acquire(&["model"], "session", &policy, 5)
                 .await
                 .unwrap()
                 .account
@@ -583,11 +843,11 @@ mod tests {
             ..Default::default()
         };
         policy.breaker.backoff_steps = vec![2, 10];
-        let lease = acquire("model", "session", &policy, 5).await.unwrap();
+        let lease = acquire(&["model"], "session", &policy, 5).await.unwrap();
         assert_eq!(lease.account.id, id);
         lease.failure("first", 1);
         drop(lease);
-        assert!(acquire("model", "session", &policy, 5).await.is_err());
+        assert!(acquire(&["model"], "session", &policy, 5).await.is_err());
         // Expire the first cooldown without resetting the failure count.
         RUNTIME
             .lock()
@@ -595,7 +855,7 @@ mod tests {
             .get_mut(&runtime_key(&id).unwrap())
             .unwrap()
             .cooldown_until = 0;
-        let lease = acquire("model", "session", &policy, 5).await.unwrap();
+        let lease = acquire(&["model"], "session", &policy, 5).await.unwrap();
         lease.failure("second", 1);
         drop(lease);
         assert!(
@@ -610,16 +870,16 @@ mod tests {
         let manager =
             crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
         manager.clear_all_rate_limits();
-        assert!(acquire("model", "session", &policy, 5).await.is_ok());
+        assert!(acquire(&["model"], "session", &policy, 5).await.is_ok());
         policy.breaker.enabled = false;
-        let lease = acquire("model", "session", &policy, 5).await.unwrap();
+        let lease = acquire(&["model"], "session", &policy, 5).await.unwrap();
         lease.failure("no breaker", 60);
         drop(lease);
-        assert!(acquire("model", "session", &policy, 5).await.is_ok());
+        assert!(acquire(&["model"], "session", &policy, 5).await.is_ok());
         set_enabled(&id, false).unwrap();
-        assert!(acquire("model", "session", &policy, 5).await.is_err());
+        assert!(acquire(&["model"], "session", &policy, 5).await.is_err());
         remove(&id).unwrap();
-        assert!(acquire("model", "session", &policy, 5).await.is_err());
+        assert!(acquire(&["model"], "session", &policy, 5).await.is_err());
     }
 
     #[tokio::test]
@@ -636,12 +896,12 @@ mod tests {
         }
         let id = upsert(account).unwrap().id;
         let policy = Policy::default();
-        let lease = acquire("model", "", &policy, 5).await.unwrap();
+        let lease = acquire(&["model"], "", &policy, 5).await.unwrap();
         assert_eq!(lease.model_failure("limited", 60), 60);
         drop(lease);
         // The limited model has no account left, the other model keeps its account.
-        assert!(acquire("model", "", &policy, 5).await.is_err());
-        let other = acquire("other", "", &policy, 5).await.unwrap();
+        assert!(acquire(&["model"], "", &policy, 5).await.is_err());
+        let other = acquire(&["other"], "", &policy, 5).await.unwrap();
         assert_eq!(other.account.id, id);
         drop(other);
         let view = list().unwrap().remove(0);
@@ -662,21 +922,21 @@ mod tests {
             .get_mut("model")
             .unwrap()
             .until = 0;
-        let lease = acquire("model", "", &policy, 5).await.unwrap();
+        let lease = acquire(&["model"], "", &policy, 5).await.unwrap();
         assert_eq!(lease.model_failure("limited", 60), 300);
         drop(lease);
         assert!(clear_cooldowns(None));
-        let lease = acquire("model", "", &policy, 5).await.unwrap();
+        let lease = acquire(&["model"], "", &policy, 5).await.unwrap();
         lease.success();
         drop(lease);
         assert!(list().unwrap()[0].model_cooldowns.is_empty());
         // With the breaker off nothing is cooled.
         let mut off = Policy::default();
         off.breaker.enabled = false;
-        let lease = acquire("model", "", &off, 5).await.unwrap();
+        let lease = acquire(&["model"], "", &off, 5).await.unwrap();
         assert_eq!(lease.model_failure("limited", 60), 0);
         drop(lease);
-        assert!(acquire("model", "", &policy, 5).await.is_ok());
+        assert!(acquire(&["model"], "", &policy, 5).await.is_ok());
     }
 
     #[tokio::test]
@@ -770,18 +1030,18 @@ mod tests {
         assert!((89..=90).contains(&admit_model("model", &policy).unwrap_err().retry_after));
         // Busy is not a rate limit, nor is an account-wide cooldown alone.
         clear_cooldowns(None);
-        let first = acquire("model", "", &policy, 5).await.unwrap();
-        let second = acquire("model", "", &policy, 5).await.unwrap();
-        let third = acquire("model", "", &policy, 5).await.unwrap();
-        let fourth = acquire("model", "", &policy, 5).await.unwrap();
-        assert!(acquire("model", "", &policy, 5).await.is_err());
+        let first = acquire(&["model"], "", &policy, 5).await.unwrap();
+        let second = acquire(&["model"], "", &policy, 5).await.unwrap();
+        let third = acquire(&["model"], "", &policy, 5).await.unwrap();
+        let fourth = acquire(&["model"], "", &policy, 5).await.unwrap();
+        assert!(acquire(&["model"], "", &policy, 5).await.is_err());
         assert!(hold_cooling_model("model", &policy).is_none());
         first.failure("down", 60);
         second.failure("down", 60);
         third.failure("down", 60);
         fourth.failure("down", 60);
         drop((first, second, third, fourth));
-        assert!(acquire("model", "", &policy, 5).await.is_err());
+        assert!(acquire(&["model"], "", &policy, 5).await.is_err());
         assert!(hold_cooling_model("model", &policy).is_none());
         // With the breaker off nothing is held.
         clear_cooldowns(None);

@@ -992,6 +992,11 @@ impl Drop for Lease {
     }
 }
 impl Lease {
+    /// The native model this lease was admitted for: the first of the request's targets
+    /// the account supports and can schedule.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
     pub fn success(&self) {
         if self
             .finished
@@ -1081,7 +1086,7 @@ impl Lease {
 #[cfg(test)]
 pub fn acquire(model: &str) -> Result<Lease, String> {
     scheduling::try_acquire(
-        model,
+        &[model],
         "",
         &scheduling::Policy {
             sticky: crate::proxy::sticky_config::StickySessionConfig {
