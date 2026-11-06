@@ -25,6 +25,25 @@ pub(crate) fn error_response(status: StatusCode, code: &str, message: &str) -> R
         .into_response()
 }
 
+/// Keeps the monitor's captured upstream body naming the native ID actually sent. The
+/// body is stamped and re-serialized only when `model` differs from the last capture
+/// recorded in `captured` (start with an empty string to capture unconditionally).
+pub(crate) fn recapture(
+    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
+    captured: &mut String,
+    model: &str,
+    payload: &serde_json::Value,
+) {
+    if captured != model {
+        if let Some(capture) = capture {
+            let mut body = payload.clone();
+            body["model"] = serde_json::json!(model);
+            capture.set_value(&body);
+        }
+        *captured = model.to_owned();
+    }
+}
+
 /// The registry binding admitted for this request. Normally inserted by the model
 /// registry middleware; resolved here only when a provider layer runs without it.
 pub(crate) async fn published_request(

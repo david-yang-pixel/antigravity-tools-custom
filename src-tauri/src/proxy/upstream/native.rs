@@ -70,10 +70,11 @@ pub async fn route(
     if let Err(e) = representable(provider, &payload) {
         return failed(e);
     }
-    if let Some(capture) = parts
+    let capture = parts
         .extensions
         .get::<crate::proxy::monitor::UpstreamRequestBodyHolder>()
-    {
+        .cloned();
+    if let Some(capture) = &capture {
         capture.set_value(&payload);
     }
     let scope = parts
@@ -83,13 +84,19 @@ pub async fn route(
         .unwrap_or("administrator");
     let session = SessionManager::account_session_key(scope, &payload);
     let policy = AccountSchedulingPolicy::live(&state.token_manager, None).await;
-    let (events, account) = match open(
+    let targets: Vec<String> = published
+        .native_models()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let (events, account, native_model) = match open(
         provider,
-        &published.native_model,
+        &targets,
         payload,
         Duration::from_secs(state.request_timeout.clamp(1, 3600)),
         &session,
         &policy,
+        capture.as_ref(),
     )
     .await
     {
@@ -103,7 +110,7 @@ pub async fn route(
             "x-account-email",
             format!("{}@{}", account.id, provider.key()),
         ),
-        ("x-mapped-model", published.native_model),
+        ("x-mapped-model", native_model),
     ] {
         if let Ok(value) = HeaderValue::from_str(&value) {
             headers.insert(key, value);
@@ -295,14 +302,24 @@ fn dispatch_failure(error: DispatchFailure, upstream_answered: bool) -> (Failure
         },
     )
 }
+/// The request body for one attempt names the native ID leased for that account.
+fn attempt_payload(payload: &Value, model: &str) -> Value {
+    let mut attempt = payload.clone();
+    attempt["model"] = json!(model);
+    attempt
+}
 async fn open(
     provider: Provider,
-    model: &str,
+    targets: &[String],
     payload: Value,
     timeout: Duration,
     session: &str,
     policy: &AccountSchedulingPolicy,
-) -> Result<(Events, Account), Failure> {
+    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
+) -> Result<(Events, Account, String), Failure> {
+    // `dispatch` captured the body stamped with the primary ID.
+    let mut captured = targets.first().cloned().unwrap_or_default();
+    let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut excluded = HashSet::new();
     let mut last = None;
@@ -316,7 +333,7 @@ async fn open(
             &failover_policy
         };
         let mut lease = match accounts::scheduling::acquire(
-            provider, model, session, admission, &excluded, deadline,
+            provider, &targets, session, admission, &excluded, deadline,
         )
         .await
         {
@@ -346,7 +363,10 @@ async fn open(
         if remaining.is_zero() {
             return Err(Failure::new(504, "Native upstream request timed out"));
         }
-        let mut response = send(&lease.account, model, payload.clone(), remaining).await;
+        let model = lease.model.clone();
+        let attempt = attempt_payload(&payload, &model);
+        super::recapture(capture, &mut captured, &model, &attempt);
+        let mut response = send(&lease.account, &model, attempt.clone(), remaining).await;
         let upstream_answered = response
             .as_ref()
             .is_ok_and(|r| matches!(r.status().as_u16(), 401 | 403));
@@ -359,7 +379,7 @@ async fn open(
                     if remaining.is_zero() {
                         return Err(Failure::new(504, "Native upstream request timed out"));
                     }
-                    response = send(&lease.account, model, payload.clone(), remaining).await;
+                    response = send(&lease.account, &model, attempt.clone(), remaining).await;
                 }
                 Ok(Err(error)) => {
                     // The upstream already answered 401/403 for this account.
@@ -430,7 +450,7 @@ async fn open(
                 }
             }
         };
-        return Ok((guarded.boxed(), account));
+        return Ok((guarded.boxed(), account, model));
     }
     Err(last
         .unwrap_or_else(|| Failure::new(429, "All eligible accounts are temporarily unavailable")))
@@ -516,6 +536,38 @@ pub async fn probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attempt_payload_names_the_leased_native_id_without_touching_the_original() {
+        let original = json!({"model":"shared-model","messages":[]});
+        let attempt = attempt_payload(&original, "shared-model-sg");
+        assert_eq!(attempt["model"], "shared-model-sg");
+        assert_eq!(attempt["messages"], original["messages"]);
+        assert_eq!(original["model"], "shared-model");
+    }
+    #[test]
+    fn monitor_capture_follows_the_native_id_actually_sent() {
+        let capture = crate::proxy::monitor::UpstreamRequestBodyHolder::new();
+        let mut captured = "shared-model".to_owned();
+        let original = json!({"model":"shared-model","messages":[]});
+        crate::proxy::upstream::recapture(Some(&capture), &mut captured, "shared-model", &original);
+        assert_eq!(
+            capture.take(),
+            None,
+            "same ID keeps the dispatch-time capture"
+        );
+        let attempt = attempt_payload(&original, "shared-model-sg");
+        crate::proxy::upstream::recapture(
+            Some(&capture),
+            &mut captured,
+            "shared-model-sg",
+            &attempt,
+        );
+        let body: Value = serde_json::from_str(&capture.take().unwrap()).unwrap();
+        assert_eq!(body["model"], "shared-model-sg");
+        assert_eq!(captured, "shared-model-sg");
+        crate::proxy::upstream::recapture(None, &mut captured, "shared-model", &original);
+        assert_eq!(captured, "shared-model");
+    }
     #[test]
     fn native_session_identity_is_shared_across_protocols_and_isolates_users() {
         let requests = [

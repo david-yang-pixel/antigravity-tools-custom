@@ -27,6 +27,40 @@ parallel-call field. Requests with `response_format` / Responses `text.format`,
 tools are offered are rejected with 400 before account selection instead of running
 unconstrained; `tool_choice: none` is honored by sending no tools.
 
+## Binding China and Global IDs to one public name
+
+China and Global accounts often list different native IDs for the same model (for
+example `shared-model` and `shared-model-sg`). Bind them to one public name so
+clients request a single ID:
+
+- The first ID is the primary `native_model`; the rest go in `extra_native_models`.
+  All bound IDs share one account pool, scheduled by the existing policy with no
+  preference between them.
+- Each request is sent with the native ID of the selected account: an account must
+  list that ID in its model catalog. An account listing several bound IDs uses the
+  first one in the order above. Free-model and exhausted-quota checks apply per ID.
+- Billing, statistics and the exposed model name always use the public ID, never a
+  native ID. `x-mapped-model` reports the native ID actually sent.
+- Headless configuration: add the same JSON field to the published entry, either by
+  editing `model_registry.json` or by submitting it through the admin API
+  `save_model_registry` (`POST /api/model-registry`). Without the field, files and
+  behavior are unchanged.
+- Rollback and downgrade: remove the extra IDs (save the publication without them)
+  to use only the primary ID. **Clear every publication's extra IDs before
+  downgrading to a version that does not know the field**: an older build rejects a
+  `model_registry.json` containing `extra_native_models`, the registry fails to load
+  and all inference requests are refused. Registries that never used the field are
+  unaffected.
+
+```json
+{
+  "public_id": "qoder-model",
+  "source_id": "qoder:default",
+  "native_model": "shared-model",
+  "extra_native_models": ["shared-model-sg"]
+}
+```
+
 ## Maintenance and rotation
 
 - Enabled accounts follow the global **API Proxy → Account Rotation & Scheduling**
