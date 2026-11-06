@@ -332,6 +332,54 @@ fn validate_result(result: &ModelVerificationResult) -> Result<(), String> {
     }
     Ok(())
 }
+/// Checks a publication's extra native IDs against the candidates `known` (by candidate
+/// ID). Each failure names its cause, since headless administrators only see this text.
+/// A publication without extras always passes, whatever its source.
+fn validate_extra_native_models(
+    model: &PublishedModel,
+    known: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if model.extra_native_models.is_empty() {
+        return Ok(());
+    }
+    let publication = if valid_id(&model.public_id, MAX_ID_BYTES) {
+        format!("Publication {}", model.public_id)
+    } else {
+        "A publication".to_string()
+    };
+    let source = &model.source_id;
+    if !pools_native_models(source) {
+        return Err(format!(
+            "{publication}: source {source} binds exactly one native ID; extra native IDs need a source that pools accounts per native ID"
+        ));
+    }
+    let count = model.extra_native_models.len();
+    if count > MAX_EXTRA_NATIVE_MODELS {
+        return Err(format!(
+            "{publication} binds {count} extra native IDs; at most {MAX_EXTRA_NATIVE_MODELS} are allowed"
+        ));
+    }
+    let mut targets = HashSet::from([model.native_model.as_str()]);
+    for extra in &model.extra_native_models {
+        validate_native(source, extra)?;
+        if extra == &model.native_model {
+            return Err(format!(
+                "{publication}: extra native ID {extra} repeats the primary native ID"
+            ));
+        }
+        if !targets.insert(extra.as_str()) {
+            return Err(format!(
+                "{publication}: extra native ID {extra} is listed more than once"
+            ));
+        }
+        if !known(&candidate_id(source, extra)) {
+            return Err(format!(
+                "{publication}: extra native ID {extra} is not a discovered model of source {source}; discover it first, and bind only IDs of the publication's own source"
+            ));
+        }
+    }
+    Ok(())
+}
 fn validate_store(store: &StoredRegistry) -> Result<(), String> {
     if store.schema_version != SCHEMA_VERSION {
         return Err("Unsupported model registry schema version".into());
@@ -371,22 +419,7 @@ fn validate_store(store: &StoredRegistry) -> Result<(), String> {
         {
             return Err("Invalid or duplicate publication/source/target".into());
         }
-        if !model.extra_native_models.is_empty() {
-            let mut targets = HashSet::from([model.native_model.as_str()]);
-            if !pools_native_models(&model.source_id)
-                || model.extra_native_models.len() > MAX_EXTRA_NATIVE_MODELS
-            {
-                return Err("Invalid or duplicate publication/source/target".into());
-            }
-            for extra in &model.extra_native_models {
-                validate_native(&model.source_id, extra)?;
-                if !candidates.contains(candidate_id(&model.source_id, extra).as_str())
-                    || !targets.insert(extra.as_str())
-                {
-                    return Err("Invalid or duplicate publication/source/target".into());
-                }
-            }
-        }
+        validate_extra_native_models(model, |id| candidates.contains(id))?;
     }
     let mut ignored = HashSet::new();
     for id in &store.ignored_candidate_ids {
@@ -1348,6 +1381,7 @@ pub fn save(
         if !candidate_views.contains_key(&candidate_id(&model.source_id, &model.native_model)) {
             return Err("Unknown source/native candidate; discover it before publishing".into());
         }
+        validate_extra_native_models(model, |id| candidate_views.contains_key(id))?;
         if (!same_binding || reenabled) && !grandfathered {
             gate(&model.native_model)?;
         }

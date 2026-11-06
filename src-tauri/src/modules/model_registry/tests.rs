@@ -1069,43 +1069,67 @@ fn publications_without_extra_ids_serialize_unchanged() {
 fn extra_native_ids_reject_invalid_bindings() {
     let _dir = Sandbox::new();
     view(&[], &HashMap::new()).unwrap();
-    seed_wb(
-        "bad",
-        &["Flash", "Flash-sg", "Other"],
-        &["Flash", "Flash-sg", "Other"],
-        &[],
-    );
+    // Seventeen valid candidates, so only the cap can reject the oversized binding.
+    let many: Vec<String> = (0..=MAX_EXTRA_NATIVE_MODELS)
+        .map(|i| format!("m{i}"))
+        .collect();
+    let mut natives = vec!["Flash", "Flash-sg", "Other"];
+    natives.extend(many.iter().map(String::as_str));
+    seed_wb("bad", &natives, &natives, &[]);
     seed_ag(&["same-name", "ag-other"]);
     let registry = view(&ids(&["same-name", "ag-other"]), &HashMap::new()).unwrap();
     let wb = |extras: &[&str]| extra(publication("Flash", WORKBUDDY_SOURCE, "Flash"), extras);
-    let many: Vec<String> = (0..17).map(|i| format!("m{i}")).collect();
     let cases = vec![
-        wb(&["Flash"]),
-        wb(&["Flash-sg", "Flash-sg"]),
-        wb(&["Missing"]),
-        wb(&["same-name"]),
-        extra(
-            publication("AgPub", ANTIGRAVITY_SOURCE, "same-name"),
-            &["ag-other"],
+        (
+            wb(&["Flash"]),
+            "extra native ID Flash repeats the primary native ID",
         ),
-        PublishedModel {
-            extra_native_models: many,
-            ..wb(&[])
-        },
+        (
+            wb(&["Flash-sg", "Flash-sg"]),
+            "extra native ID Flash-sg is listed more than once",
+        ),
+        (
+            wb(&["Missing"]),
+            "extra native ID Missing is not a discovered model of source workbuddy:default",
+        ),
+        (
+            wb(&["same-name"]),
+            "extra native ID same-name is not a discovered model of source workbuddy:default",
+        ),
+        (
+            extra(
+                publication("AgPub", ANTIGRAVITY_SOURCE, "same-name"),
+                &["ag-other"],
+            ),
+            "source antigravity:default binds exactly one native ID",
+        ),
+        (
+            PublishedModel {
+                extra_native_models: many.clone(),
+                ..wb(&[])
+            },
+            "binds 17 extra native IDs; at most 16 are allowed",
+        ),
     ];
-    for model in cases {
+    for (model, expected) in cases {
         let mut draft = request(&registry);
         draft.allow_unverified = true;
         draft.published_models.push(model.clone());
-        assert!(
-            save(draft, &[], &HashMap::new()).is_err(),
-            "accepted {model:?}"
-        );
+        let error = save(draft, &[], &HashMap::new()).unwrap_err();
+        assert!(error.contains(expected), "{model:?}: {error}");
     }
     assert_eq!(
         view(&[], &HashMap::new()).unwrap().revision,
         registry.revision
     );
+    // Exactly at the cap is accepted.
+    let mut draft = request(&registry);
+    draft.allow_unverified = true;
+    draft.published_models.push(PublishedModel {
+        extra_native_models: many[..MAX_EXTRA_NATIVE_MODELS].to_vec(),
+        ..wb(&[])
+    });
+    save(draft, &[], &HashMap::new()).unwrap();
 }
 
 #[test]
