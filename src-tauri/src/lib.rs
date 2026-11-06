@@ -821,6 +821,7 @@ pub fn run() {
             commands::model_registry::discover_upstream_models,
             commands::model_registry::verify_model_candidates,
             commands::workbuddy::get_workbuddy_settings,
+            commands::workbuddy::check_workbuddy_client_version,
             commands::workbuddy::save_workbuddy_settings,
             commands::custom_upstream::get_custom_upstreams,
             commands::custom_upstream::save_custom_upstreams,

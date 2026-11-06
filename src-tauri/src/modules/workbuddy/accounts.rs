@@ -84,6 +84,7 @@ pub struct AccountView {
     pub last_error: Option<String>,
     pub status: String,
     pub in_flight: usize,
+    pub client_profile: super::identity::ProfileView,
     pub management: super::maintenance::Management,
     pub health: Health,
     pub cooldown_until: i64,
@@ -337,6 +338,7 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         })
         .unwrap_or_default();
     model_cooldowns.sort_by(|a, b| a.model.cmp(&b.model));
+    let client_profile = super::identity::profile_view(&account);
     Ok(AccountView {
         id: account.id,
         uid: account.uid,
@@ -350,6 +352,7 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         last_error: account.last_error,
         status: status.into(),
         in_flight: entry.map(|e| e.in_flight).unwrap_or(0),
+        client_profile,
         management: account.management,
         health: entry.map(|e| e.health.clone()).unwrap_or_default(),
         cooldown_until: entry.map(|e| e.cooldown_until).unwrap_or(0),

@@ -1,5 +1,50 @@
 use crate::modules::workbuddy::{self, SettingsUpdate, SettingsView};
 
+#[derive(serde::Deserialize)]
+pub struct ClientVersionRequest {
+    #[serde(default)]
+    pub target: workbuddy::releases::Target,
+    #[serde(default)]
+    pub refresh: bool,
+}
+#[derive(serde::Serialize)]
+pub struct ClientVersionView {
+    #[serde(flatten)]
+    pub release: workbuddy::releases::ReleaseStatus,
+    pub bundled_version: &'static str,
+    pub bundled_cli_version: &'static str,
+    pub legacy_transport: bool,
+}
+#[tauri::command]
+pub async fn check_workbuddy_client_version(
+    request: ClientVersionRequest,
+) -> Result<ClientVersionView, String> {
+    use std::sync::OnceLock;
+    static CHECKER: OnceLock<workbuddy::releases::ReleaseChecker> = OnceLock::new();
+    let proxy = crate::modules::config::load_app_config()?
+        .proxy
+        .upstream_proxy;
+    let proxy_url = if proxy.enabled {
+        proxy.url.trim().to_owned()
+    } else {
+        String::new()
+    };
+    Ok(ClientVersionView {
+        release: CHECKER
+            .get_or_init(|| {
+                workbuddy::releases::ReleaseChecker::new(
+                    workbuddy::identity::PRODUCT_RELEASE,
+                    workbuddy::releases::Target::default(),
+                )
+            })
+            .check(request.target, &proxy_url, request.refresh)
+            .await,
+        bundled_version: workbuddy::identity::PRODUCT_VERSION,
+        bundled_cli_version: workbuddy::identity::CLI_VERSION,
+        legacy_transport: workbuddy::transport::legacy_enabled(),
+    })
+}
+
 #[tauri::command]
 pub async fn get_workbuddy_settings() -> Result<SettingsView, String> {
     tokio::task::spawn_blocking(workbuddy::view)

@@ -9,6 +9,7 @@ export interface WorkBuddyAccount {
     candidate_model_count?: number; models_verified_at?: number;
     status: string; in_flight: number; cooldown_until: number; cooldown_reason: string | null;
     model_cooldowns?: { model: string; until: number; reason: string }[];
+    client_profile?: { product_version: string; cli_version: string; matches_verified_version: boolean };
     health: { successes: number; failures: number; consecutive_failures: number; last_success_at: number; last_failure_at: number; last_error: string | null };
     management: {
         managed: boolean; auto_checkin: boolean; keepalive: boolean;
@@ -107,6 +108,7 @@ export default function WorkBuddyAccountRow({ account, now, busy, onChange, onRe
         {expanded && <tr id={detailId} className="border-b border-gray-100 bg-gray-50/70 dark:border-gray-800 dark:bg-gray-800/30"><td colSpan={8} className="px-5 py-4">
             <dl className="grid grid-cols-2 gap-x-8 gap-y-4 text-xs lg:grid-cols-4">
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.account_id')}</dt><dd className="mt-1 break-all font-mono">{account.uid}</dd></div>
+                {account.client_profile && <div><dt className="text-gray-500">{t('workbuddy.clientVersion.accountTitle')}</dt><dd className="mt-1">WorkBuddy {account.client_profile.product_version} · CLI {account.client_profile.cli_version}</dd>{!account.client_profile.matches_verified_version && <dd className="mt-1 text-amber-700 dark:text-amber-400">{t('workbuddy.clientVersion.accountMismatch')}</dd>}</div>}
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.expires')}</dt><dd className="mt-1">{account.expires_at > 0 ? date(account.expires_at) : t('workbuddy.accounts.unknown_expiry')}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.last_keepalive')}</dt><dd className="mt-1">{date(m.last_keepalive_at)}</dd></div>
                 <div><dt className="text-gray-500">{t('workbuddy.accounts.next_sync')}</dt><dd className="mt-1">{m.managed && account.enabled ? m.next_sync_at > now / 1000 ? date(m.next_sync_at) : t('workbuddy.accounts.scheduled') : t('workbuddy.accounts.status_disabled')}</dd></div>

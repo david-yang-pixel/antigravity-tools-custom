@@ -2215,6 +2215,34 @@
     "success": "Thinking block cache cleared successfully and will rebuild automatically."
   },
   "workbuddy": {
+    "clientVersion": {
+      "title": "WorkBuddy client version",
+      "region": "Release region",
+      "platform": "Release platform",
+      "latest": "Official latest for this channel: {{version}}",
+      "baseline": "Validated baseline: {{target}} · WorkBuddy {{version}} · CLI {{cli}}",
+      "checking": "Checking",
+      "failed": "Check failed",
+      "available": "Official update available; compatibility review needed",
+      "current": "No higher version found",
+      "unknown": "Not checked yet",
+      "unverified": "This distribution is not validated",
+      "check": "Check official version",
+      "hint": "Checks official releases by region and platform. New releases need compatibility validation; checking does not change account versions, protocols or installed components.",
+      "checkedAt": "Last successful check: {{time}}",
+      "failureHint": "Could not query the official release. The last successful result is retained; check the network or upstream proxy and retry.",
+      "legacy": "The Chrome compatibility fallback is active. Matching version numbers do not confirm transport alignment.",
+      "mismatches": "{{count}} account(s) use a different request version combination. Review their account details.",
+      "accountTitle": "Request client version",
+      "accountMismatch": "This version combination differs from the validated baseline. Compatibility is unverified.",
+      "platforms": {
+        "linux-x64-deb": "Linux x64 (DEB)",
+        "linux-arm64-deb": "Linux ARM64 (DEB)",
+        "darwin-x64": "macOS Intel",
+        "darwin-arm64": "macOS Apple Silicon",
+        "win32-x64-user": "Windows x64"
+      }
+    },
     "unverified_target": "Select a WorkBuddy model from the current account catalog.",
     "pending_verification": "Not verified (existing calls remain enabled)",
     "fetch_models": "Fetch available models",

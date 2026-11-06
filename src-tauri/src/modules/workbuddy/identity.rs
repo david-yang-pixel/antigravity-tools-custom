@@ -67,7 +67,37 @@ fn uuid_from(seed: &str) -> String {
 }
 
 pub const PRODUCT_VERSION: &str = "5.6.2";
+pub const PRODUCT_RELEASE: &str = "5.6.2.40046327";
 pub const CLI_VERSION: &str = "2.147.0";
+
+#[derive(Serialize)]
+pub struct ProfileView {
+    pub product_version: String,
+    pub cli_version: String,
+    /// Version/UA consistency only, not an assertion about account authorization or SDK proof.
+    pub matches_verified_version: bool,
+}
+pub fn profile_view(account: &Account) -> ProfileView {
+    let product = if account.client.product_version.is_empty() {
+        PRODUCT_VERSION
+    } else {
+        &account.client.product_version
+    };
+    let cli = if account.client.cli_version.is_empty() {
+        CLI_VERSION
+    } else {
+        &account.client.cli_version
+    };
+    let matches_verified_version = product == PRODUCT_VERSION
+        && cli == CLI_VERSION
+        && (account.client.user_agent.is_empty()
+            || account.client.user_agent == user_agent(account.realm, product, cli));
+    ProfileView {
+        product_version: product.into(),
+        cli_version: cli.into(),
+        matches_verified_version,
+    }
+}
 
 pub fn pinned_user_agent(realm: Realm) -> String {
     user_agent(realm, PRODUCT_VERSION, CLI_VERSION)
@@ -176,6 +206,12 @@ mod tests {
         assert!(!ensure(&mut a));
         assert_eq!(a.client.user_agent, b.client.user_agent);
         assert_eq!(a.client.user_agent, pinned_user_agent(a.realm));
+        assert!(profile_view(&a).matches_verified_version);
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/linux-5.6.2.json")).unwrap();
+        assert_eq!(fixture["release"]["version"], PRODUCT_RELEASE);
+        assert_eq!(PRODUCT_RELEASE.rsplit_once('.').unwrap().0, PRODUCT_VERSION);
+        assert_eq!(fixture["cli_version"], CLI_VERSION);
         assert_ne!(a.client.machine_id, b.client.machine_id);
         assert!(a.device_token.is_empty());
         assert!(b.device_token.is_empty());
@@ -199,6 +235,7 @@ mod tests {
         assert_eq!(a.device_token, "opaque-official-sdk-token");
         assert!(a.client.user_agent.contains("WorkBuddy/5.6.1"));
         assert!(a.client.user_agent.ends_with("CLI/2.146.0"));
+        assert!(!profile_view(&a).matches_verified_version);
         assert!(!ensure(&mut a));
         assert!(checkin_minute(&a.id) >= 9 * 60 && checkin_minute(&a.id) < 21 * 60);
         assert!(activity_interval_secs(&a.id, 0) >= 7200);

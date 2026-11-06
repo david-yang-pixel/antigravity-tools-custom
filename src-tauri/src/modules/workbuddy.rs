@@ -7,6 +7,7 @@ pub mod egress;
 pub mod identity;
 pub mod login;
 pub mod maintenance;
+pub mod releases;
 pub mod resources;
 pub mod transport;
 pub mod verification;

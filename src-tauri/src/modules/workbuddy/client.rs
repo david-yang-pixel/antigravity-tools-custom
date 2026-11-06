@@ -12,9 +12,7 @@ use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 /// Uses the captured official Electron/Node HTTP/1.1 profile. The former Chrome
 /// profile remains an explicit administrator rollback, never an automatic replay.
 pub fn builder() -> rquest::ClientBuilder {
-    if !std::env::var("ABV_WORKBUDDY_LEGACY_CHROME")
-        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-    {
+    if !super::transport::legacy_enabled() {
         return super::transport::builder();
     }
     rquest::Client::builder()
