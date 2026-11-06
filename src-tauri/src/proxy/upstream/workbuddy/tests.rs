@@ -1192,6 +1192,7 @@ async fn send(streaming: bool, policy: Policy) -> Response {
         &codec::Namespaced::default(),
         "scope",
         policy,
+        None,
     )
     .await
 }
@@ -1800,6 +1801,7 @@ async fn send_group(text: &str, policy: Policy) -> Response {
         &codec::Namespaced::default(),
         "scope",
         policy,
+        None,
     )
     .await
 }
@@ -1864,4 +1866,50 @@ async fn workbuddy_group_open_circuit_with_cooling_sibling_answers_429_not_503()
     assert_eq!(code, "workbuddy_model_rate_limited");
     let wait: i64 = retry_after.unwrap().parse().unwrap();
     assert!((1..=cooled.min(120)).contains(&wait), "{wait}");
+}
+
+#[tokio::test]
+async fn workbuddy_monitor_capture_names_the_native_id_actually_sent() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let mut account = workbuddy::accounts::parse_import(json!({"uid":"uid-sg","accessToken":"token-sg","expiresAt":workbuddy::accounts::now()+3600})).unwrap();
+    account.models.push(workbuddy::accounts::Model {
+        id: "claude-sonnet-4-6-sg".into(),
+        name: "claude-sonnet-4-6-sg".into(),
+    });
+    workbuddy::accounts::upsert(account).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _mock = serve(
+        Router::new()
+            .route("/v2/chat/completions", post(recording))
+            .with_state(seen.clone()),
+    )
+    .await;
+    let binding = crate::modules::model_registry::PublishedModel {
+        id: "group".into(),
+        public_id: "claude-sonnet-4-6".into(),
+        display_name: "Group".into(),
+        source_id: crate::modules::model_registry::WORKBUDDY_SOURCE.into(),
+        native_model: "claude-sonnet-4-6".into(),
+        extra_native_models: vec!["claude-sonnet-4-6-sg".into()],
+        enabled: true,
+        legacy: false,
+    };
+    let router =
+        Router::new()
+            .route("/v1/chat/completions", post(|| async { "google path" }))
+            .layer(axum::middleware::from_fn(
+                move |request: Request, next: Next| {
+                    let binding = binding.clone();
+                    async move {
+                        dispatch(settings(), binding, 5, Policy::default(), request, next).await
+                    }
+                },
+            ));
+    let capture = crate::proxy::monitor::UpstreamRequestBodyHolder::new();
+    let mut request = request("/v1/chat/completions", "claude-sonnet-4-6", false);
+    request.extensions_mut().insert(capture.clone());
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&capture.take().unwrap()).unwrap();
+    assert_eq!(body["model"], "claude-sonnet-4-6-sg");
 }

@@ -142,12 +142,10 @@ async fn dispatch(
             )
         }
     };
-    if let Some(capture) = parts
+    let capture = parts
         .extensions
         .get::<crate::proxy::monitor::UpstreamRequestBodyHolder>()
-    {
-        capture.set_value(&payload);
-    }
+        .cloned();
     let scope = parts
         .extensions
         .get::<crate::proxy::middleware::auth::UserTokenIdentity>()
@@ -163,6 +161,7 @@ async fn dispatch(
         &namespaced,
         scope,
         policy,
+        capture.as_ref(),
     )
     .await
 }
@@ -247,7 +246,14 @@ async fn forward(
     namespaced: &codec::Namespaced,
     scope: &str,
     policy: Policy,
+    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
 ) -> Response {
+    // Captured with the primary ID first, so a request that never leases still records a
+    // body; each lease re-captures only when it switches to another native ID.
+    let mut captured = String::new();
+    if let Some(primary) = targets.first() {
+        super::recapture(capture, &mut captured, primary, &payload);
+    }
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.clamp(1, 3600));
     let session = workbuddy::client::session_key(scope, &payload);
@@ -292,6 +298,7 @@ async fn forward(
             }
         };
     workbuddy::accounts::scheduling::settle_probe(&mut probe, &mut admitted, lease.model());
+    super::recapture(capture, &mut captured, lease.model(), &payload);
     let mut tried = Vec::new();
     let mut failovers = 0usize;
     loop {
@@ -322,6 +329,7 @@ async fn forward(
             _ => return failure.response,
         };
         workbuddy::accounts::scheduling::settle_probe(&mut probe, &mut admitted, lease.model());
+        super::recapture(capture, &mut captured, lease.model(), &payload);
         tracing::warn!(
             "WorkBuddy account failed before generation (HTTP {}); retrying on another account",
             failure.response.status().as_u16()

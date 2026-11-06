@@ -308,21 +308,6 @@ fn attempt_payload(payload: &Value, model: &str) -> Value {
     attempt["model"] = json!(model);
     attempt
 }
-/// Keeps the monitor's captured upstream body naming the native ID actually sent. The
-/// body is re-serialized only when an attempt switches to a different ID than `captured`.
-fn recapture(
-    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
-    captured: &mut String,
-    model: &str,
-    attempt: &Value,
-) {
-    if captured != model {
-        if let Some(capture) = capture {
-            capture.set_value(attempt);
-        }
-        *captured = model.to_owned();
-    }
-}
 async fn open(
     provider: Provider,
     targets: &[String],
@@ -380,7 +365,7 @@ async fn open(
         }
         let model = lease.model.clone();
         let attempt = attempt_payload(&payload, &model);
-        recapture(capture, &mut captured, &model, &attempt);
+        super::recapture(capture, &mut captured, &model, &attempt);
         let mut response = send(&lease.account, &model, attempt.clone(), remaining).await;
         let upstream_answered = response
             .as_ref()
@@ -564,18 +549,23 @@ mod tests {
         let capture = crate::proxy::monitor::UpstreamRequestBodyHolder::new();
         let mut captured = "shared-model".to_owned();
         let original = json!({"model":"shared-model","messages":[]});
-        recapture(Some(&capture), &mut captured, "shared-model", &original);
+        crate::proxy::upstream::recapture(Some(&capture), &mut captured, "shared-model", &original);
         assert_eq!(
             capture.take(),
             None,
             "same ID keeps the dispatch-time capture"
         );
         let attempt = attempt_payload(&original, "shared-model-sg");
-        recapture(Some(&capture), &mut captured, "shared-model-sg", &attempt);
+        crate::proxy::upstream::recapture(
+            Some(&capture),
+            &mut captured,
+            "shared-model-sg",
+            &attempt,
+        );
         let body: Value = serde_json::from_str(&capture.take().unwrap()).unwrap();
         assert_eq!(body["model"], "shared-model-sg");
         assert_eq!(captured, "shared-model-sg");
-        recapture(None, &mut captured, "shared-model", &original);
+        crate::proxy::upstream::recapture(None, &mut captured, "shared-model", &original);
         assert_eq!(captured, "shared-model");
     }
     #[test]
