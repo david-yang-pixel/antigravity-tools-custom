@@ -183,3 +183,37 @@ test('non-secure headless Web origins can create publication drafts without rand
         else delete globalThis.crypto;
     }
 });
+
+test('extra target options stay within the source and hide ignored or unavailable candidates', () => {
+    const registry = view({ candidates: [candidate('c1', wb.id, 'a'), candidate('c2', wb.id, 'a-sg'), candidate('c3', wb.id, 'a-ignored', { ignored: true }), candidate('c4', wb.id, 'a-denied', { verification_status: 'unavailable' }), candidate('c5', ag.id, 'a-sg')] });
+    const draft = publication('p', wb.id, 'a', 'alias');
+    assert.deepEqual(logic.extraTargetOptions(registry, draft).map(c => c.native_model), ['a-sg']);
+    assert.deepEqual(logic.extraTargetOptions(registry, { ...draft, extra_native_models: ['a-denied'] }).map(c => c.native_model), ['a-denied', 'a-sg']);
+});
+
+test('pooled sources are workbuddy and qoder only', () => {
+    const qoder = { ...ag, id: 'qoder:default', provider_type: 'qoder' };
+    const registry = view({ sources: [ag, wb, qoder] });
+    assert.equal(logic.pooledSource(registry, wb.id), true);
+    assert.equal(logic.pooledSource(registry, ag.id), false);
+    assert.equal(logic.pooledSource(registry, qoder.id), true);
+    assert.equal(logic.pooledSource(registry, 'missing'), false);
+    assert.deepEqual(logic.nativeTargets(publication('p', wb.id, 'a', 'x', { extra_native_models: ['b'] })), ['a', 'b']);
+    assert.deepEqual(logic.nativeTargets(publication('p', wb.id, 'a', 'x')), ['a']);
+});
+
+test('newly added extra ids are gated like the primary', () => {
+    const base = publication('p', wb.id, 'a', 'alias');
+    const registry = view({ candidates: [candidate('c1', wb.id, 'a', { verification_status: 'verified' }), candidate('c2', wb.id, 'b'), candidate('c3', wb.id, 'd', { verification_status: 'unavailable' })], published_models: [base] });
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [{ ...base }]), false);
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [{ ...base, extra_native_models: ['b'] }]), true);
+    assert.equal(logic.publicationError(registry, [{ ...base, extra_native_models: ['d'] }]), '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.');
+    // Existing extras stay exempt while binding is unchanged and record stays enabled...
+    const withExtra = { ...base, extra_native_models: ['b'] };
+    const held = view({ candidates: registry.candidates, published_models: [withExtra] });
+    assert.equal(logic.needsUnverifiedConfirmation(held, [{ ...withExtra }]), false);
+    // ...but re-enabling or changing the primary gates every extra again.
+    const off = view({ candidates: registry.candidates, published_models: [{ ...withExtra, enabled: false }] });
+    assert.equal(logic.needsUnverifiedConfirmation(off, [{ ...withExtra, enabled: true }]), true);
+    assert.equal(logic.needsUnverifiedConfirmation(held, [{ ...withExtra, native_model: 'a', extra_native_models: ['b'], public_id: 'other' }]), true);
+});
