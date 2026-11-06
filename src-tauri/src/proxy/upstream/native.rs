@@ -70,10 +70,11 @@ pub async fn route(
     if let Err(e) = representable(provider, &payload) {
         return failed(e);
     }
-    if let Some(capture) = parts
+    let capture = parts
         .extensions
         .get::<crate::proxy::monitor::UpstreamRequestBodyHolder>()
-    {
+        .cloned();
+    if let Some(capture) = &capture {
         capture.set_value(&payload);
     }
     let scope = parts
@@ -95,6 +96,7 @@ pub async fn route(
         Duration::from_secs(state.request_timeout.clamp(1, 3600)),
         &session,
         &policy,
+        capture.as_ref(),
     )
     .await
     {
@@ -306,6 +308,21 @@ fn attempt_payload(payload: &Value, model: &str) -> Value {
     attempt["model"] = json!(model);
     attempt
 }
+/// Keeps the monitor's captured upstream body naming the native ID actually sent. The
+/// body is re-serialized only when an attempt switches to a different ID than `captured`.
+fn recapture(
+    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
+    captured: &mut String,
+    model: &str,
+    attempt: &Value,
+) {
+    if captured != model {
+        if let Some(capture) = capture {
+            capture.set_value(attempt);
+        }
+        *captured = model.to_owned();
+    }
+}
 async fn open(
     provider: Provider,
     targets: &[String],
@@ -313,7 +330,10 @@ async fn open(
     timeout: Duration,
     session: &str,
     policy: &AccountSchedulingPolicy,
+    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
 ) -> Result<(Events, Account, String), Failure> {
+    // `dispatch` captured the body stamped with the primary ID.
+    let mut captured = targets.first().cloned().unwrap_or_default();
     let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut excluded = HashSet::new();
@@ -360,6 +380,7 @@ async fn open(
         }
         let model = lease.model.clone();
         let attempt = attempt_payload(&payload, &model);
+        recapture(capture, &mut captured, &model, &attempt);
         let mut response = send(&lease.account, &model, attempt.clone(), remaining).await;
         let upstream_answered = response
             .as_ref()
@@ -537,6 +558,25 @@ mod tests {
         assert_eq!(attempt["model"], "shared-model-sg");
         assert_eq!(attempt["messages"], original["messages"]);
         assert_eq!(original["model"], "shared-model");
+    }
+    #[test]
+    fn monitor_capture_follows_the_native_id_actually_sent() {
+        let capture = crate::proxy::monitor::UpstreamRequestBodyHolder::new();
+        let mut captured = "shared-model".to_owned();
+        let original = json!({"model":"shared-model","messages":[]});
+        recapture(Some(&capture), &mut captured, "shared-model", &original);
+        assert_eq!(
+            capture.take(),
+            None,
+            "same ID keeps the dispatch-time capture"
+        );
+        let attempt = attempt_payload(&original, "shared-model-sg");
+        recapture(Some(&capture), &mut captured, "shared-model-sg", &attempt);
+        let body: Value = serde_json::from_str(&capture.take().unwrap()).unwrap();
+        assert_eq!(body["model"], "shared-model-sg");
+        assert_eq!(captured, "shared-model-sg");
+        recapture(None, &mut captured, "shared-model", &original);
+        assert_eq!(captured, "shared-model");
     }
     #[test]
     fn native_session_identity_is_shared_across_protocols_and_isolates_users() {
