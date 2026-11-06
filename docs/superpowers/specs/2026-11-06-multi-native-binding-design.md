@@ -59,12 +59,17 @@ Dispatchers receive the ordered target list instead of a single target.
 Circuits stay per native ID.
 
 - Admission: every target is checked with `admit_model`. Targets that are held are removed
-  from the request's target list. If any target is admitted normally, half-open probe
-  targets are dropped too (no probe is spent while healthy targets exist). If only probe
-  targets remain, the first one is admitted as the probe with the probe policy. If every
-  target is held, the request gets 429 with the smallest `Retry-After`.
-- When no account can be leased, `hold_cooling_model` runs per target; only if every target
-  is held does the request return 429 (smallest `Retry-After`), otherwise the existing 503.
+  from the request's target list and their limits are kept. The first half-open target whose
+  probe slot can be claimed stays in the list next to the healthy targets, with a tentative
+  probe guard (so a rate-limited pool rejoins while its siblings are healthy); further
+  half-open targets count as held. After each lease the guard is kept only if the lease's
+  native ID is the probe target; otherwise it is released and that target leaves the
+  request's failover list. The probe policy applies only when the probe target is the sole
+  admitted target. If every target is held, the request gets 429 with the smallest
+  `Retry-After`.
+- When no account can be leased, `hold_cooling_model` runs per admitted target; if every
+  admitted target is cooling, the request returns 429 with the smallest `Retry-After` over
+  those and the admission-held targets, otherwise the existing 503.
 - `record_model_limit` / `model_accepted` use the leased native ID.
 
 ## Billing and observability
