@@ -44,6 +44,8 @@ pub struct ModelSource {
     pub display_name: String,
     pub enabled: bool,
     pub account_count: usize,
+    /// `pools_native_models(id)`: publications on this source may bind extra native IDs.
+    pub pools_native_models: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -569,6 +571,7 @@ fn discover() -> Result<Discovery, String> {
                 display_name: "Antigravity".into(),
                 enabled: ag.iter().any(|a| !a.disabled && !a.proxy_disabled),
                 account_count: ag.len(),
+                pools_native_models: pools_native_models(ANTIGRAVITY_SOURCE),
             },
             ModelSource {
                 id: WORKBUDDY_SOURCE.into(),
@@ -576,6 +579,7 @@ fn discover() -> Result<Discovery, String> {
                 display_name: "WorkBuddy".into(),
                 enabled: settings.enabled,
                 account_count: wb.len(),
+                pools_native_models: pools_native_models(WORKBUDDY_SOURCE),
             },
         ],
         settings,
@@ -710,6 +714,7 @@ fn discover() -> Result<Discovery, String> {
             display_name: upstream.display_name().to_string(),
             enabled: upstream.enabled,
             account_count: 1,
+            pools_native_models: pools_native_models(&source),
         });
         discovery
             .all_accounts
@@ -761,6 +766,7 @@ fn discover() -> Result<Discovery, String> {
                     display_name: native_provider.name().into(),
                     enabled: false,
                     account_count: 0,
+                    pools_native_models: pools_native_models(source),
                 });
                 discovery.skipped.push(format!(
                     "{} source is unavailable: repair its account vault or settings in Accounts.",
@@ -775,6 +781,7 @@ fn discover() -> Result<Discovery, String> {
             display_name: native_provider.name().into(),
             enabled: settings.enabled,
             account_count: accounts.len(),
+            pools_native_models: pools_native_models(source),
         });
         for account in accounts {
             discovery

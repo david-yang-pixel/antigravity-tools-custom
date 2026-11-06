@@ -12,6 +12,8 @@ export interface ModelSource {
     display_name: string;
     enabled: boolean;
     account_count: number;
+    /** Accounts are pooled per native ID, so a publication may bind extra native IDs. */
+    pools_native_models: boolean;
 }
 export interface CandidateModel {
     id: string;

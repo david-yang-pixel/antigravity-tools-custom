@@ -8,8 +8,8 @@ import ts from 'typescript';
 const source = await readFile(new URL('./registryLogic.ts', import.meta.url), 'utf8');
 const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } });
 const logic = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
-const ag = { id: 'antigravity:default', provider_type: 'antigravity', display_name: 'AG source', enabled: true, account_count: 2 };
-const wb = { id: 'workbuddy:default', provider_type: 'workbuddy', display_name: 'WB source', enabled: true, account_count: 1 };
+const ag = { id: 'antigravity:default', provider_type: 'antigravity', display_name: 'AG source', enabled: true, account_count: 2, pools_native_models: false };
+const wb = { id: 'workbuddy:default', provider_type: 'workbuddy', display_name: 'WB source', enabled: true, account_count: 1, pools_native_models: true };
 const candidate = (id, source_id, native_model, patch = {}) => ({ id, source_id, native_model, provider_type: source_id === ag.id ? ag.provider_type : wb.provider_type, display_name: native_model, account_count: 1, verified_account_count: 0, verification_status: 'unverified', ignored: false, last_verified_at: null, capabilities: [], ...patch });
 const publication = (id, source_id, native_model, public_id, patch = {}) => ({ id, source_id, native_model, public_id, display_name: public_id, enabled: true, legacy: false, ...patch });
 const view = (patch = {}) => ({ schema_version: 1, revision: 7, sources: [ag, wb], candidates: [candidate('ag-c', ag.id, 'same-name'), candidate('wb-c', wb.id, 'same-name')], published_models: [], notices: [], ...patch });
@@ -49,7 +49,7 @@ test('OpenAI-compatible upstreams serve OpenAI and Anthropic endpoints only', ()
 
 test('native Qoder publications retain their sources and supported client protocols', () => {
     for (const provider_type of ['qoder']) {
-        const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type };
+        const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type, pools_native_models: true };
         const registry = view({ sources: [source], candidates: [candidate('native-c', source.id, 'same-native')], published_models: [publication('native-p', source.id, 'same-native', `${provider_type}-chat`)] });
         const [model] = logic.registryCatalog(registry);
         assert.deepEqual(model.protocols, ['openai', 'anthropic']);
@@ -191,12 +191,17 @@ test('extra target options stay within the source and hide ignored or unavailabl
     assert.deepEqual(logic.extraTargetOptions(registry, { ...draft, extra_native_models: ['a-denied'] }).map(c => c.native_model), ['a-denied', 'a-sg']);
 });
 
-test('pooled sources are workbuddy and qoder only', () => {
-    const qoder = { ...ag, id: 'qoder:default', provider_type: 'qoder' };
-    const registry = view({ sources: [ag, wb, qoder] });
+test('pooled sources follow the backend flag, not the provider type', () => {
+    const qoder = { ...ag, id: 'qoder:default', provider_type: 'qoder', pools_native_models: true };
+    // A future pooled provider needs no frontend change; a known type without the flag is not pooled.
+    const future = { ...ag, id: 'future:one', provider_type: 'future', pools_native_models: true };
+    const unflagged = { ...wb, id: 'workbuddy:other', pools_native_models: false };
+    const registry = view({ sources: [ag, wb, qoder, future, unflagged] });
     assert.equal(logic.pooledSource(registry, wb.id), true);
     assert.equal(logic.pooledSource(registry, ag.id), false);
     assert.equal(logic.pooledSource(registry, qoder.id), true);
+    assert.equal(logic.pooledSource(registry, future.id), true);
+    assert.equal(logic.pooledSource(registry, unflagged.id), false);
     assert.equal(logic.pooledSource(registry, 'missing'), false);
     assert.deepEqual(logic.nativeTargets(publication('p', wb.id, 'a', 'x', { extra_native_models: ['b'] })), ['a', 'b']);
     assert.deepEqual(logic.nativeTargets(publication('p', wb.id, 'a', 'x')), ['a']);

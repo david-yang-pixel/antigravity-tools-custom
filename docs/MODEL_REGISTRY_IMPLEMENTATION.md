@@ -32,6 +32,7 @@ interface ModelCapability {
 interface ModelSource {
   id: string; provider_type: string; display_name: string;
   enabled: boolean; account_count: number;
+  pools_native_models: boolean; // publications here may bind extra_native_models
 }
 interface CandidateModel {
   id: string; source_id: string; provider_type: string;

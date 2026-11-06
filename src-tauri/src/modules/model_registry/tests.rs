@@ -1021,6 +1021,34 @@ fn custom_openai_upstream_is_a_source_whose_bindings_survive_and_guard_removal()
         .all(|s| s.id != source));
 }
 
+#[test]
+fn sources_report_whether_they_pool_native_ids() {
+    let _dir = Sandbox::new();
+    let registry = view(&[], &HashMap::new()).unwrap();
+    for source in &registry.sources {
+        assert_eq!(
+            source.pools_native_models,
+            pools_native_models(&source.id),
+            "{}",
+            source.id
+        );
+    }
+    let pooled = |id: &str| {
+        registry
+            .sources
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .pools_native_models
+    };
+    assert!(pooled(WORKBUDDY_SOURCE));
+    assert!(!pooled(ANTIGRAVITY_SOURCE));
+    assert!(registry
+        .sources
+        .iter()
+        .any(|s| s.provider_type == "qoder" && s.pools_native_models));
+}
+
 fn extra(mut model: PublishedModel, extras: &[&str]) -> PublishedModel {
     model.extra_native_models = ids(extras);
     model

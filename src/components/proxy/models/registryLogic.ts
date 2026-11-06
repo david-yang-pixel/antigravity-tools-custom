@@ -10,8 +10,9 @@ export const publicIdKey = (id: string) => id.replace(/^models\//, '');
 export const candidateFor = (view: ModelRegistryView, model: PublishedModel) =>
     view.candidates.find(c => c.source_id === model.source_id && c.native_model === model.native_model);
 
+/** Whether a publication on this source may bind extra native IDs; the backend decides. */
 export const pooledSource = (view: ModelRegistryView, sourceId: string) =>
-    ['workbuddy', 'qoder'].includes(view.sources.find(s => s.id === sourceId)?.provider_type ?? '');
+    view.sources.find(s => s.id === sourceId)?.pools_native_models === true;
 export const nativeTargets = (model: PublishedModel) => [model.native_model, ...(model.extra_native_models ?? [])];
 export function extraTargetOptions(view: ModelRegistryView, draft: PublishedModel): CandidateModel[] {
     const chosen = new Set(draft.extra_native_models ?? []);
