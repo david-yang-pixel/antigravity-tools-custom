@@ -290,7 +290,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         let policy = Policy::live(&manager, None).await;
         let first = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -302,7 +302,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         drop(first);
         let same = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -314,7 +314,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         drop(same);
         let other = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-b:conversation",
             &policy,
             &HashSet::new(),
@@ -327,7 +327,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         manager.clear_all_sessions();
         let rebound = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -341,7 +341,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         manager.clear_all_sessions();
         let reassigned = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -360,7 +360,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         let performance = Policy::live(&manager, None).await;
         let first = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "same-conversation",
             &performance,
             &HashSet::new(),
@@ -372,7 +372,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         drop(first);
         let next = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "same-conversation",
             &performance,
             &HashSet::new(),
@@ -399,7 +399,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let deadline = || tokio::time::Instant::now() + Duration::from_secs(3);
     let first = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "waiting",
         &policy,
         &excluded,
@@ -415,7 +415,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let (next, _) = tokio::join!(
         accounts::scheduling::acquire(
             Provider::Qoder,
-            "shared-model",
+            &["shared-model"],
             "waiting",
             &policy,
             &excluded,
@@ -430,7 +430,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
         Duration::from_millis(100),
         accounts::scheduling::acquire(
             Provider::Qoder,
-            "shared-model",
+            &["shared-model"],
             "waiting",
             &policy,
             &excluded,
@@ -449,7 +449,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     balance.sticky.mode = SchedulingMode::Balance;
     let fallback = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "waiting",
         &balance,
         &excluded,
@@ -463,7 +463,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     accounts::scheduling::clear_cooldowns(None);
     let mut cooling = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "deadline",
         &policy,
         &excluded,
@@ -477,7 +477,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let began = tokio::time::Instant::now();
     let error = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "deadline",
         &policy,
         &excluded,
@@ -491,7 +491,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let began = tokio::time::Instant::now();
     let error = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "deadline",
         &policy,
         &excluded,
@@ -522,7 +522,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     let policy = Policy::default();
     let fixed = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new(),
@@ -532,7 +532,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     assert_eq!(fixed.account.id, b.id);
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new()
@@ -554,7 +554,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     accounts::configure(Provider::Qoder, &b.id, Some(false), None).unwrap();
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new()
@@ -563,7 +563,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     store::remove(Provider::Qoder, &b.id).unwrap();
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new()
@@ -580,7 +580,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     assert_eq!(
         accounts::scheduling::try_acquire(
             Provider::Qoder,
-            "shared-model",
+            &["shared-model"],
             "fixed",
             &policy,
             &HashSet::new()
@@ -609,7 +609,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     let policy = Policy::live(&manager, None).await;
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -622,7 +622,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     assert!(manager.clear_rate_limit(&a.id));
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -636,7 +636,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     let b = store::upsert(account(Provider::Qoder, "breaker-b"), None).unwrap();
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -651,7 +651,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     store::remove(Provider::Qoder, &b.id).unwrap();
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -670,7 +670,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     assert_eq!(accounts::runtime(&a.id).cooldown_until, 0);
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &off,
         &HashSet::new(),
@@ -679,7 +679,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     .unwrap();
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &off,
         &HashSet::new()
@@ -691,7 +691,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     assert_eq!(accounts::runtime(&a.id).cooldown_until, 0);
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &off,
         &HashSet::new()
@@ -1321,4 +1321,155 @@ async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() 
         serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
         before
     );
+}
+
+fn model(id: &str, is_free: bool) -> Model {
+    Model {
+        id: id.into(),
+        name: id.into(),
+        is_free,
+        ..Default::default()
+    }
+}
+fn with_models(uid: &str, models: Vec<Model>) -> Account {
+    let mut a = account(Provider::Qoder, uid);
+    a.models = models;
+    a
+}
+fn exhausted_quota() -> Quota {
+    qoder::parse_quota(&json!({"userQuota":{"total":100,"used":100,"remaining":0}})).unwrap()
+}
+#[test]
+fn native_group_pools_accounts_with_different_native_ids() {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    let cn = store::upsert(
+        with_models("group-cn", vec![model("shared-model", false)]),
+        None,
+    )
+    .unwrap();
+    let global = store::upsert(
+        with_models("group-global", vec![model("shared-model-sg", false)]),
+        None,
+    )
+    .unwrap();
+    let policy = Policy::default();
+    let targets = ["shared-model", "shared-model-sg"];
+    let first =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    let second =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    let mut picked: Vec<_> = [&first, &second]
+        .iter()
+        .map(|l| (l.account.id.clone(), l.model.clone()))
+        .collect();
+    picked.sort();
+    let mut expected = vec![
+        (cn.id.clone(), "shared-model".to_string()),
+        (global.id.clone(), "shared-model-sg".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(picked, expected);
+}
+#[test]
+fn native_group_quota_filter_applies_per_target() {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    let policy = Policy::default();
+    let targets = ["paid-model", "free-model-sg"];
+    let mut paid_only = with_models("quota-paid", vec![model("paid-model", false)]);
+    paid_only.quota = Some(exhausted_quota());
+    let stored = store::upsert(paid_only, None).unwrap();
+    assert!(accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &targets,
+        "",
+        &policy,
+        &HashSet::new()
+    )
+    .is_err());
+    store::update(Provider::Qoder, &stored.id, None, |a| {
+        a.models = vec![model("paid-model", false), model("free-model-sg", true)];
+    })
+    .unwrap();
+    let lease =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    assert_eq!(lease.model, "free-model-sg");
+    store::update(Provider::Qoder, &stored.id, None, |a| {
+        a.models = vec![model("paid-model", true)];
+    })
+    .unwrap();
+    drop(lease);
+    let lease =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    assert_eq!(lease.model, "paid-model");
+}
+#[test]
+fn native_group_prefers_first_target_on_accounts_listing_both() {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    store::upsert(
+        with_models(
+            "both",
+            vec![
+                model("shared-model-sg", false),
+                model("shared-model", false),
+            ],
+        ),
+        None,
+    )
+    .unwrap();
+    let lease = accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &["shared-model", "shared-model-sg"],
+        "",
+        &Policy::default(),
+        &HashSet::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(lease.model, "shared-model");
+}
+#[test]
+fn publication_targets_lease_the_only_enabled_accounts_native_id() {
+    use crate::modules::model_registry::PublishedModel;
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    let mut cn = with_models("only-cn", vec![model("shared-model", false)]);
+    cn.enabled = false;
+    store::upsert(cn, None).unwrap();
+    let global = store::upsert(
+        with_models("only-global", vec![model("shared-model-sg", false)]),
+        None,
+    )
+    .unwrap();
+    let published = PublishedModel {
+        id: "p".into(),
+        public_id: "public-model".into(),
+        display_name: "Public".into(),
+        source_id: "qoder".into(),
+        native_model: "shared-model".into(),
+        extra_native_models: vec!["shared-model-sg".into()],
+        enabled: true,
+        legacy: false,
+    };
+    let lease = accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &published.native_models(),
+        "",
+        &Policy::default(),
+        &HashSet::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(lease.account.id, global.id);
+    assert_eq!(lease.model, "shared-model-sg");
 }

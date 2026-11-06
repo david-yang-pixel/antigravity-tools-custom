@@ -57,7 +57,7 @@ pub fn clear_cooldowns(account_id: Option<&str>) -> bool {
 /// None means otherwise eligible accounts are occupied or cooling down.
 pub fn try_acquire(
     provider: Provider,
-    model: &str,
+    targets: &[&str],
     session: &str,
     policy: &Policy,
     exclude: &HashSet<String>,
@@ -70,23 +70,29 @@ pub fn try_acquire(
         .preferred
         .as_deref()
         .or(settings.preferred_account_id.as_deref());
-    let accounts: Vec<_> = store::all(provider)?
+    // The first target an account supports is the native ID it serves.
+    let picks: Vec<_> = store::all(provider)?
         .into_iter()
-        .filter(|a| {
+        .filter_map(|a| {
+            let pick = targets.iter().find(|t| {
+                a.models.iter().any(|m| {
+                    m.id == **t && (m.is_free || !a.quota.as_ref().is_some_and(Quota::exhausted))
+                })
+            })?;
+            Some((a, pick.to_string()))
+        })
+        .filter(|(a, _)| {
             a.enabled
                 && !exclude.contains(&a.id)
                 && fixed.is_none_or(|id| id == a.id)
                 && !a.credentials.access_token.is_empty()
-                && a.models.iter().any(|m| {
-                    m.id == model && (m.is_free || !a.quota.as_ref().is_some_and(Quota::exhausted))
-                })
                 && (a.expires_at == 0
                     || a.expires_at > now()
                     || !a.credentials.refresh_token.is_empty()
                     || !a.credentials.personal_token.is_empty())
         })
         .collect();
-    if accounts.is_empty() {
+    if picks.is_empty() {
         return Err(Failure::new(503, "No eligible account for this model; check the fixed account, enablement, quota and authorization"));
     }
     let limit = std::env::var(provider.env("MAX_CONCURRENCY"))
@@ -95,9 +101,10 @@ pub fn try_acquire(
         .unwrap_or(5)
         .clamp(1, MAX_ACCOUNT_CONCURRENCY);
     let key = format!(
-        "{}:{}:{model}:{session}",
+        "{}:{}:{}:{session}",
         crate::modules::account::get_data_dir()?.display(),
-        provider.key()
+        provider.key(),
+        targets.join(",")
     );
     let sticky = policy.sticky.mode != SchedulingMode::PerformanceFirst && !session.is_empty();
     let mut runtime = RUNTIME
@@ -114,9 +121,9 @@ pub fn try_acquire(
     let bound = sessions
         .get(&key)
         .map(|b| b.account_id.clone())
-        .filter(|id| accounts.iter().any(|a| &a.id == id));
+        .filter(|id| picks.iter().any(|(a, _)| &a.id == id));
     let mut candidates = Vec::new();
-    for account in accounts {
+    for (account, pick) in picks {
         let entry = runtime.entry(account.id.clone()).or_default();
         let available =
             entry.in_flight < limit && (!policy.breaker.enabled || entry.cooldown_until <= time);
@@ -132,11 +139,12 @@ pub fn try_acquire(
                 entry.in_flight,
                 entry.sequence,
                 account,
+                pick,
             ));
         }
     }
-    candidates.sort_by_key(|(unbound, load, used, _)| (*unbound, *load, *used));
-    let Some((_, _, _, account)) = candidates.into_iter().next() else {
+    candidates.sort_by_key(|(unbound, load, used, ..)| (*unbound, *load, *used));
+    let Some((_, _, _, account, model)) = candidates.into_iter().next() else {
         return Ok(None);
     };
     let sequence = runtime
@@ -170,6 +178,7 @@ pub fn try_acquire(
     }
     Ok(Some(Lease {
         account,
+        model,
         finished: false,
         breaker: policy.breaker.clone(),
     }))
@@ -178,7 +187,7 @@ pub fn try_acquire(
 /// All waiting is bounded by both the global Cache First limit and the request deadline.
 pub async fn acquire(
     provider: Provider,
-    model: &str,
+    targets: &[&str],
     session: &str,
     policy: &Policy,
     exclude: &HashSet<String>,
@@ -200,7 +209,7 @@ pub async fn acquire(
         let changed = CHANGED.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
-        if let Some(lease) = try_acquire(provider, model, session, policy, exclude)? {
+        if let Some(lease) = try_acquire(provider, targets, session, policy, exclude)? {
             return Ok(lease);
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

@@ -193,6 +193,8 @@ async fn sync_metadata(
 /// An in-flight permit lives through the complete response stream (including cancellation).
 pub struct Lease {
     pub account: Account,
+    /// The native model ID this account serves for the request.
+    pub model: String,
     finished: bool,
     breaker: crate::models::CircuitBreakerConfig,
 }
@@ -284,7 +286,7 @@ pub fn select_for_probe(
             .unwrap_or_default(),
         preferred: account_id.map(str::to_owned),
     };
-    scheduling::try_acquire(provider, model, "", &policy, exclude)?
+    scheduling::try_acquire(provider, &[model], "", &policy, exclude)?
         .ok_or_else(|| Failure::new(429, "Accounts are busy or cooling down"))
 }
 /// Background model and quota polls stop once the last real generation is this old,
