@@ -2334,6 +2334,7 @@
       "unsupported": "活动奖励仅支持国内版账号。",
       "auto_rewards": "自动领取奖励",
       "auto_lottery": "自动免费抽奖",
+      "auto_travel": "自动派猫猫旅行",
       "hint": "仅领取上游确认已达标的奖励。开启自动免费抽奖后，领取时也会使用活动赠送次数，不消耗积分。",
       "paused_hint": "自动任务已暂停，请先启用账号并开启纳管。",
       "checked_at": "最近查询",
@@ -2364,7 +2365,9 @@
       "item_unsupported": "暂不支持",
       "item_failed": "失败",
       "item_unknown": "结果未确认",
-      "item_skipped": "已跳过"
+      "item_skipped": "已跳过",
+      "item_departed": "已出发",
+      "travel_depart": "派出猫猫旅行"
     },
     "egress": {
       "title": "出口节点（机场订阅）",

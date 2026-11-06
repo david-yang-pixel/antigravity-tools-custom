@@ -742,33 +742,58 @@ pub(super) fn edit_management(
     };
     view(result)
 }
-pub fn configure(
-    id: &str,
-    managed: Option<bool>,
-    auto_checkin: Option<bool>,
-    keepalive: Option<bool>,
-    auto_rewards: Option<bool>,
-    auto_lottery: Option<bool>,
-) -> Result<AccountView, String> {
-    if (auto_rewards == Some(true) || auto_lottery == Some(true)) && get(id)?.realm != Realm::Cn {
+/// Administrator switches; `None` keeps the stored value.
+#[derive(Default)]
+pub struct Preferences {
+    pub managed: Option<bool>,
+    pub auto_checkin: Option<bool>,
+    pub keepalive: Option<bool>,
+    pub auto_rewards: Option<bool>,
+    pub auto_lottery: Option<bool>,
+    pub auto_travel: Option<bool>,
+}
+impl Preferences {
+    pub fn is_empty(&self) -> bool {
+        [
+            self.managed,
+            self.auto_checkin,
+            self.keepalive,
+            self.auto_rewards,
+            self.auto_lottery,
+            self.auto_travel,
+        ]
+        .iter()
+        .all(Option::is_none)
+    }
+}
+pub fn configure(id: &str, preferences: Preferences) -> Result<AccountView, String> {
+    let activity = [
+        preferences.auto_rewards,
+        preferences.auto_lottery,
+        preferences.auto_travel,
+    ];
+    if activity.contains(&Some(true)) && get(id)?.realm != Realm::Cn {
         return Err("WorkBuddy activity rewards are only supported for domestic accounts".into());
     }
     edit_management(id, |m| {
-        if let Some(value) = managed {
+        if let Some(value) = preferences.managed {
             m.managed = value;
         }
-        if let Some(value) = auto_checkin {
+        if let Some(value) = preferences.auto_checkin {
             m.auto_checkin = value;
             m.auto_checkin_chosen = true;
         }
-        if let Some(value) = keepalive {
+        if let Some(value) = preferences.keepalive {
             m.keepalive = value;
         }
-        if let Some(value) = auto_rewards {
+        if let Some(value) = preferences.auto_rewards {
             m.auto_rewards = value;
         }
-        if let Some(value) = auto_lottery {
+        if let Some(value) = preferences.auto_lottery {
             m.auto_lottery = value;
+        }
+        if let Some(value) = preferences.auto_travel {
+            m.auto_travel = value;
         }
         m.next_sync_at = 0;
     })
@@ -790,6 +815,7 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.management.keepalive = old.management.keepalive;
     account.management.auto_rewards = old.management.auto_rewards;
     account.management.auto_lottery = old.management.auto_lottery;
+    account.management.auto_travel = old.management.auto_travel;
     account.management.activity = old.management.activity.clone();
     if account.client.machine_id.is_empty() {
         account.client = old.client.clone();
@@ -1394,7 +1420,14 @@ mod tests {
         )
         .unwrap()
         .id;
-        configure(&unmanaged, Some(false), None, None, None, None).unwrap();
+        configure(
+            &unmanaged,
+            Preferences {
+                managed: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let _ = fresh_before(
             &unmanaged,
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),

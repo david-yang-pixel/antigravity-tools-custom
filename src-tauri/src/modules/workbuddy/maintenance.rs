@@ -18,6 +18,8 @@ pub struct Management {
     pub keepalive: bool,
     pub auto_rewards: bool,
     pub auto_lottery: bool,
+    /// Send the Buddy on its daily trip; arrival rewards come back through auto_rewards.
+    pub auto_travel: bool,
     pub activity: super::activity::State,
     pub credits: Option<Credits>,
     pub credits_error: Option<String>,
@@ -42,6 +44,7 @@ impl Default for Management {
             keepalive: true,
             auto_rewards: false,
             auto_lottery: false,
+            auto_travel: false,
             activity: super::activity::State::default(),
             credits: None,
             credits_error: None,
@@ -553,7 +556,16 @@ mod tests {
             let id = accounts::upsert(accounts::parse_import(auth.clone()).unwrap())
                 .unwrap()
                 .id;
-            accounts::configure(&id, Some(true), Some(true), Some(false), None, None).unwrap();
+            accounts::configure(
+                &id,
+                accounts::Preferences {
+                    managed: Some(true),
+                    auto_checkin: Some(true),
+                    keepalive: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             // Idle automatic maintenance performs no check-in.
             let before = calls.load(Ordering::SeqCst);
             run(&id, false, false, true).await.unwrap();
@@ -569,8 +581,22 @@ mod tests {
                     result.management.checkin_guard.next_attempt_at >= accounts::now() + 172799
                 );
                 assert!(run(&id, false, true, false).await.is_err());
-                accounts::configure(&id, None, Some(false), None, None, None).unwrap();
-                accounts::configure(&id, None, Some(true), None, None, None).unwrap();
+                accounts::configure(
+                    &id,
+                    accounts::Preferences {
+                        auto_checkin: Some(false),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                accounts::configure(
+                    &id,
+                    accounts::Preferences {
+                        auto_checkin: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
                 let saved = accounts::get(&id).unwrap();
                 assert_eq!(saved.management.checkin_guard.attempts, 1);
                 assert_eq!(

@@ -13,7 +13,7 @@ export interface WorkBuddyAccount {
     health: { successes: number; failures: number; consecutive_failures: number; last_success_at: number; last_failure_at: number; last_error: string | null };
     management: {
         managed: boolean; auto_checkin: boolean; keepalive: boolean;
-        auto_rewards?: boolean; auto_lottery?: boolean; activity?: ActivityState;
+        auto_rewards?: boolean; auto_lottery?: boolean; auto_travel?: boolean; activity?: ActivityState;
         credits: { available: number; updated_at: number; expiries: { at: number; amount: number }[] } | null;
         credits_error: string | null; last_sync_at: number; next_sync_at: number;
         last_keepalive_at: number; keepalive_attempt_at: number; keepalive_error: string | null;
@@ -21,7 +21,7 @@ export interface WorkBuddyAccount {
         checkin_guard?: { attempt_date: string | null; attempts: number; next_attempt_at: number; pause: 'authorization' | 'rejected' | null };
     };
 }
-export interface AccountChanges { enabled?: boolean; refresh?: boolean; managed?: boolean; auto_checkin?: boolean; keepalive?: boolean; checkin?: boolean; resume_checkin?: boolean; auto_rewards?: boolean; auto_lottery?: boolean; activity?: 'query' | 'claim' }
+export interface AccountChanges { enabled?: boolean; refresh?: boolean; managed?: boolean; auto_checkin?: boolean; keepalive?: boolean; checkin?: boolean; resume_checkin?: boolean; auto_rewards?: boolean; auto_lottery?: boolean; auto_travel?: boolean; activity?: 'query' | 'claim' }
 const cell = 'px-4 py-4 align-middle';
 const muted = 'mt-1 text-xs font-normal text-gray-500 dark:text-gray-400';
 const actionButton = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white';
