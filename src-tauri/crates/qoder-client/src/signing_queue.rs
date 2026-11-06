@@ -3,6 +3,20 @@
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::{oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
 
+/// Share CPU execution across independently bounded account queues.
+#[derive(Default)]
+pub struct Executor {
+    turn: Arc<Mutex<()>>,
+}
+impl Executor {
+    pub fn queue(&self, capacity: usize) -> Queue {
+        Queue {
+            slots: Arc::new(Semaphore::new(capacity)),
+            turn: self.turn.clone(),
+        }
+    }
+}
+
 pub struct Queue {
     slots: Arc<Semaphore>,
     turn: Arc<Mutex<()>>,
@@ -31,10 +45,7 @@ impl std::error::Error for Error {}
 impl Queue {
     /// Capacity includes both running work and queued reservations.
     pub fn new(capacity: usize) -> Self {
-        Self {
-            slots: Arc::new(Semaphore::new(capacity)),
-            turn: Arc::new(Mutex::new(())),
-        }
+        Executor::default().queue(capacity)
     }
     /// Refuse overload immediately, before retaining another body or starting UMID.
     pub fn try_reserve(&self) -> Result<Reservation, Error> {
@@ -101,6 +112,48 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn account_queues_admit_independently_and_share_cancellable_cpu_execution() {
+        let executor = Executor::default();
+        let a = executor.queue(5);
+        let b = executor.queue(5);
+        let mut a_slots: Vec<_> = (0..5).map(|_| a.try_reserve().unwrap()).collect();
+        let mut b_slots: Vec<_> = (0..5).map(|_| b.try_reserve().unwrap()).collect();
+        assert!(matches!(a.try_reserve(), Err(Error::Busy)));
+        assert!(matches!(b.try_reserve(), Err(Error::Busy)));
+        let (started, running) = oneshot::channel();
+        let (release, wait) = mpsc::channel();
+        let active = tokio::spawn(a_slots.pop().unwrap().run(Duration::from_secs(5), move || {
+            let _ = started.send(());
+            wait.recv_timeout(Duration::from_secs(3)).unwrap();
+        }));
+        tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        assert_eq!(
+            b_slots
+                .pop()
+                .unwrap()
+                .run(Duration::from_millis(20), move || {
+                    called.fetch_add(1, Ordering::SeqCst);
+                })
+                .await,
+            Err(Error::Timeout)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(b.try_reserve().is_ok());
+        assert!(matches!(a.try_reserve(), Err(Error::Busy)));
+        release.send(()).unwrap();
+        active.await.unwrap().unwrap();
+        assert_eq!(
+            released(&b).await.run(Duration::from_secs(1), || 42).await,
+            Ok(42)
+        );
     }
 
     #[tokio::test]

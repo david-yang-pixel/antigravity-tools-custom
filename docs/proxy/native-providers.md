@@ -61,7 +61,7 @@ unconstrained; `tool_choice: none` is honored by sending no tools.
 - Refresh exchanges are serialized per account. Rotating tokens are persisted
   before metadata requests. An HTTP cancellation does not cancel an owned refresh
   task before persistence; a new authorization or deletion rejects stale writes.
-- Default concurrency is one active inference per account. The permit remains
+- Default concurrency is five active inferences per account. The permit remains
   held through upstream streaming and is released on cancellation.
 - Authentication failures, rate limits and transient failures cool the affected
   account. A request moves to another account only when nothing reached the
@@ -104,7 +104,7 @@ Provider settings have this shape:
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
 | `ABV_QODER_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
-| `ABV_QODER_MAX_CONCURRENCY` | `1` | Active requests per account, clamped to 1–8 |
+| `ABV_QODER_MAX_CONCURRENCY` | `5` | Active requests per account, clamped to 1–8; explicit deployment overrides take precedence |
 | `ABV_QODER_VERSION` | `1.1.83` | Qoder client version (defaults to `1.1.75` in legacy mode) |
 | `ABV_QODER_LEGACY_PROTOCOL` | `false` | Explicit rollback to the previous Rust COSY signer and rustls transport; restart after changing |
 | `ABV_QODER_ALLOW_DIRECT_UMID` | `false` | Explicitly allow the official identity SDK to connect directly when Qoder uses a proxy; exposes the host network/machine identity outside that proxy |

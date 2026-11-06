@@ -2,7 +2,7 @@
 //! Cryptographic operations use RustCrypto/rsa; this module does not implement primitives.
 use super::super::{
     http::{self, Failure},
-    Account,
+    Account, MAX_ACCOUNT_CONCURRENCY,
 };
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 use base64::{
@@ -42,11 +42,28 @@ pub fn legacy() -> bool {
 
 type WasmCache = BTreeMap<String, (String, qoder_client::signing::Signer)>;
 static WASM_SIGNERS: LazyLock<Mutex<WasmCache>> = LazyLock::new(Default::default);
-// One running signer plus at most three asynchronously waiting preparations.
-static SIGNING_QUEUE: LazyLock<qoder_client::signing_queue::Queue> =
-    LazyLock::new(|| qoder_client::signing_queue::Queue::new(4));
+static SIGNING_EXECUTOR: LazyLock<qoder_client::signing_queue::Executor> =
+    LazyLock::new(Default::default);
+static SIGNING_QUEUES: LazyLock<Mutex<BTreeMap<String, qoder_client::signing_queue::Queue>>> =
+    LazyLock::new(Default::default);
+
+fn reserve_signing(id: &str) -> Result<qoder_client::signing_queue::Reservation, Failure> {
+    let mut queues = SIGNING_QUEUES
+        .lock()
+        .map_err(|_| Failure::new(503, "Qoder signing queues unavailable"))?;
+    // Cover every configurable inference slot and one background catalog preparation.
+    // Accounts share CPU execution, but never compete for an admission budget.
+    queues
+        .entry(id.to_owned())
+        .or_insert_with(|| SIGNING_EXECUTOR.queue(MAX_ACCOUNT_CONCURRENCY + 1))
+        .try_reserve()
+        .map_err(|e| Failure::new(503, e.to_string()))
+}
 
 pub fn forget(id: &str) {
+    if let Ok(mut queues) = SIGNING_QUEUES.lock() {
+        queues.remove(id);
+    }
     if let Ok(mut cache) = WASM_SIGNERS.lock() {
         cache.remove(id);
     }
@@ -138,9 +155,7 @@ pub async fn prepare(
             "Qoder request exceeds the signing size limit",
         ));
     }
-    let reservation = SIGNING_QUEUE
-        .try_reserve()
-        .map_err(|e| Failure::new(503, e.to_string()))?;
+    let reservation = reserve_signing(&a.id)?;
     let root = crate::modules::account::get_data_dir()?;
     let machine = qoder_client::identity::machine(&root, a.realm == super::super::Realm::Cn, &a.uid).await
         .map_err(|_| Failure::new(503, "Official Qoder machine identity unavailable; check the runtime helper or explicitly select the legacy protocol"))?;
