@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { AlertTriangle, CheckCircle2, CircleHelp, Download, Loader2, RefreshCw, Search } from 'lucide-react';
 import { request } from '../../../utils/request';
 import type { CandidateModel, DiscoverUpstreamModelsRequest, ModelRegistryView, ModelVerificationReport, ModelVerificationResult, PublishedModel, SaveModelRegistryRequest, UpstreamDiscoveryReport, VerificationPrompt, VerifyModelCandidatesRequest } from '../../../types/modelRegistry';
-import { candidateFor, capabilityLabels, capabilityScope, filterPublications, formatCheckedAt, mergePublications, needsUnverifiedConfirmation, newPublicationId, publicationError, registryError, saveRequest, verificationLabels } from './registryLogic';
+import { candidateFor, capabilityLabels, capabilityScope, filterPublications, formatCheckedAt, mergePublications, needsUnverifiedConfirmation, newPublicationId, publicationError, registryError, saveRequest, verificationFeedback, verificationLabels } from './registryLogic';
 import RegistryDialog from './RegistryDialog';
 import UpstreamModels, { hasRealm, type UpstreamPick } from './UpstreamModels';
 import './modelRegistry.css';
@@ -105,7 +105,9 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
             setAction(null); setConfirmed(false);
             if ('results' in response) setTested(prev => ({ ...prev, ...Object.fromEntries(response.results.map(r => [r.candidate_id, r])) }));
             if ('candidate_ids' in response) setDiscovery(response);
-            setFeedback({ message: label });
+            setFeedback('results' in response && 'candidate_ids' in payload
+                ? verificationFeedback(response.results, payload.candidate_ids)
+                : { message: label });
         } catch (error) {
             if (!alive.current) return;
             const reason = registryError(error);

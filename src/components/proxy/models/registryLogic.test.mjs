@@ -14,6 +14,21 @@ const candidate = (id, source_id, native_model, patch = {}) => ({ id, source_id,
 const publication = (id, source_id, native_model, public_id, patch = {}) => ({ id, source_id, native_model, public_id, display_name: public_id, enabled: true, legacy: false, ...patch });
 const view = (patch = {}) => ({ schema_version: 1, revision: 7, sources: [ag, wb], candidates: [candidate('ag-c', ag.id, 'same-name'), candidate('wb-c', wb.id, 'same-name')], published_models: [], notices: [], ...patch });
 
+test('a completed verification request is successful only when every requested model passed', () => {
+    const verified = { candidate_id: 'qoder-c', status: 'verified' };
+    assert.equal(logic.verificationFeedback([verified], ['qoder-c']).error, false);
+    for (const status of ['failed', 'unavailable']) {
+        const feedback = logic.verificationFeedback([{ ...verified, status }], ['qoder-c']);
+        assert.equal(feedback.error, true);
+        assert.match(feedback.message, /0\/1/);
+    }
+    // A timeout can return a partial/empty report with an otherwise successful HTTP response.
+    assert.equal(logic.verificationFeedback([], ['qoder-c']).error, true);
+    assert.equal(logic.verificationFeedback([verified], ['qoder-c', 'missing']).error, true);
+    assert.equal(logic.verificationFeedback([verified], ['different-c']).error, true);
+    assert.equal(logic.verificationFeedback([], []).error, true);
+});
+
 test('candidate lookup binds explicit source/native pairs, never public aliases', () => {
     const registry = view();
     assert.equal(logic.candidateFor(registry, publication('p', wb.id, 'same-name', 'antigravity-custom')).id, 'wb-c');

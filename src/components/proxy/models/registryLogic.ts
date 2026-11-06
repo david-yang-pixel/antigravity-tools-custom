@@ -1,8 +1,19 @@
-import type { CandidateModel, ModelCapability, ModelRegistryView, ModelSource, PublishedModel, RegistryCatalogModel, RegistryProtocol, SaveModelRegistryRequest } from '../../../types/modelRegistry';
+import type { CandidateModel, ModelCapability, ModelRegistryView, ModelSource, ModelVerificationResult, PublishedModel, RegistryCatalogModel, RegistryProtocol, SaveModelRegistryRequest } from '../../../types/modelRegistry';
 
 export const verificationLabels = {
     unverified: '未验证 / Unverified', verified: '基础文本已验证 / Text verified', unavailable: '不可用 / Unavailable', failed: '验证失败 / Failed',
 };
+
+export function verificationFeedback(results: ModelVerificationResult[], candidateIds: string[]): { message: string; error: boolean } {
+    const passed = candidateIds.filter(id => results.some(r => r.candidate_id === id && r.status === 'verified')).length;
+    const success = candidateIds.length > 0 && passed === candidateIds.length;
+    return {
+        error: !success,
+        message: success
+            ? '基础文本验证通过；思考、视觉和工具能力未验证。 / Basic text verified; reasoning, vision and tools were not tested.'
+            : `基础文本验证未全部通过（${passed}/${candidateIds.length}），请查看各模型结果；未自动重试。 / Basic text checks did not all pass (${passed}/${candidateIds.length}); see each result. No automatic retry.`,
+    };
+}
 export const capabilityLabels = {
     supported: '已支持 / Supported', conditional: '有条件支持 / Conditional', not_integrated: '尚未接入 / Not integrated', unsupported: '不支持 / Unsupported', unverified: '未验证 / Unverified',
 };
