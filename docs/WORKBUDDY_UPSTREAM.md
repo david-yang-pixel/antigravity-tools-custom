@@ -25,7 +25,7 @@ WorkBuddy 账号管理、令牌刷新、模型同步和推理转发均内置在�
 ```json
 {
   "public_id": "wb-sonnet",
-  "source_id": "workbuddy",
+  "source_id": "workbuddy:default",
   "native_model": "claude-sonnet-4-6",
   "extra_native_models": ["claude-sonnet-4-6-sg"]
 }
