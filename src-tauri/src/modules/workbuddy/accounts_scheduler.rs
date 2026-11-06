@@ -266,58 +266,86 @@ impl Drop for ModelProbe {
 /// What a request may dispatch to after its targets pass their model circuits.
 #[derive(Debug)]
 pub struct Admission {
-    /// Targets still admitted, in binding order.
+    /// Targets a lease may be taken for, in binding order. Includes the probe target.
     pub targets: Vec<String>,
-    /// Set when the only admitted target is a half-open circuit's probe; release it
-    /// when the request ends.
-    pub probe: Option<ModelProbe>,
+    /// The one half-open target this request probes, with the guard holding its probe
+    /// slot. Pass it to `settle_probe` after every lease; the guard otherwise lives until
+    /// the request ends.
+    pub probe: Option<(String, ModelProbe)>,
+    /// Why each dropped target is held: its circuit is open, or its probe slot is taken.
+    pub held: Vec<ModelLimited>,
 }
 
-/// Admission for a publication's targets before any account is leased. Held targets are
-/// dropped. Healthy targets win over half-open ones, so no probe is spent while a healthy
-/// target exists; otherwise the first half-open target goes through as the probe. When
-/// every target is held, the shortest hold is reported.
+impl Admission {
+    /// The probe policy (no waiting while holding the probe slot) applies only when the
+    /// probe target is all this request may lease; beside healthy targets the normal
+    /// policy applies.
+    pub fn lease_policy(&self, policy: &Policy) -> Policy {
+        match &self.probe {
+            Some((target, _)) if self.targets == [target.as_str()] => policy.for_probe(),
+            _ => policy.clone(),
+        }
+    }
+}
+
+/// Admission for a publication's targets before any account is leased. Healthy targets
+/// are admitted. The first half-open target whose probe slot is free is admitted beside
+/// them as this request's probe, so a recovering native ID rejoins the pool even while a
+/// sibling is healthy; other half-open targets wait as held. Held targets are dropped and
+/// reported in `held`. When nothing is admitted, the shortest hold is the error.
 pub fn admit_models(targets: &[&str], policy: &Policy) -> Result<Admission, ModelLimited> {
-    let mut healthy = Vec::new();
+    let mut admitted = Vec::new();
     let mut probe = None;
-    let mut held: Option<ModelLimited> = None;
+    let mut held = Vec::new();
     for target in targets {
-        match admit_model(target, policy) {
-            Ok(None) => healthy.push((*target).to_owned()),
-            // Probe guards after the first drop here, releasing their probe slot at once.
+        match admit_model(target, policy, probe.is_none()) {
+            Ok(None) => admitted.push((*target).to_owned()),
             Ok(Some(guard)) => {
-                probe.get_or_insert(((*target).to_owned(), guard));
+                admitted.push((*target).to_owned());
+                probe = Some(((*target).to_owned(), guard));
             }
-            Err(limited) => {
-                if held
-                    .as_ref()
-                    .is_none_or(|h| limited.retry_after < h.retry_after)
-                {
-                    held = Some(limited);
-                }
-            }
+            Err(limited) => held.push(limited),
         }
     }
-    if healthy.is_empty() {
-        if let Some((target, guard)) = probe {
-            return Ok(Admission {
-                targets: vec![target],
-                probe: Some(guard),
-            });
-        }
-        if let Some(limited) = held {
-            return Err(limited);
-        }
+    if admitted.is_empty() && !held.is_empty() {
+        let shortest = held
+            .into_iter()
+            .min_by_key(|limited| limited.retry_after)
+            .expect("held is not empty");
+        return Err(shortest);
     }
-    // Any probe guard taken above drops here, so a healthy target never spends a probe.
     Ok(Admission {
-        targets: healthy,
-        probe: None,
+        targets: admitted,
+        probe,
+        held,
     })
 }
 
+/// Call after each lease of a request (the first and every failover). The probe guard
+/// stays only while the lease serves the probe target. Otherwise it is released at once,
+/// freeing the slot for the next request, and the target leaves this request's
+/// candidates so a failover cannot reach the half-open circuit without its slot.
+pub fn settle_probe(
+    probe: &mut Option<(String, ModelProbe)>,
+    targets: &mut Vec<&str>,
+    leased: &str,
+) {
+    if probe.as_ref().is_some_and(|(target, _)| target != leased) {
+        if let Some((target, guard)) = probe.take() {
+            drop(guard);
+            targets.retain(|t| *t != target);
+        }
+    }
+}
+
 /// Admission for a model before any account is leased. `Ok(Some(_))` marks the probe.
-fn admit_model(model: &str, policy: &Policy) -> Result<Option<ModelProbe>, ModelLimited> {
+/// A free half-open probe slot is claimed only with `claim`; otherwise that target is held
+/// briefly, as if another request were probing it.
+fn admit_model(
+    model: &str,
+    policy: &Policy,
+    claim: bool,
+) -> Result<Option<ModelProbe>, ModelLimited> {
     if !policy.breaker.enabled {
         return Ok(None);
     }
@@ -342,7 +370,7 @@ fn admit_model(model: &str, policy: &Policy) -> Result<Option<ModelProbe>, Model
     if circuit.trips == 0 {
         return Ok(None);
     }
-    if circuit.probing {
+    if circuit.probing || !claim {
         return Err(limited(circuit, PROBE_RETRY_SECONDS));
     }
     circuit.probing = true;
@@ -699,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workbuddy_group_half_open_probe_only_when_no_healthy_target() {
+    async fn workbuddy_group_claims_one_half_open_probe_per_request() {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
         let a = seed_with("a", &["flash", "flash-sg"]);
         let b = seed_with("b", &["flash", "flash-sg"]);
@@ -710,20 +738,131 @@ mod tests {
             record_model_limit(model, &b, "code 1", 60, &policy);
         }
         expire_model_circuits();
-        // Both half-open: the first target is the probe, the other is not spent.
+        // Both half-open: the first target is the probe; the other is held, not claimed.
         let admission = admit_models(&group, &policy).unwrap();
         assert_eq!(admission.targets, ["flash"]);
-        assert!(admission.probe.is_some());
+        assert_eq!(probe_target(&admission), Some("flash"));
+        assert_eq!(admission.held.len(), 1);
+        assert_eq!(admission.held[0].retry_after, PROBE_RETRY_SECONDS);
+        // A lone probe target leases with the probe policy.
+        let mut cache_first = policy.clone();
+        cache_first.sticky.mode = SchedulingMode::CacheFirst;
+        cache_first.sticky.max_wait_seconds = 30;
+        assert_eq!(
+            admission.lease_policy(&cache_first).sticky.max_wait_seconds,
+            0
+        );
         let solo = admit_models(&["flash-sg"], &policy).unwrap();
         assert!(solo.probe.is_some());
         drop(solo);
         drop(admission);
-        // A healthy target admits without spending a probe on the half-open one.
+        // With a healthy sibling the half-open target still joins, beside it.
         model_accepted("flash-sg");
         let admission = admit_models(&group, &policy).unwrap();
+        assert_eq!(admission.targets, group);
+        assert_eq!(probe_target(&admission), Some("flash"));
+        assert!(admission.held.is_empty());
+        // A mixed admission leases with the normal policy.
+        assert_eq!(
+            admission.lease_policy(&cache_first).sticky.max_wait_seconds,
+            30
+        );
+    }
+
+    fn probe_target(admission: &Admission) -> Option<&str> {
+        admission.probe.as_ref().map(|(target, _)| target.as_str())
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_half_open_target_rejoins_the_pool_while_a_sibling_is_healthy() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed_with("a", &["flash"]);
+        let b = seed_with("b", &["flash"]);
+        seed_with("c", &["flash-sg"]);
+        let policy = Policy::default();
+        let group = ["flash", "flash-sg"];
+        record_model_limit("flash", &a, "code 1", 60, &policy);
+        assert_eq!(
+            record_model_limit("flash", &b, "code 1", 60, &policy),
+            Some(60)
+        );
+        expire_model_circuits();
+        let first = admit_models(&group, &policy).unwrap();
+        assert_eq!(first.targets, group);
+        assert_eq!(probe_target(&first), Some("flash"));
+        assert!(first.held.is_empty());
+        // The probe slot is taken: a concurrent request keeps the healthy target only.
+        let second = admit_models(&group, &policy).unwrap();
+        assert_eq!(second.targets, ["flash-sg"]);
+        assert!(second.probe.is_none());
+        assert_eq!(second.held.len(), 1);
+        assert_eq!(second.held[0].retry_after, PROBE_RETRY_SECONDS);
+        drop(second);
+        // A lease on the probe target keeps the guard; one elsewhere releases it at once
+        // and takes the unguarded target out of the request's failover candidates.
+        let Admission { mut probe, .. } = first;
+        let mut targets = group.to_vec();
+        settle_probe(&mut probe, &mut targets, "flash");
+        assert!(probe.is_some());
+        assert_eq!(targets, group);
+        assert!(admit_model("flash", &policy, true).is_err());
+        settle_probe(&mut probe, &mut targets, "flash-sg");
+        assert!(probe.is_none());
+        assert_eq!(targets, ["flash-sg"]);
+        let third = admit_models(&group, &policy).unwrap();
+        assert_eq!(probe_target(&third), Some("flash"));
+        drop(third);
+        // A probe that is served closes the circuit: the pool is whole again.
+        model_accepted("flash");
+        let healed = admit_models(&group, &policy).unwrap();
+        assert_eq!(healed.targets, group);
+        assert!(healed.probe.is_none());
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_held_and_half_open_targets_admit_the_probe() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed_with("a", &["flash", "flash-sg"]);
+        let b = seed_with("b", &["flash", "flash-sg"]);
+        let policy = Policy::default();
+        let group = ["flash", "flash-sg"];
+        for model in group {
+            record_model_limit(model, &a, "code 1", 60, &policy);
+            record_model_limit(model, &b, "code 1", 60, &policy);
+        }
+        expire_model_circuits();
+        // A failed probe reopens flash-sg; flash stays half-open.
+        assert!(record_model_limit("flash-sg", &a, "code 1", 60, &policy).is_some());
+        let admission = admit_models(&group, &policy).unwrap();
+        assert_eq!(admission.targets, ["flash"]);
+        assert_eq!(probe_target(&admission), Some("flash"));
+        assert_eq!(admission.held.len(), 1);
+        assert!(admission.held[0].retry_after > PROBE_RETRY_SECONDS);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_group_admission_reports_targets_it_held() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let a = seed_with("a", &["flash"]);
+        let b = seed_with("b", &["flash"]);
+        seed_with("c", &["flash"]);
+        let d = seed_with("d", &["flash-sg"]);
+        let policy = Policy::default();
+        let group = ["flash", "flash-sg"];
+        record_model_limit("flash", &a, "code 1", 120, &policy);
+        record_model_limit("flash", &b, "code 1", 120, &policy);
+        cool(&d, "flash-sg", now() + 60);
+        let admission = admit_models(&group, &policy).unwrap();
         assert_eq!(admission.targets, ["flash-sg"]);
-        assert!(admission.probe.is_none());
-        assert!(admit_model("flash", &policy).unwrap().is_some());
+        assert_eq!(admission.held.len(), 1);
+        assert!((119..=120).contains(&admission.held[0].retry_after));
+        assert_eq!(admission.held[0].reason, "code 1");
+        // The open circuit's account c is free, so only the admitted targets tell the
+        // truth about the lease failure.
+        assert!(hold_cooling_models(&group, &policy).is_none());
+        let admitted: Vec<&str> = admission.targets.iter().map(String::as_str).collect();
+        let limited = hold_cooling_models(&admitted, &policy).unwrap();
+        assert!((59..=60).contains(&limited.retry_after));
     }
 
     #[tokio::test]
@@ -736,7 +875,7 @@ mod tests {
         // Every target is evaluated, so the cooling one is held on its circuit even
         // though another target still has a free account.
         assert!(hold_cooling_models(&["flash-sg", "flash"], &policy).is_none());
-        assert!(admit_model("flash", &policy).is_err());
+        assert!(admit_model("flash", &policy, true).is_err());
         assert!(hold_cooling_models(&["flash", "flash-sg"], &policy).is_none());
         cool(&b, "flash-sg", now() + 90);
         let limited = hold_cooling_models(&["flash", "flash-sg"], &policy).unwrap();
@@ -946,53 +1085,53 @@ mod tests {
         let b = seed("b");
         seed("c");
         let policy = Policy::default();
-        assert!(admit_model("model", &policy).unwrap().is_none());
+        assert!(admit_model("model", &policy, true).unwrap().is_none());
         assert_eq!(record_model_limit("model", &a, "code 1", 60, &policy), None);
         // A different upstream reason, or the same account again, does not add up.
         assert_eq!(record_model_limit("model", &b, "code 2", 60, &policy), None);
         assert_eq!(record_model_limit("model", &a, "code 1", 60, &policy), None);
-        assert!(admit_model("model", &policy).unwrap().is_none());
+        assert!(admit_model("model", &policy, true).unwrap().is_none());
         assert_eq!(
             record_model_limit("model", &b, "code 1", 60, &policy),
             Some(60)
         );
-        let limited = admit_model("model", &policy).unwrap_err();
+        let limited = admit_model("model", &policy, true).unwrap_err();
         assert!((59..=60).contains(&limited.retry_after));
         assert_eq!(limited.accounts, 2);
         assert_eq!(limited.reason, "code 1");
         // Other models are untouched; late rejections confirm the hold without escalating.
-        assert!(admit_model("other", &policy).unwrap().is_none());
+        assert!(admit_model("other", &policy, true).unwrap().is_none());
         assert_eq!(record_model_limit("model", &a, "code 1", 60, &policy), None);
         // Half-open: exactly one probe at a time.
         expire_model_circuits();
-        let probe = admit_model("model", &policy).unwrap().unwrap();
+        let probe = admit_model("model", &policy, true).unwrap().unwrap();
         assert_eq!(
-            admit_model("model", &policy).unwrap_err().retry_after,
+            admit_model("model", &policy, true).unwrap_err().retry_after,
             PROBE_RETRY_SECONDS
         );
         drop(probe);
-        let _probe = admit_model("model", &policy).unwrap().unwrap();
+        let _probe = admit_model("model", &policy, true).unwrap().unwrap();
         // The probe's rejection reopens at the next backoff step.
         assert_eq!(
             record_model_limit("model", &a, "code 1", 60, &policy),
             Some(300)
         );
-        assert!(admit_model("model", &policy).is_err());
+        assert!(admit_model("model", &policy, true).is_err());
         // Any accepted response closes it.
         model_accepted("model");
-        assert!(admit_model("model", &policy).unwrap().is_none());
+        assert!(admit_model("model", &policy, true).unwrap().is_none());
         // The shared reset clears circuits too.
         record_model_limit("model", &a, "code 1", 60, &policy);
         record_model_limit("model", &b, "code 1", 60, &policy);
-        assert!(admit_model("model", &policy).is_err());
+        assert!(admit_model("model", &policy, true).is_err());
         assert!(clear_cooldowns(None));
-        assert!(admit_model("model", &policy).unwrap().is_none());
+        assert!(admit_model("model", &policy, true).unwrap().is_none());
         // With the breaker off the circuit never engages.
         let mut off = Policy::default();
         off.breaker.enabled = false;
         record_model_limit("model", &a, "code 1", 60, &policy);
         record_model_limit("model", &b, "code 1", 60, &policy);
-        assert!(admit_model("model", &off).unwrap().is_none());
+        assert!(admit_model("model", &off, true).unwrap().is_none());
         assert_eq!(record_model_limit("model", &a, "code 1", 60, &off), None);
     }
 
@@ -1027,7 +1166,7 @@ mod tests {
         assert!((89..=90).contains(&limited.retry_after));
         assert_eq!(limited.accounts, 2);
         assert_eq!(limited.reason, "limited");
-        assert!((89..=90).contains(&admit_model("model", &policy).unwrap_err().retry_after));
+        assert!((89..=90).contains(&admit_model("model", &policy, true).unwrap_err().retry_after));
         // Busy is not a rate limit, nor is an account-wide cooldown alone.
         clear_cooldowns(None);
         let first = acquire(&["model"], "", &policy, 5).await.unwrap();
@@ -1079,7 +1218,7 @@ mod tests {
             record_model_limit("model", &a, "code 1", 60, &fixed),
             Some(60)
         );
-        assert!(admit_model("model", &policy).is_err());
+        assert!(admit_model("model", &policy, true).is_err());
     }
 
     #[test]

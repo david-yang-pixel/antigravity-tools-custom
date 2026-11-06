@@ -1769,3 +1769,99 @@ async fn workbuddy_stream_and_nonstream_usage_aggregate_on_one_stats_key() {
     assert_eq!(row.total_cached_tokens, 1200);
     assert_eq!(row.total_tokens, 2040);
 }
+
+const SONNET: &str = "claude-sonnet-4-6";
+const SONNET_SG: &str = "claude-sonnet-4-6-sg";
+
+/// Accounts as (uid, native ID); returns their account IDs in order.
+fn seed_natives(accounts: &[(&str, &str)]) -> Vec<String> {
+    accounts
+        .iter()
+        .map(|(uid, native)| {
+            let mut account = workbuddy::accounts::parse_import(json!({"uid":uid,"accessToken":format!("token-{uid}"),"expiresAt":workbuddy::accounts::now()+3600})).unwrap();
+            account.models.push(workbuddy::accounts::Model {
+                id: (*native).into(),
+                name: (*native).into(),
+            });
+            workbuddy::accounts::upsert(account).unwrap().id
+        })
+        .collect()
+}
+
+async fn send_group(text: &str, policy: Policy) -> Response {
+    let payload = json!({"messages":[{"role":"system","content":"caller"},{"role":"user","content":text}],"stream":false});
+    forward(
+        5,
+        payload,
+        false,
+        "wb-sonnet",
+        &[SONNET.to_owned(), SONNET_SG.to_owned()],
+        codec::Protocol::Chat,
+        &codec::Namespaced::default(),
+        "scope",
+        policy,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn workbuddy_group_recovering_native_id_rejoins_while_a_sibling_is_healthy() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let ids = seed_natives(&[
+        ("uid-cn-0", SONNET),
+        ("uid-cn-1", SONNET),
+        ("uid-sg", SONNET_SG),
+    ]);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _mock = serve(
+        Router::new()
+            .route("/v2/chat/completions", post(recording))
+            .with_state(seen.clone()),
+    )
+    .await;
+    let mut policy = Policy::default();
+    policy.sticky.mode = crate::proxy::sticky_config::SchedulingMode::PerformanceFirst;
+    for id in &ids[..2] {
+        workbuddy::accounts::scheduling::record_model_limit(SONNET, id, "code 14003", 60, &policy);
+    }
+    // The hold is over; the healthy sibling must not keep the domestic pool out forever.
+    workbuddy::accounts::scheduling::expire_model_circuits();
+    for text in ["one", "two", "three"] {
+        let response = send_group(text, policy.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = to_bytes(response.into_body(), 100_000).await.unwrap();
+    }
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, model, _)| model == SONNET));
+    // The served probe closed the circuit: both native IDs are admitted without a probe.
+    let admission =
+        workbuddy::accounts::scheduling::admit_models(&[SONNET, SONNET_SG], &policy).unwrap();
+    assert_eq!(admission.targets, [SONNET, SONNET_SG]);
+    assert!(admission.probe.is_none());
+}
+
+#[tokio::test]
+async fn workbuddy_group_open_circuit_with_cooling_sibling_answers_429_not_503() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let ids = seed_natives(&[
+        ("uid-cn-0", SONNET),
+        ("uid-cn-1", SONNET),
+        ("uid-sg", SONNET_SG),
+    ]);
+    let policy = Policy::default();
+    // Two domestic accounts agree: the circuit opens, though neither account is cooling.
+    for id in &ids[..2] {
+        workbuddy::accounts::scheduling::record_model_limit(SONNET, id, "code 14003", 120, &policy);
+    }
+    let lease = workbuddy::accounts::acquire(SONNET_SG).unwrap();
+    let cooled = lease.model_failure("code 14003", 60);
+    drop(lease);
+    let (status, retry_after, code, _) = error_of(send_group("one", policy).await).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code, "workbuddy_model_rate_limited");
+    let wait: i64 = retry_after.unwrap().parse().unwrap();
+    assert!((1..=cooled.min(120)).contains(&wait), "{wait}");
+}

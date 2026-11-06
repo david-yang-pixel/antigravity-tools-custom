@@ -252,31 +252,37 @@ async fn forward(
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.clamp(1, 3600));
     let session = workbuddy::client::session_key(scope, &payload);
     // A model the upstream is rate-limiting across accounts is held here, before it can
-    // spend another account. The probe guard (if any) lives until this request ends.
+    // spend another account. A probe guard (if any) is settled after every lease.
     let all: Vec<&str> = targets.iter().map(String::as_str).collect();
     let wanted = targets.join(", ");
-    let admitted = match workbuddy::accounts::scheduling::admit_models(&all, &policy) {
-        Ok(admitted) => admitted,
+    let admission = match workbuddy::accounts::scheduling::admit_models(&all, &policy) {
+        Ok(admission) => admission,
         Err(limited) => return model_limited(&wanted, &limited),
     };
-    let probe = admitted.probe;
-    let admitted: Vec<&str> = admitted.targets.iter().map(String::as_str).collect();
-    let admission = if probe.is_some() {
-        policy.for_probe()
-    } else {
-        policy.clone()
-    };
+    let lease_policy = admission.lease_policy(&policy);
+    let workbuddy::accounts::scheduling::Admission {
+        targets: admitted_targets,
+        mut probe,
+        held,
+    } = admission;
+    let mut admitted: Vec<&str> = admitted_targets.iter().map(String::as_str).collect();
     let mut lease =
-        match workbuddy::accounts::scheduling::acquire(&admitted, &session, &admission, timeout)
+        match workbuddy::accounts::scheduling::acquire(&admitted, &session, &lease_policy, timeout)
             .await
         {
             Ok(lease) => lease,
             Err(message) => {
-                // Every account cooling for this model is a rate limit, not an outage.
+                // Every admitted target cooling is a rate limit, not an outage; targets
+                // admission already held count toward the shortest wait.
                 if let Some(limited) =
-                    workbuddy::accounts::scheduling::hold_cooling_models(&all, &policy)
+                    workbuddy::accounts::scheduling::hold_cooling_models(&admitted, &policy)
                 {
-                    return model_limited(&wanted, &limited);
+                    let shortest = held
+                        .into_iter()
+                        .chain(std::iter::once(limited))
+                        .min_by_key(|hold| hold.retry_after)
+                        .expect("at least one hold");
+                    return model_limited(&wanted, &shortest);
                 }
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -285,7 +291,7 @@ async fn forward(
                 );
             }
         };
-    let _probe = probe;
+    workbuddy::accounts::scheduling::settle_probe(&mut probe, &mut admitted, lease.model());
     let mut tried = Vec::new();
     let mut failovers = 0usize;
     loop {
@@ -315,6 +321,7 @@ async fn forward(
             Ok(Some(next)) => next,
             _ => return failure.response,
         };
+        workbuddy::accounts::scheduling::settle_probe(&mut probe, &mut admitted, lease.model());
         tracing::warn!(
             "WorkBuddy account failed before generation (HTTP {}); retrying on another account",
             failure.response.status().as_u16()
