@@ -104,7 +104,7 @@ pub fn try_acquire(
         "{}:{}:{}:{session}",
         crate::modules::account::get_data_dir()?.display(),
         provider.key(),
-        targets.join(",")
+        crate::proxy::sticky_config::target_affinity_key(targets)
     );
     let sticky = policy.sticky.mode != SchedulingMode::PerformanceFirst && !session.is_empty();
     let mut runtime = RUNTIME

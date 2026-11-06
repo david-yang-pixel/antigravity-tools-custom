@@ -115,7 +115,11 @@ fn try_acquire_inner(
         .map_err(|_| "WorkBuddy sessions unavailable")?;
     let now = now();
     sessions.retain(|_, binding| now.saturating_sub(binding.touched) < 3600);
-    let session_key = format!("{}:{}:{session}", path()?.display(), targets.join(","));
+    let session_key = format!(
+        "{}:{}:{session}",
+        path()?.display(),
+        crate::proxy::sticky_config::target_affinity_key(targets)
+    );
     let sticky = policy.sticky.mode != SchedulingMode::PerformanceFirst && !session.is_empty();
     if !sticky {
         sessions.remove(&session_key);
