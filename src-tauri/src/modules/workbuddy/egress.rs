@@ -14,7 +14,9 @@ pub use shared::{LoginHold, Probe, Update, View};
 const POOL: Pool = Pool::WorkBuddy;
 const PROBE_URL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-static CLIENTS: LazyLock<Mutex<HashMap<String, rquest::Client>>> = LazyLock::new(Default::default);
+type ClientRoute = (String, String);
+static CLIENTS: LazyLock<Mutex<HashMap<String, (ClientRoute, rquest::Client)>>> =
+    LazyLock::new(Default::default);
 /// Direct accounts still share this server's address. They must not also share
 /// one HTTP/2 connection, or several tokens ride the same socket.
 static DIRECT_CLIENTS: LazyLock<Mutex<HashMap<String, rquest::Client>>> =
@@ -39,12 +41,15 @@ fn direct_for(account_id: &str) -> Result<rquest::Client, String> {
     clients.insert(account_id.to_owned(), client.clone());
     Ok(client)
 }
-fn proxied(proxy_url: &str) -> Result<rquest::Client, String> {
+fn proxied(owner: &str, proxy_url: &str, node: &str) -> Result<rquest::Client, String> {
+    let route = (proxy_url.to_owned(), node.to_owned());
     let mut clients = CLIENTS
         .lock()
         .map_err(|_| "Egress client cache unavailable")?;
-    if let Some(client) = clients.get(proxy_url) {
-        return Ok(client.clone());
+    if let Some((built_for, client)) = clients.get(owner) {
+        if *built_for == route {
+            return Ok(client.clone());
+        }
     }
     let proxy = rquest::Proxy::all(proxy_url).map_err(|_| "Invalid egress route")?;
     let client = super::client::builder()
@@ -54,7 +59,7 @@ fn proxied(proxy_url: &str) -> Result<rquest::Client, String> {
     if clients.len() >= 1024 {
         clients.clear();
     }
-    clients.insert(proxy_url.to_owned(), client.clone());
+    clients.insert(owner.to_owned(), (route, client.clone()));
     Ok(client)
 }
 
@@ -62,7 +67,9 @@ fn proxied(proxy_url: &str) -> Result<rquest::Client, String> {
 pub async fn client_for(account: &Account) -> Result<rquest::Client, String> {
     match shared::exit_for(POOL, &account.id).await? {
         Exit::Off | Exit::Direct => direct_for(&account.id),
-        Exit::Proxy { url, .. } => proxied(&url),
+        // A selector's SOCKS URL remains stable when its selected node changes.
+        // Discard old keep-alive connections instead of sending on the old exit.
+        Exit::Proxy { url, node } => proxied(&account.id, &url, &node),
     }
 }
 
@@ -79,7 +86,7 @@ pub async fn login_route(preferred: Option<&str>) -> Result<LoginRoute, String> 
     let mut route = shared::login_route(POOL, preferred).await?;
     let client = match &route.exit {
         Exit::Off | Exit::Direct => direct()?,
-        Exit::Proxy { url, .. } => proxied(url)?,
+        Exit::Proxy { url, node } => proxied(&format!("login:{node}"), url, node)?,
     };
     Ok(LoginRoute {
         client,
@@ -98,7 +105,54 @@ pub fn forget(account_id: &str) {
     if let Ok(mut clients) = DIRECT_CLIENTS.lock() {
         clients.remove(account_id);
     }
+    if let Ok(mut clients) = CLIENTS.lock() {
+        clients.remove(account_id);
+    }
     shared::forget(POOL, account_id)
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn workbuddy_proxy_connections_are_account_isolated_and_rebuilt_after_node_changes() {
+        use axum::{extract::ConnectInfo, Router};
+        use std::net::SocketAddr;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .fallback(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.to_string() });
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        async fn peer(client: rquest::Client) -> String {
+            client
+                .get("http://workbuddy.invalid/test")
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        let first = peer(proxied(&a, &proxy, "node-1").unwrap()).await;
+        assert_eq!(peer(proxied(&a, &proxy, "node-1").unwrap()).await, first);
+        assert_ne!(peer(proxied(&b, &proxy, "node-1").unwrap()).await, first);
+        assert_ne!(peer(proxied(&a, &proxy, "node-2").unwrap()).await, first);
+        let mut clients = CLIENTS.lock().unwrap();
+        clients.remove(&a);
+        clients.remove(&b);
+        server.abort();
+    }
 }
 pub async fn view() -> Result<View, String> {
     shared::view(POOL).await

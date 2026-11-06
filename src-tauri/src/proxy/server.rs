@@ -1113,6 +1113,10 @@ impl AxumServer {
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
             )
             .route(
+                "/workbuddy-client-version",
+                post(admin_check_workbuddy_client_version),
+            )
+            .route(
                 "/custom-upstreams",
                 get(admin_get_custom_upstreams).post(admin_save_custom_upstreams),
             )
@@ -2992,6 +2996,15 @@ async fn admin_test_native_account_egress(
 async fn admin_get_workbuddy_settings(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::workbuddy::get_workbuddy_settings()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+
+async fn admin_check_workbuddy_client_version(
+    Json(payload): Json<crate::commands::workbuddy::ClientVersionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::workbuddy::check_workbuddy_client_version(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

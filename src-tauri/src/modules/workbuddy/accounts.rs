@@ -84,6 +84,7 @@ pub struct AccountView {
     pub last_error: Option<String>,
     pub status: String,
     pub in_flight: usize,
+    pub client_profile: super::identity::ProfileView,
     pub management: super::maintenance::Management,
     pub health: Health,
     pub cooldown_until: i64,
@@ -337,6 +338,7 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         })
         .unwrap_or_default();
     model_cooldowns.sort_by(|a, b| a.model.cmp(&b.model));
+    let client_profile = super::identity::profile_view(&account);
     Ok(AccountView {
         id: account.id,
         uid: account.uid,
@@ -350,6 +352,7 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         last_error: account.last_error,
         status: status.into(),
         in_flight: entry.map(|e| e.in_flight).unwrap_or(0),
+        client_profile,
         management: account.management,
         health: entry.map(|e| e.health.clone()).unwrap_or_default(),
         cooldown_until: entry.map(|e| e.cooldown_until).unwrap_or(0),
@@ -377,6 +380,10 @@ pub fn validate(account: &Account) -> Result<(), String> {
         &account.access_token,
         &account.refresh_token,
         &account.device_token,
+        &account.client.product_version,
+        &account.client.cli_version,
+        &account.client.machine_id,
+        &account.client.session_id,
     ] {
         if value.len() > 16384
             || value.starts_with("ag_enc_")
@@ -410,9 +417,16 @@ pub fn upsert(mut account: Account) -> Result<AccountView, String> {
             account.models_verified_at = old.models_verified_at;
             account.management = old.management.clone();
             account.management.next_sync_at = 0;
-            // Stable per-account fingerprints survive reauthorization even when the
-            // new payload carries a different non-empty device_token / client block.
-            if !old.device_token.is_empty() {
+            // New credentials permit an explicit recovery, but cannot reset the
+            // persisted daily budget or shorten an upstream Retry-After hold.
+            account.management.checkin_guard.pause = None;
+            if account.management.checkin_status == "paused" {
+                account.management.checkin_status = "pending".into();
+                account.management.checkin_error = None;
+            }
+            // Machine/session identity survives reauthorization. A fresh SDK token
+            // may replace its old snapshot, but an omitted token does not erase it.
+            if account.device_token.is_empty() {
                 account.device_token = old.device_token.clone();
             }
             if account.refresh_token.is_empty() {
@@ -926,7 +940,14 @@ pub fn parse_import(value: Value) -> Result<Account, String> {
         realm,
         access_token: text(auth, &["accessToken", "access_token"]),
         refresh_token: text(auth, &["refreshToken", "refresh_token"]),
-        device_token: text(&value, &["device_token"]),
+        device_token: {
+            let token = text(auth, &["deviceToken", "device_token"]);
+            if token.is_empty() {
+                text(&value, &["deviceToken", "device_token"])
+            } else {
+                token
+            }
+        },
         expires_at: auth
             .get("expiresAt")
             .or_else(|| auth.get("expires_at"))
@@ -940,7 +961,13 @@ pub fn parse_import(value: Value) -> Result<Account, String> {
         last_error: None,
         revision: uuid::Uuid::new_v4().to_string(),
         management: super::maintenance::Management::default(),
-        client: super::identity::ClientIdentity::default(),
+        client: value
+            .get("client")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "Invalid WorkBuddy client profile")?
+            .unwrap_or_default(),
     };
     validate(&account)?;
     Ok(account)
@@ -1089,7 +1116,7 @@ mod tests {
         assert!(!public.contains("token"));
         assert_eq!(get(&view.id).unwrap().access_token, "secret_access");
         let fingerprint = get(&view.id).unwrap();
-        assert!(!fingerprint.device_token.is_empty());
+        assert!(fingerprint.device_token.is_empty());
         assert!(!fingerprint.client.machine_id.is_empty());
         set_enabled(&view.id, false).unwrap();
         let mut reauth = parse_import(value).unwrap();
@@ -1102,9 +1129,8 @@ mod tests {
         assert_eq!(updated.models.len(), 1);
         assert_eq!(updated.candidate_model_count, 1);
         let kept = get(&view.id).unwrap();
-        assert_eq!(kept.device_token, fingerprint.device_token);
+        assert_eq!(kept.device_token, "replacement-device-token");
         assert_eq!(kept.client.machine_id, fingerprint.client.machine_id);
-        assert_ne!(kept.device_token, "replacement-device-token");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

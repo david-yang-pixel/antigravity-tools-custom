@@ -31,6 +31,7 @@ pub struct Management {
     pub checkin_attempt_at: i64,
     pub checkin_status: String,
     pub checkin_error: Option<String>,
+    pub checkin_guard: super::checkin::State,
 }
 impl Default for Management {
     fn default() -> Self {
@@ -54,6 +55,7 @@ impl Default for Management {
             checkin_attempt_at: 0,
             checkin_status: "pending".into(),
             checkin_error: None,
+            checkin_guard: super::checkin::State::default(),
         }
     }
 }
@@ -86,6 +88,11 @@ fn checkin_due(a: &Account, now: i64) -> bool {
         || !a.management.auto_checkin
         || !a.management.auto_checkin_chosen
         || a.management.checkin_date.as_deref() == Some(day(now).as_str())
+        || !recently_active(a, now)
+        || a.management
+            .checkin_guard
+            .admission(&day(now), now)
+            .is_err()
     {
         return false;
     }
@@ -125,9 +132,24 @@ pub async fn run(
     automatic: bool,
 ) -> Result<AccountView, String> {
     let lock = accounts::refresh_lock(&format!("maintenance:{id}"))?;
-    let _guard = lock.lock().await;
+    let _guard = if checkin_now {
+        lock.try_lock()
+            .map_err(|_| "WorkBuddy account maintenance is already running")?
+    } else {
+        lock.lock().await
+    };
     let initial = accounts::get(id)?;
     let now = accounts::now();
+    if checkin_now {
+        if initial.realm != Realm::Cn || !initial.enabled {
+            return Err("Check-in requires an enabled domestic WorkBuddy account".into());
+        }
+        // An idempotent repeat must not refresh credentials or poll other endpoints.
+        if initial.management.checkin_date.as_deref() == Some(day(now).as_str()) {
+            return accounts::view(initial);
+        }
+        initial.management.checkin_guard.admission(&day(now), now)?;
+    }
     if automatic && !due(&initial, now) {
         return accounts::view(initial);
     }
@@ -135,7 +157,24 @@ pub async fn run(
     // real generation, so an idle pool does not heartbeat the upstream. A run
     // that only renews the token or checks in leaves the sync schedule alone,
     // so the first poll after the account becomes active is not pushed back.
-    let polls_catalog = !automatic || recently_active(&initial, now);
+    let polls_catalog = if automatic {
+        catalog_due(&initial, now)
+    } else {
+        !checkin_now
+    };
+    let wants_checkin = checkin_now || (automatic && checkin_due(&initial, now));
+    if wants_checkin {
+        accounts::edit_management(id, |m| {
+            m.checkin_guard
+                .reserve(day(now), now, super::identity::checkin_retry_secs(id, now));
+            m.checkin_attempt_at = now;
+            // Remains visible if credential preparation, cancellation or a crash
+            // prevents recording a final response. Never retry immediately.
+            m.checkin_status = "failed".into();
+            m.checkin_error =
+                Some("Check-in attempt has no confirmed result; waiting for cooldown".into());
+        })?;
+    }
     if polls_catalog {
         // Persist the attempt before network I/O so a restart cannot cause a tight retry loop.
         // Per-account jitter keeps the pool from syncing in lockstep.
@@ -148,26 +187,35 @@ pub async fn run(
     };
     // Recheck disable/management toggles before starting optional side effects.
     let current = accounts::get(id)?;
-    if automatic && (!current.enabled || !current.management.managed) {
+    if !current.enabled || (automatic && !current.management.managed) {
         return accounts::view(current);
     }
-    account.management.managed = current.management.managed;
-    account.management.auto_checkin = current.management.auto_checkin;
-    account.management.keepalive = current.management.keepalive;
-    let should_checkin = checkin_now || (automatic && checkin_due(&account, now));
+    account.management = current.management;
+    let should_checkin = wants_checkin
+        && (checkin_now
+            || (account.management.auto_checkin && account.management.auto_checkin_chosen));
     if should_checkin && account.realm == Realm::Cn {
-        accounts::edit_management(id, |m| m.checkin_attempt_at = now)?;
-        account.management.checkin_attempt_at = now;
         match super::resources::checkin(&account).await {
             Ok(status) => {
                 account.management.checkin_status = status.into();
                 account.management.checkin_date = Some(day(now));
                 account.management.checkin_at = accounts::now();
                 account.management.checkin_error = None;
+                account.management.checkin_guard.pause = None;
             }
             Err(error) => {
-                account.management.checkin_status = "failed".into();
-                account.management.checkin_error = Some(error);
+                account.management.checkin_status = if error.pause.is_some() {
+                    "paused"
+                } else {
+                    "failed"
+                }
+                .into();
+                account.management.checkin_guard.fail(&error);
+                account.management.checkin_error = Some(error.message);
+                // Stop this run here. A rejected check-in must not be followed
+                // by additional model/credit probes as part of the same action.
+                accounts::save_observation(&mut account)?;
+                return accounts::view(account);
             }
         }
     }
@@ -199,6 +247,26 @@ pub async fn run(
     accounts::save_observation(&mut account)?;
     super::register_models(&account.available_models())?;
     accounts::view(account)
+}
+
+/// Recovery does not send a request or reset today's attempts / server cooldown.
+pub async fn resume_checkin(id: &str) -> Result<AccountView, String> {
+    let lock = accounts::refresh_lock(&format!("maintenance:{id}"))?;
+    let _guard = lock
+        .try_lock()
+        .map_err(|_| "WorkBuddy account maintenance is already running")?;
+    if accounts::get(id)?.management.checkin_guard.pause
+        == Some(super::checkin::Pause::Authorization)
+    {
+        return Err("Reauthorize this WorkBuddy account before resuming check-in".into());
+    }
+    accounts::edit_management(id, |m| {
+        m.checkin_guard.pause = None;
+        m.checkin_error = None;
+        if m.checkin_date.as_deref() != Some(day(accounts::now()).as_str()) {
+            m.checkin_status = "pending".into();
+        }
+    })
 }
 pub fn start() {
     static STARTED: AtomicBool = AtomicBool::new(false);
@@ -262,10 +330,16 @@ mod tests {
         let evening = midnight + 23 * 3600; // past the 22:30 same-day fallback
         assert!(due(&a, midnight));
         assert!(!checkin_due(&a, midnight));
+        // Even an enabled check-in switch must not wake an idle account.
+        assert!(!checkin_due(&a, evening));
+        accounts::note_generation_at(&a.id, evening);
         assert!(checkin_due(&a, evening));
         a.management.checkin_date = Some(day(evening));
         assert!(!checkin_due(&a, evening));
+        assert!(!checkin_due(&a, evening + 86400));
+        accounts::note_generation_at(&a.id, evening + 86400);
         assert!(checkin_due(&a, evening + 86400));
+        accounts::note_generation_at(&a.id, evening);
         a.management.checkin_date = None;
         a.management.checkin_attempt_at = evening;
         assert!(!checkin_due(&a, evening + 60));
@@ -375,8 +449,9 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         }));
         let id=accounts::upsert(accounts::parse_import(json!({"uid":"managed","accessToken":"old","refreshToken":"r","expiresAt":accounts::now()+3600})).unwrap()).unwrap().id;
-        // Force refresh+check-in: habit slots are daytime-only and would skip around midnight.
-        let a = run(&id, true, true, false).await.unwrap();
+        run(&id, true, false, false).await.unwrap();
+        // Check-in alone must not poll models and credits, even when done manually.
+        let a = run(&id, false, true, false).await.unwrap();
         assert_eq!(a.management.checkin_status, "already");
         assert!(a.management.checkin_error.is_none());
         assert!(a.management.checkin_at > 0);
@@ -419,5 +494,112 @@ mod tests {
         assert_eq!(resource_calls.load(Ordering::SeqCst), polled);
         assert_eq!(after.last_sync_at, before.last_sync_at);
         assert_eq!(after.next_sync_at, before.next_sync_at);
+    }
+
+    #[tokio::test]
+    async fn workbuddy_checkin_manual_and_automatic_share_persisted_safety_controls() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicU16, AtomicUsize, Ordering},
+            Arc,
+        };
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let status = Arc::new(AtomicU16::new(403));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let unexpected = Arc::new(AtomicUsize::new(0));
+        let unhandled = unexpected.clone();
+        let (s, c) = (status.clone(), calls.clone());
+        let app = Router::new()
+            .route(
+                "/v2/billing/meter/daily-checkin",
+                post(move || {
+                    let (s, c) = (s.clone(), c.clone());
+                    async move {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        let status = s.load(Ordering::SeqCst);
+                        (
+                            StatusCode::from_u16(status).unwrap(),
+                            [("retry-after", "172800")],
+                            Json(json!({"code": if status == 200 {0} else {12345}})),
+                        )
+                    }
+                }),
+            )
+            .fallback(move || {
+                let unhandled = unhandled.clone();
+                async move {
+                    unhandled.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "STELLAR_TEST_WORKBUDDY_BASE",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        struct Mock(tokio::task::JoinHandle<()>);
+        impl Drop for Mock {
+            fn drop(&mut self) {
+                self.0.abort();
+                std::env::remove_var("STELLAR_TEST_WORKBUDDY_BASE");
+            }
+        }
+        let _mock = Mock(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        for http in [403, 401, 429, 503, 200] {
+            status.store(http, Ordering::SeqCst);
+            let auth = json!({"uid":format!("checkin-{http}"),"accessToken":"valid","expiresAt":accounts::now()+86400});
+            let id = accounts::upsert(accounts::parse_import(auth.clone()).unwrap())
+                .unwrap()
+                .id;
+            accounts::configure(&id, Some(true), Some(true), Some(false), None, None).unwrap();
+            // Idle automatic maintenance performs no check-in.
+            let before = calls.load(Ordering::SeqCst);
+            run(&id, false, false, true).await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), before);
+            let result = run(&id, false, true, false).await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+            assert_eq!(result.management.checkin_guard.attempts, 1);
+            if http == 200 {
+                assert_eq!(result.management.checkin_status, "success");
+                run(&id, false, true, false).await.unwrap();
+            } else {
+                assert!(
+                    result.management.checkin_guard.next_attempt_at >= accounts::now() + 172799
+                );
+                assert!(run(&id, false, true, false).await.is_err());
+                accounts::configure(&id, None, Some(false), None, None, None).unwrap();
+                accounts::configure(&id, None, Some(true), None, None, None).unwrap();
+                let saved = accounts::get(&id).unwrap();
+                assert_eq!(saved.management.checkin_guard.attempts, 1);
+                assert_eq!(
+                    saved.management.checkin_guard.next_attempt_at,
+                    result.management.checkin_guard.next_attempt_at
+                );
+                if http == 401 {
+                    assert!(resume_checkin(&id).await.is_err());
+                    accounts::upsert(accounts::parse_import(auth).unwrap()).unwrap();
+                    assert!(accounts::get(&id)
+                        .unwrap()
+                        .management
+                        .checkin_guard
+                        .pause
+                        .is_none());
+                } else if http == 403 {
+                    resume_checkin(&id).await.unwrap();
+                }
+                // Recovery/reauthorization must not bypass a server's waiting time.
+                assert!(run(&id, false, true, false).await.is_err());
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+            assert_eq!(
+                unexpected.load(Ordering::SeqCst),
+                0,
+                "Check-in must not poll other endpoints"
+            );
+            accounts::set_enabled(&id, false).unwrap();
+            assert!(run(&id, false, true, false).await.is_err());
+        }
     }
 }

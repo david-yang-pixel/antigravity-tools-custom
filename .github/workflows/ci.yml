@@ -90,6 +90,10 @@ jobs:
           cd src-tauri
           cargo check
 
+      - name: WorkBuddy regression tests
+        working-directory: src-tauri
+        run: cargo test --locked --lib workbuddy -- --test-threads=1
+
   # Tauri 构建测试（不打包）
   build-tauri:
     name: Build Tauri App
