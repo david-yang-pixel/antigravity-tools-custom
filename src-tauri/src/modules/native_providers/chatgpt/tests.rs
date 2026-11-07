@@ -985,7 +985,7 @@ async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
     .enumerate()
     {
         // The requested realm is ignored: ChatGPT accounts are always global.
-        let view = login::import(Provider::ChatGpt, Realm::Cn, auth.clone())
+        let view = login::import(Provider::ChatGpt, Realm::Cn, auth.clone(), None)
             .await
             .unwrap_or_else(|e| panic!("{auth}: {e}"));
         assert_eq!(view.realm, Realm::Global);
@@ -1009,7 +1009,7 @@ async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
     };
     assert_eq!(form["refresh_token"], "rt-bare");
     for bad in [json!(""), json!({}), json!({"access_token": "a"}), json!(5)] {
-        let error = login::import(Provider::ChatGpt, Realm::Global, bad.clone())
+        let error = login::import(Provider::ChatGpt, Realm::Global, bad.clone(), None)
             .await
             .err()
             .unwrap_or_else(|| panic!("{bad} was accepted"));
@@ -1022,29 +1022,190 @@ async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
 async fn chatgpt_import_rejects_saved_refresh_token_before_network() {
     use crate::modules::native_providers::login;
     let _sandbox = Sandbox::new();
-    // No rotation: the saved refresh token stays the one the administrator pasted.
-    let server = mock(200, &[], import_token_response(false), false).await;
-    login::import(Provider::ChatGpt, Realm::Global, json!("rt-dup"))
+    // The token rotates on import, so the saved refresh token is no longer the pasted one.
+    let server = mock(200, &[], import_token_response(true), false).await;
+    login::import(Provider::ChatGpt, Realm::Global, json!("rt-dup"), None)
         .await
         .unwrap();
     let before = serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap();
+    assert_eq!(before[0]["credentials"]["refresh_token"], "rotated");
+    for again in [json!("rt-dup"), json!({"refresh_token": " rt-dup "})] {
+        let error = login::import(Provider::ChatGpt, Realm::Global, again, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("already saved"), "{error}");
+    }
+    assert_eq!(token_requests(&server), 1);
+    let after = serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap();
+    assert_eq!(before, after);
+    // The fingerprint is a SHA-256 digest, never the token itself.
+    assert!(!after.to_string().contains("rt-dup"));
+}
+
+fn write_egress(value: Value) {
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("workbuddy_egress.json"),
+        value.to_string(),
+    )
+    .unwrap();
+}
+
+/// A saved ChatGPT account the import token (`acc:u1`) may or may not belong to.
+fn saved_chatgpt(uid: &str) -> Account {
+    let mut a = chatgpt_account();
+    a.uid = uid.into();
+    a.credentials.refresh_token = "old-rt".into();
+    a.expires_at = crate::modules::native_providers::now() + 7200;
+    store::upsert(a, None).unwrap()
+}
+
+#[tokio::test]
+async fn chatgpt_row_reimport_with_egress_reenables_the_same_account() {
+    use crate::modules::native_providers::{accounts, login};
+    let _sandbox = Sandbox::new();
+    let saved = saved_chatgpt("acc:u1");
+    // A dead refresh token disabled the account.
+    let _dead = mock(400, &[], json!({"error": "invalid_grant"}), false).await;
+    assert!(accounts::fresh(Provider::ChatGpt, &saved.id, true)
+        .await
+        .is_err());
+    assert!(!store::get(Provider::ChatGpt, &saved.id).unwrap().enabled);
+    // Egress on, the account bound to DIRECT: the row import must use that binding
+    // (an unbound login route would need a subscription and fail).
+    write_egress(json!({"pools": {"chatgpt": {"enabled": true,
+        "bindings": {saved.id.clone(): "DIRECT"}}}}));
+    let server = mock(200, &[], import_token_response(true), false).await;
+    let view = login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!("new-rt"),
+        Some(&saved.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.id, saved.id);
+    assert!(view.enabled);
+    assert_eq!(token_requests(&server), 1);
+    let all = store::all(Provider::ChatGpt).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].id, saved.id);
+    assert!(all[0].enabled);
+    assert!(all[0].auth_error.is_none());
+    assert_eq!(all[0].credentials.refresh_token, "rotated");
+}
+
+#[tokio::test]
+async fn chatgpt_reimport_keeps_a_manually_disabled_account_off() {
+    use crate::modules::native_providers::{accounts, login};
+    let _sandbox = Sandbox::new();
+    let saved = saved_chatgpt("acc:u1");
+    accounts::configure(Provider::ChatGpt, &saved.id, Some(false), None).unwrap();
+    let _server = mock(200, &[], import_token_response(true), false).await;
+    let view = login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!("new-rt"),
+        Some(&saved.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.id, saved.id);
+    assert!(!view.enabled);
+}
+
+#[tokio::test]
+async fn chatgpt_row_reimport_rejects_a_token_of_another_account() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let saved = saved_chatgpt("other:u9");
+    let before = serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap();
+    let _server = mock(200, &[], import_token_response(true), false).await;
     let error = login::import(
         Provider::ChatGpt,
         Realm::Global,
-        json!({"refresh_token": "rt-dup"}),
+        json!("new-rt"),
+        Some(&saved.id),
     )
     .await
     .err()
     .unwrap();
-    assert!(error.contains("already saved"), "{error}");
-    assert_eq!(token_requests(&server), 1);
-    let after = store::all(Provider::ChatGpt).unwrap();
-    assert_eq!(after.len(), 1);
-    assert_eq!(after[0].credentials.refresh_token, "rt-dup");
+    assert_eq!(error, "This token belongs to a different ChatGPT account");
     assert_eq!(
-        before[0]["credentials"],
-        serde_json::to_value(&after[0]).unwrap()["credentials"]
+        before,
+        serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap()
     );
+}
+
+#[tokio::test]
+async fn chatgpt_bound_elsewhere_import_points_to_the_account_row() {
+    use crate::modules::native_providers::login;
+    use axum::{response::IntoResponse, Router};
+    let _sandbox = Sandbox::new();
+    let saved = saved_chatgpt("acc:u1");
+    // Egress is switched on (binding the saved account to DIRECT) while the import's
+    // refresh is in flight, after it took an unbound login route.
+    let settings = crate::modules::account::get_data_dir()
+        .unwrap()
+        .join("workbuddy_egress.json");
+    let enable = json!({"pools": {"chatgpt": {"enabled": true,
+        "bindings": {saved.id.clone(): "DIRECT"}}}})
+    .to_string();
+    let app = Router::new().fallback(move || {
+        let (settings, enable) = (settings.clone(), enable.clone());
+        async move {
+            std::fs::write(&settings, enable).unwrap();
+            (
+                [("content-type", "application/json")],
+                import_token_response(true).to_string(),
+            )
+                .into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    endpoints::set_test(Some(endpoints::Endpoints {
+        auth: format!("http://{addr}"),
+        backend: format!("http://{addr}/backend-api"),
+    }));
+    let _reset = ResetEndpoints;
+    let error = login::import(Provider::ChatGpt, Realm::Global, json!("new-rt"), None)
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("ChatGPT"), "{error}");
+    assert!(error.contains("own row"), "{error}");
+    assert!(!error.contains("reauthorize"), "{error}");
+    assert_eq!(
+        store::get(Provider::ChatGpt, &saved.id)
+            .unwrap()
+            .credentials
+            .refresh_token,
+        "old-rt"
+    );
+}
+
+#[tokio::test]
+async fn chatgpt_sync_disables_account_on_dead_metadata_failure() {
+    use crate::modules::native_providers::accounts;
+    let _sandbox = Sandbox::new();
+    let _server = mock(
+        402,
+        &[],
+        json!({"error": {"code": "deactivated_workspace", "message": "Workspace deactivated"}}),
+        false,
+    )
+    .await;
+    let saved = saved_chatgpt("acc:u1");
+    let _ = accounts::sync(Provider::ChatGpt, &saved.id, false).await;
+    let stored = store::get(Provider::ChatGpt, &saved.id).unwrap();
+    assert!(!stored.enabled);
+    assert_eq!(stored.auth_error.as_deref(), Some("Workspace deactivated"));
 }
 
 #[tokio::test]

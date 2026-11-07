@@ -1296,6 +1296,7 @@ async fn duplicate_import_is_rejected_before_egress_and_preserves_saved_tokens()
             "refreshToken":a.credentials.refresh_token,
             "expiresAt":a.expires_at
         }}),
+        None,
     )
     .await
     .err()
@@ -1332,6 +1333,7 @@ async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() 
         Provider::Qoder,
         Realm::Cn,
         json!({"refreshToken":a.credentials.refresh_token}),
+        None,
     );
     tokio::pin!(import);
     // The vault is empty at the first guard; suspend at the held login lock.

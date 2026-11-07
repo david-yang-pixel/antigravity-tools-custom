@@ -61,6 +61,8 @@ pub fn configure(
     let a = store::update(provider, id, None, |a| {
         if let Some(value) = enabled {
             a.enabled = value;
+            // The administrator decides from here on.
+            a.credential_dead = false;
         }
         if let Some(value) = auto_refresh {
             a.auto_refresh = value;
@@ -106,6 +108,7 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
             a.auth_error = Some(error.to_string());
             if dead {
                 a.enabled = false;
+                a.credential_dead = true;
             } else {
                 a.next_sync_at = now() + 60;
             }
@@ -191,7 +194,23 @@ async fn sync_metadata(
         a = fresh(provider, id, true).await.map_err(|e| e.to_string())?;
         (models, quota) = fetch_metadata(&client, &a, catalog).await;
     }
+    // A metadata answer can declare the credential dead just like a refresh can.
+    let dead = [
+        models.as_ref().and_then(|r| r.as_ref().err()),
+        quota.as_ref().and_then(|r| r.as_ref().err()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|e| match &e.penalty {
+        Some(http::Penalty::Disable { message }) => Some(message.clone()),
+        _ => None,
+    });
     let updated = store::update(provider, id, Some(&a.revision), |stored| {
+        if let Some(message) = dead {
+            stored.enabled = false;
+            stored.credential_dead = true;
+            stored.auth_error = Some(message);
+        }
         match models {
             Some(Ok(models)) => {
                 stored.models = models;
@@ -277,6 +296,7 @@ impl Lease {
             Some(Penalty::Disable { message }) => {
                 let _ = store::update(self.account.provider, &self.account.id, None, |a| {
                     a.enabled = false;
+                    a.credential_dead = true;
                     a.auth_error = Some(message.clone());
                 });
                 self.failure_after(failure.status, None);

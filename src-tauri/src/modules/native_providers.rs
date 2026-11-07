@@ -152,6 +152,10 @@ pub struct Credentials {
     pub id_token: String,
     #[serde(default)]
     pub chatgpt_account_id: String,
+    /// SHA-256 (hex) of every refresh token pasted into an import for this account, so a
+    /// token that was rotated away cannot be imported (and replayed) again.
+    #[serde(default)]
+    pub imported_refresh_sha256: Vec<String>,
 }
 
 /// This value is persisted only inside an authenticated, encrypted vault. Never serialize
@@ -174,6 +178,10 @@ pub struct Account {
     pub quota_error: Option<String>,
     pub models_error: Option<String>,
     pub auth_error: Option<String>,
+    /// The provider declared the credential dead and the account was turned off for it;
+    /// a new authorization turns it back on.
+    #[serde(default)]
+    pub credential_dead: bool,
     pub last_sync_at: i64,
     pub next_sync_at: i64,
     /// New authorizations replace this value, invalidating an older refresh in flight.
@@ -205,6 +213,7 @@ impl Account {
             quota_error: None,
             models_error: None,
             auth_error: None,
+            credential_dead: false,
             last_sync_at: 0,
             next_sync_at: 0,
             revision: uuid::Uuid::new_v4().to_string(),

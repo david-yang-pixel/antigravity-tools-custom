@@ -86,6 +86,9 @@ fn bound_elsewhere(provider: Provider, a: &Account, node: Option<&str>) -> Resul
 }
 const BOUND_ELSEWHERE: &str =
     "This account is bound to another egress node; reauthorize it from its own row";
+/// ChatGPT has no browser reauthorization: its row re-imports a token through its node.
+const CHATGPT_BOUND_ELSEWHERE: &str =
+    "This ChatGPT account is bound to another egress node; re-import its token from the account's own row";
 fn valid(p: &Pending, session: &Session) -> Result<(), String> {
     if *session
         .cancelled
@@ -339,12 +342,19 @@ fn needs_refresh_before_import(a: &Account, at: i64) -> bool {
         || (refreshable && a.expires_at > 0 && a.expires_at <= at + 60)
 }
 
+/// Hex SHA-256 of a pasted refresh token; the token itself is never kept for this.
+fn fingerprint(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
 /// Imports use a new login route, not an existing account's refresh transaction.
 /// Reject known credentials before any network I/O: rotating one and then failing
 /// identity validation or the egress check would strand the saved refresh token.
 /// Check all saved regions, including when the administrator selected the wrong one.
 fn reject_saved_credentials(a: &Account, saved: &[Account]) -> Result<(), String> {
     let supplied = &a.credentials;
+    // A rotated refresh token is no longer saved verbatim; its import fingerprint still is.
+    let pasted = (!supplied.refresh_token.is_empty()).then(|| fingerprint(&supplied.refresh_token));
     if saved.iter().any(|previous| {
         let credentials = &previous.credentials;
         [
@@ -354,6 +364,9 @@ fn reject_saved_credentials(a: &Account, saved: &[Account]) -> Result<(), String
         ]
         .into_iter()
         .any(|(supplied, saved)| !supplied.is_empty() && supplied == saved)
+            || pasted
+                .as_ref()
+                .is_some_and(|digest| credentials.imported_refresh_sha256.contains(digest))
     }) {
         return Err("This credential is already saved; refresh or reauthorize the account from its own row instead of importing it again".into());
     }
@@ -383,15 +396,29 @@ async fn authorize_qoder(
     Ok(())
 }
 
-pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<AccountView, String> {
+pub async fn import(
+    provider: Provider,
+    realm: Realm,
+    value: Value,
+    account_id: Option<&str>,
+) -> Result<AccountView, String> {
     let mut a = match provider {
         Provider::Qoder => imported_account(provider, realm, &value),
         Provider::ChatGpt => imported_chatgpt(&value)?,
     };
+    let pasted = a.credentials.refresh_token.clone();
     reject_saved_credentials(&a, &store::all(provider)?)?;
-    // The account does not exist yet: validate it through the node a new account
-    // would take, and keep that node for it.
-    let route = egress::login_route(Pool::Native(provider), None).await?;
+    // A row re-import goes through that account's own node, like a browser
+    // reauthorization. A new account is validated through the node it would take,
+    // and keeps that node.
+    let preferred = match account_id {
+        Some(id) => {
+            store::get(provider, id)?;
+            egress::bound_node(Pool::Native(provider), id)?
+        }
+        None => None,
+    };
+    let route = egress::login_route(Pool::Native(provider), preferred.as_deref()).await?;
     // Another import may have saved these credentials while we waited for the
     // serialized login route. Recheck under that route's guard before using them.
     reject_saved_credentials(&a, &store::all(provider)?)?;
@@ -413,8 +440,21 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
             chatgpt::identity::apply(&mut a).map_err(|e| e.to_string())?;
         }
     }
+    if let Some(id) = account_id {
+        let previous = store::get(provider, id)?;
+        if previous.uid != a.uid || previous.realm != a.realm {
+            return Err(format!(
+                "This token belongs to a different {} account",
+                provider.name()
+            ));
+        }
+    }
     if bound_elsewhere(provider, &a, route.node.as_deref())? {
-        return Err(BOUND_ELSEWHERE.into());
+        return Err(match provider {
+            Provider::Qoder => BOUND_ELSEWHERE,
+            Provider::ChatGpt => CHATGPT_BOUND_ELSEWHERE,
+        }
+        .into());
     }
     let root = value
         .get("auth")
@@ -435,7 +475,12 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
             a.credentials.device_id = previous.credentials.device_id;
         }
     }
-    let a = store::upsert(a, None)?;
+    if !pasted.is_empty() {
+        a.credentials
+            .imported_refresh_sha256
+            .push(fingerprint(&pasted));
+    }
+    let a = store::upsert(a, account_id)?;
     egress::adopt(Pool::Native(provider), &a.id, route.node.as_deref());
     drop(route);
     let id = a.id.clone();

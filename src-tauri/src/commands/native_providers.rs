@@ -48,6 +48,9 @@ pub struct ImportRequest {
     #[serde(default)]
     pub realm: Realm,
     pub auth: serde_json::Value,
+    /// Re-import onto this saved account, through its own egress node.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct AccountRequest {
@@ -100,7 +103,13 @@ pub async fn cancel_native_login(request: SessionRequest) -> Result<(), String> 
 }
 #[tauri::command]
 pub async fn import_native_account(request: ImportRequest) -> Result<AccountView, String> {
-    native::login::import(request.provider, request.realm, request.auth).await
+    native::login::import(
+        request.provider,
+        request.realm,
+        request.auth,
+        request.account_id.as_deref(),
+    )
+    .await
 }
 #[tauri::command]
 pub async fn update_native_account(request: AccountRequest) -> Result<AccountView, String> {
