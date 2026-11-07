@@ -502,6 +502,39 @@ fn classify_table() {
     assert_eq!(f.message, "too long");
     let f = classify(400, &[], r#"{"error":{"message":"bad field"}}"#);
     assert!(matches!(f.penalty, Some(Penalty::Neutral)) && !f.failover && f.status == 400);
+
+    // Account-level states reported as 400 text.
+    let f = classify(
+        400,
+        &[],
+        r#"{"error":{"message":"Your organization has been disabled."}}"#,
+    );
+    assert!(matches!(f.penalty, Some(Penalty::Disable { .. })) && f.failover && f.status == 400);
+    let f = classify(
+        400,
+        &[],
+        r#"{"error":{"message":"Identity verification is required to use this model."}}"#,
+    );
+    assert!(
+        matches!(
+            f.penalty,
+            Some(Penalty::Breaker {
+                retry_after: Some(5)
+            })
+        ) && f.failover
+            && f.status == 400
+    );
+    let f = classify(
+        400,
+        &[("retry-after", "30")],
+        r#"{"error":{"message":"Identity verification is required"}}"#,
+    );
+    assert!(matches!(
+        f.penalty,
+        Some(Penalty::Breaker {
+            retry_after: Some(30)
+        })
+    ));
 }
 
 #[test]

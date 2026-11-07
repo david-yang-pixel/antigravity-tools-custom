@@ -93,6 +93,18 @@ fn cloudflare(headers: &HeaderMap, raw: &str) -> bool {
     challenged || html || CLOUDFLARE_TEXT.iter().any(|t| lower.contains(t))
 }
 
+fn text_has(text: &str, needle: &str) -> bool {
+    text.to_lowercase().contains(needle)
+}
+
+/// `Retry-After` seconds, else a short cooldown.
+fn retry_after(headers: &HeaderMap) -> u64 {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok()?.trim().parse().ok())
+        .unwrap_or(SHORT_COOLDOWN)
+}
+
 pub fn classify(status: u16, headers: &HeaderMap, body: &str, at: i64) -> Failure {
     let json: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let codes = codes(&json);
@@ -128,16 +140,20 @@ pub fn classify(status: u16, headers: &HeaderMap, body: &str, at: i64) -> Failur
                     message: QUOTA_EXHAUSTED,
                 },
                 None => Penalty::Breaker {
-                    retry_after: Some(
-                        headers
-                            .get(reqwest::header::RETRY_AFTER)
-                            .and_then(|v| v.to_str().ok()?.trim().parse().ok())
-                            .unwrap_or(SHORT_COOLDOWN),
-                    ),
+                    retry_after: Some(retry_after(headers)),
                 },
             };
             fail(429, penalty, true)
         }
+        400 if text_has(&text, "organization has been disabled") => fail(400, disable(), true),
+        // May be model-specific: the account cools down instead of being disabled.
+        400 if text_has(&text, "identity verification is required") => fail(
+            400,
+            Penalty::Breaker {
+                retry_after: Some(retry_after(headers)),
+            },
+            true,
+        ),
         400 if overloaded(&codes, &text) => fail(503, Penalty::Neutral, true),
         400 if model_not_found(&codes, &text) => fail(400, Penalty::Neutral, true),
         // Server-side trouble and unsupported methods are not the account's fault.
