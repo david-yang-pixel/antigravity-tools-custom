@@ -21,6 +21,8 @@ export interface NativeAccount {
     last_sync_at: number; next_sync_at: number; in_flight: number; cooldown_until: number;
     last_error: string | null; successes: number; failures: number;
 }
+/** One account of a batch import (e.g. a sub2api export). */
+export interface BatchItem { label: string; status: 'imported' | 'skipped' | 'failed'; message: string; account: NativeAccount | null }
 export interface NativeSettings { provider: NativeProvider; enabled: boolean; preferred_account_id: string | null; env_locked: boolean }
 export interface NativeLogin { id: string; auth_url: string; expires_at: number }
 export interface NativeLoginPoll { status: 'pending' | 'authorized'; account: NativeAccount | null; }

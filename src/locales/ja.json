@@ -1609,8 +1609,9 @@
   },
   "nativeProviders": {
     "chatgpt": {
-      "importHint": "ChatGPT（Codex）の認証情報を貼り付けます。refresh token そのもの、または {\"refresh_token\":\"...\"} 形式の JSON が使えます。保存前に OpenAI で本人確認します。ChatGPT ではブラウザログインは使えません。",
-      "importPlaceholder": "{\"refresh_token\":\"...\"} またはトークンのみ",
+      "importHint": "ChatGPT（Codex）の認証情報を貼り付けます：refresh token のみ、{\"refresh_token\":\"...\"} 形式の JSON、Codex の auth.json、または sub2api のエクスポート（複数アカウントは 1 件ずつインポート）。有効な access token はそのまま使うため、インポート時に refresh token を消費しません。保存前に OpenAI で本人確認します。ChatGPT はブラウザーでのサインインに対応していません。",
+      "importPlaceholder": "refresh token、{\"refresh_token\":\"...\"}、auth.json または sub2api のエクスポート",
+      "batchResult": "インポート {{imported}} 件、スキップ {{skipped}} 件、失敗 {{failed}} 件",
       "reimport": "再インポート",
       "reimportTitle": "認証情報を再インポート",
       "reimportHint": "このアカウントの認証情報を置き換えます。別の ChatGPT アカウントのトークンは拒否されます。",

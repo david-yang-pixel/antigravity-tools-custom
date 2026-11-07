@@ -78,8 +78,9 @@
     "authorized": "账号授权已保存",
     "loginExpired": "授权已过期，请重新获取链接。",
     "chatgpt": {
-      "importHint": "粘贴 ChatGPT（Codex）凭证：可直接粘贴 refresh token，或形如 {\"refresh_token\":\"...\"} 的 JSON。保存前会向 OpenAI 验证身份。ChatGPT 不支持浏览器登录。",
-      "importPlaceholder": "{\"refresh_token\":\"...\"} 或纯 token",
+      "importHint": "粘贴 ChatGPT（Codex）凭证：可以是纯 refresh token、形如 {\"refresh_token\":\"...\"} 的 JSON、Codex 的 auth.json，或 sub2api 导出文件（多个账号会逐个导入）。access token 仍有效时会直接使用，导入时不消耗 refresh token。保存前会向 OpenAI 验证身份。ChatGPT 不支持浏览器登录。",
+      "importPlaceholder": "纯 refresh token、{\"refresh_token\":\"...\"}、auth.json 或 sub2api 导出文件",
+      "batchResult": "已导入 {{imported}} 个，跳过 {{skipped}} 个，失败 {{failed}} 个",
       "reimport": "重新导入",
       "reimportTitle": "重新导入凭证",
       "reimportHint": "替换此账号的凭证；不同 ChatGPT 账号的 token 会被拒绝。",
