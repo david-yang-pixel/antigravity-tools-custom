@@ -10,7 +10,7 @@ import ModalDialog from '../common/ModalDialog';
 import { showToast } from '../common/ToastContainer';
 import WorkBuddyEgressPanel, { WorkBuddyEgressCell, egressArgs, nativeEgress, type EgressView } from './WorkBuddyEgress';
 import QoderClientVersion from './QoderClientVersion';
-import { nativeAccountStatus, nativeBalance, type NativeAccount, type NativeLogin, type NativeLoginPoll, type NativeProvider, type NativeRealm, type NativeSettings } from '../../types/nativeProviders';
+import { nativeAccountStatus, nativeBalance, type BatchItem, type NativeAccount, type NativeLogin, type NativeLoginPoll, type NativeProvider, type NativeRealm, type NativeSettings } from '../../types/nativeProviders';
 
 const input = 'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800';
 const button = 'inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-800';
@@ -131,6 +131,16 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
         let parsed: unknown = auth.trim();
         // ChatGPT accepts a bare token or JSON; Qoder credentials are always JSON.
         if (!chatgpt || /^[{"]/.test(auth.trim())) { try { parsed = JSON.parse(auth); } catch { throw new Error(t('nativeProviders.invalidJson')); } }
+        // A multi-account export (e.g. sub2api's {"accounts": [...]}) imports account by account.
+        if (chatgpt && !target && Array.isArray((parsed as { accounts?: unknown })?.accounts)) {
+            const report = await request<BatchItem[]>('import_native_accounts_batch', { request: { provider, auth: parsed } });
+            const count = (status: BatchItem['status']) => report.filter(item => item.status === status).length;
+            showToast(t('nativeProviders.chatgpt.batchResult', { imported: count('imported'), skipped: count('skipped'), failed: count('failed') }), count('failed') ? 'warning' : 'success');
+            const failed = report.filter(item => item.status === 'failed');
+            if (failed.length) throw new Error(failed.map(item => `${item.label}: ${item.message}`).join('\n'));
+            if (alive.current) { setAuth(''); setMode(null); }
+            return;
+        }
         await request('import_native_account', chatgpt ? { request: { provider, auth: parsed, ...(target ? { account_id: target.id } : {}) } } : { request: { provider, realm, auth: parsed } });
         if (alive.current) { setAuth(''); setMode(null); }
     });

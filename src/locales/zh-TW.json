@@ -1882,8 +1882,9 @@
   },
   "nativeProviders": {
     "chatgpt": {
-      "importHint": "貼上 ChatGPT（Codex）憑證：可直接貼上 refresh token，或類似 {\"refresh_token\":\"...\"} 的 JSON。儲存前會向 OpenAI 驗證身分。ChatGPT 不支援瀏覽器登入。",
-      "importPlaceholder": "{\"refresh_token\":\"...\"} 或純 token",
+      "importHint": "貼上 ChatGPT（Codex）憑證：可以是純 refresh token、形如 {\"refresh_token\":\"...\"} 的 JSON、Codex 的 auth.json，或 sub2api 匯出檔（多個帳號會逐一匯入）。access token 仍有效時會直接使用，匯入時不消耗 refresh token。儲存前會向 OpenAI 驗證身分。ChatGPT 不支援瀏覽器登入。",
+      "importPlaceholder": "純 refresh token、{\"refresh_token\":\"...\"}、auth.json 或 sub2api 匯出檔",
+      "batchResult": "已匯入 {{imported}} 個，略過 {{skipped}} 個，失敗 {{failed}} 個",
       "reimport": "重新匯入",
       "reimportTitle": "重新匯入憑證",
       "reimportHint": "取代此帳號的憑證；不同 ChatGPT 帳號的 token 會被拒絕。",

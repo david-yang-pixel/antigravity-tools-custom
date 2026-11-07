@@ -160,6 +160,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_workbuddy_settings': { url: '/api/workbuddy-settings', method: 'GET' },
   'list_native_accounts': { url: '/api/native-accounts/list', method: 'POST' },
   'import_native_account': { url: '/api/native-accounts/import', method: 'POST' },
+  'import_native_accounts_batch': { url: '/api/native-accounts/import-batch', method: 'POST' },
   'update_native_account': { url: '/api/native-accounts/update', method: 'POST' },
   'delete_native_account': { url: '/api/native-accounts/delete', method: 'POST' },
   'get_native_provider_settings': { url: '/api/native-providers/settings', method: 'POST' },

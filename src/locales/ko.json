@@ -1609,8 +1609,9 @@
   },
   "nativeProviders": {
     "chatgpt": {
-      "importHint": "ChatGPT(Codex) 자격 증명을 붙여넣으세요. refresh token 자체 또는 {\"refresh_token\":\"...\"} 형태의 JSON을 사용할 수 있습니다. 저장 전에 OpenAI로 신원을 확인합니다. ChatGPT는 브라우저 로그인을 지원하지 않습니다.",
-      "importPlaceholder": "{\"refresh_token\":\"...\"} 또는 토큰만",
+      "importHint": "ChatGPT(Codex) 자격 증명을 붙여 넣으세요: refresh token만, {\"refresh_token\":\"...\"} 형식 JSON, Codex auth.json 또는 sub2api 내보내기(여러 계정은 하나씩 가져옴). 유효한 access token은 그대로 사용하므로 가져올 때 refresh token을 소모하지 않습니다. 저장 전에 OpenAI로 신원을 확인합니다. ChatGPT는 브라우저 로그인을 지원하지 않습니다.",
+      "importPlaceholder": "refresh token, {\"refresh_token\":\"...\"}, auth.json 또는 sub2api 내보내기",
+      "batchResult": "가져옴 {{imported}}개, 건너뜀 {{skipped}}개, 실패 {{failed}}개",
       "reimport": "다시 가져오기",
       "reimportTitle": "자격 증명 다시 가져오기",
       "reimportHint": "이 계정의 자격 증명을 교체합니다. 다른 ChatGPT 계정의 토큰은 거부됩니다.",

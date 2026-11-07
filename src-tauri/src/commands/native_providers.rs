@@ -101,6 +101,14 @@ pub async fn poll_native_login(request: SessionRequest) -> Result<native::login:
 pub async fn cancel_native_login(request: SessionRequest) -> Result<(), String> {
     native::login::cancel(request.provider, &request.id).await
 }
+/// Imports every account of a multi-account export (ChatGPT, e.g. a sub2api export) and
+/// reports each one; a failed account never stops the rest.
+#[tauri::command]
+pub async fn import_native_accounts_batch(
+    request: ImportRequest,
+) -> Result<Vec<native::login::BatchItem>, String> {
+    native::login::import_batch(request.provider, request.realm, request.auth).await
+}
 #[tauri::command]
 pub async fn import_native_account(request: ImportRequest) -> Result<AccountView, String> {
     native::login::import(
