@@ -229,6 +229,60 @@ region differs. Refresh or reauthorize that account from its own row instead;
 this keeps its existing route and avoids discarding a rotated refresh token when
 an import is refused. Fresh credentials continue through normal import validation.
 
+## ChatGPT accounts
+
+ChatGPT (Codex backend) is a second native provider (`provider: "chatgpt"`). It
+reuses the same account list, scheduling, egress and admin routes as Qoder. Protocol
+facts are in [chatgpt-codex-protocol.md](chatgpt-codex-protocol.md).
+
+> **Risk note.** Using a ChatGPT subscription outside Codex may violate OpenAI's
+> terms of service and can get the account rate-limited or suspended. Use accounts
+> you can afford to lose and review the terms before enabling the source.
+
+### Import and re-import
+
+There is no browser sign-in for ChatGPT (hence no realm; it is always `global`).
+Open **Accounts → ChatGPT → Import credentials** and paste either the bare refresh
+token or JSON such as `{"refresh_token":"..."}`. Identity is verified with OpenAI
+before saving. Headless: `import_native_account` / the matching admin route with
+`{"provider":"chatgpt","auth":"<token>"}` or `"auth":{"refresh_token":"..."}`.
+
+Each account row has a **Re-import** action. It opens the same input and sends
+`account_id`, replacing that account's credentials in place. A token that belongs
+to a different ChatGPT account is rejected. Qoder rejects `account_id`.
+
+A credential that OpenAI rejects disables the account automatically; the row shows
+`auth_error` with a hint to re-import. Quota is shown as two percentage bars
+(5-hour and 7-day windows) with their reset times.
+
+### Environment variables
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ABV_CHATGPT_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
+| `ABV_CHATGPT_MAX_CONCURRENCY` | `5` | Active requests per account, clamped like Qoder's |
+| `ABV_CHATGPT_EGRESS_ENABLED` | `true`/`false` | Locks ChatGPT's egress switch |
+| `ABV_CHATGPT_CLIENT_VERSION` | `0.146.0` | Advertised Codex client version; semver, must be `>= 0.144.0` |
+
+### Endpoints served
+
+Chat Completions, Responses passthrough, Anthropic Messages, `/responses/compact`
+and the Responses WebSocket. Public model IDs bind to `chatgpt:default` as with
+other native sources; nothing is published automatically.
+
+### Failover policy
+
+Before any output has been sent, a 429, 5xx, capacity error or account
+deactivation fails over to another account, up to 3 accounts per request. A
+Cloudflare 403 is not charged to the account (no penalty). Context-length, policy
+and validation errors are never replayed on another account.
+
+### WebSocket behavior
+
+When a Responses WebSocket session moves to another account (failover or
+rotation), the gateway replays the session transcript onto the new account so the
+conversation continues; the previous account's server-side state is not reused.
+
 ## Protocol scope and verification
 
 The shared Chat codec/relay serves Chat Completions, HTTP Responses and Anthropic
