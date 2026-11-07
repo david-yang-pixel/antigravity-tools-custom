@@ -216,7 +216,7 @@ mod relay {
     enum Seen {
         Handshake { account: String, headers: HeaderMap },
         Frame { account: String, body: Value },
-        Ping { account: String },
+        Ping,
     }
 
     /// What one upstream frame gets back.
@@ -226,10 +226,9 @@ mod relay {
         Close(Vec<Value>),
     }
 
-    /// `account` is the ChatGPT account id; `nth` counts earlier handshakes (or frames) of
-    /// that account; `first` says whether it is the first account that connected.
-    struct Call<'a> {
-        account: &'a str,
+    /// `nth` counts earlier handshakes (or frames) of the calling account; `first` says
+    /// whether it is the first account that connected.
+    struct Call {
         nth: usize,
         first: bool,
     }
@@ -252,7 +251,7 @@ mod relay {
                 .filter(|s| match s {
                     Seen::Handshake { account: a, .. } => !frames && a == account,
                     Seen::Frame { account: a, .. } => frames && a == account,
-                    Seen::Ping { .. } => false,
+                    Seen::Ping => false,
                 })
                 .count()
         }
@@ -311,7 +310,6 @@ mod relay {
             .unwrap_or("")
             .to_owned();
         let call = Call {
-            account: &account,
             nth: mock.count(&account, false),
             first: mock.first(&account),
         };
@@ -342,7 +340,6 @@ mod relay {
                 Message::Text(text) => {
                     let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                     let call = Call {
-                        account: &account,
                         nth: mock.count(&account, true),
                         first: mock.first(&account),
                     };
@@ -365,9 +362,7 @@ mod relay {
                         return;
                     }
                 }
-                Message::Ping(_) => mock.seen.lock().unwrap().push(Seen::Ping {
-                    account: account.clone(),
-                }),
+                Message::Ping(_) => mock.seen.lock().unwrap().push(Seen::Ping),
                 Message::Close(_) => return,
                 _ => {}
             }
@@ -843,7 +838,7 @@ mod relay {
         client.turn(create(vec![user("u1")])).await;
         client.turn(continue_from("resp_0", vec![user("u2")])).await;
         assert!(
-            !server.seen().iter().any(|s| matches!(s, Seen::Ping { .. })),
+            !server.seen().iter().any(|s| matches!(s, Seen::Ping)),
             "a busy socket is not pinged"
         );
         tokio::time::sleep(Duration::from_millis(800)).await;
@@ -851,7 +846,7 @@ mod relay {
         let seen = server.seen();
         let ping = seen
             .iter()
-            .position(|s| matches!(s, Seen::Ping { .. }))
+            .position(|s| matches!(s, Seen::Ping))
             .expect("an idle socket is pinged before the turn");
         let third = seen
             .iter()
