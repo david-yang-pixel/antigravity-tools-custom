@@ -833,6 +833,7 @@ pub fn run() {
             commands::native_providers::poll_native_login,
             commands::native_providers::cancel_native_login,
             commands::native_providers::import_native_account,
+            commands::native_providers::import_native_accounts_batch,
             commands::native_providers::update_native_account,
             commands::native_providers::delete_native_account,
             commands::native_providers::get_native_egress,

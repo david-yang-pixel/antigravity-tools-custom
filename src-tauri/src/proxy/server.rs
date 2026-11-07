@@ -1076,6 +1076,10 @@ impl AxumServer {
             )
             .route("/native-accounts/list", post(admin_list_native_accounts))
             .route("/native-accounts/import", post(admin_import_native_account))
+            .route(
+                "/native-accounts/import-batch",
+                post(admin_import_native_accounts_batch),
+            )
             .route("/native-accounts/update", post(admin_update_native_account))
             .route("/native-accounts/delete", post(admin_delete_native_account))
             .route(
@@ -2876,6 +2880,14 @@ async fn admin_import_native_account(
     Json(payload): Json<crate::commands::native_providers::ImportRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::native_providers::import_native_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_import_native_accounts_batch(
+    Json(payload): Json<crate::commands::native_providers::ImportRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::import_native_accounts_batch(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

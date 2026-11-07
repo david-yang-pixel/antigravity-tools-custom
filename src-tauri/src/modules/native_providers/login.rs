@@ -313,24 +313,120 @@ fn imported_account(provider: Provider, realm: Realm, value: &Value) -> Account 
     a
 }
 
-/// A ChatGPT import is one refresh token: a bare JSON string, or an object carrying it.
+/// A ChatGPT import: a bare refresh token, an object carrying one, a sub2api export account
+/// (`credentials`), or a Codex `auth.json` (`tokens`). Access and id tokens, the account id
+/// and the expiry are kept when present, so a still-valid export need not be refreshed.
 /// ChatGPT accounts always live in the global realm, whatever the request says.
 fn imported_chatgpt(value: &Value) -> Result<Account, String> {
-    let token = match value {
-        Value::String(token) => token.trim().to_owned(),
-        Value::Object(_) => text(value, &["refresh_token", "refreshToken", "rt"])
-            .trim()
-            .to_owned(),
-        _ => String::new(),
-    };
-    if token.is_empty() {
-        return Err(
-            "Paste a ChatGPT refresh token, as a string or as {\"refresh_token\": \"...\"}".into(),
-        );
-    }
     let mut a = Account::new(Provider::ChatGpt, Realm::Global);
-    a.credentials.refresh_token = token;
+    match value {
+        Value::String(token) => a.credentials.refresh_token = token.trim().to_owned(),
+        Value::Object(_) => {
+            let root = ["credentials", "tokens"]
+                .iter()
+                .find_map(|key| value.get(*key).filter(|v| v.is_object()))
+                .unwrap_or(value);
+            let field = |keys: &[&str]| text(root, keys).trim().to_owned();
+            let c = &mut a.credentials;
+            c.refresh_token = field(&["refresh_token", "refreshToken", "rt"]);
+            c.access_token = field(&["access_token", "accessToken"]);
+            c.id_token = field(&["id_token", "idToken"]);
+            c.chatgpt_account_id = field(&[
+                "chatgpt_account_id",
+                "chatgptAccountId",
+                "account_id",
+                "accountId",
+            ]);
+            a.expires_at = root
+                .get("expires_at")
+                .or_else(|| root.get("expiresAt"))
+                .and_then(epoch)
+                .unwrap_or(0);
+        }
+        _ => {}
+    }
+    if a.credentials.refresh_token.is_empty() && a.credentials.access_token.is_empty() {
+        return Err("Paste a ChatGPT refresh token, a {\"refresh_token\": \"...\"} object, a sub2api export or a Codex auth.json".into());
+    }
     Ok(a)
+}
+
+/// One account of a multi-account export.
+pub(super) struct BatchEntry {
+    pub label: String,
+    pub value: Value,
+    /// Why this entry is not imported, e.g. an account of another platform.
+    pub skip: Option<String>,
+}
+
+/// The accounts of an export such as sub2api's `{"accounts": [...]}`; `None` when the value
+/// is a single account.
+pub(super) fn batch_entries(value: &Value) -> Option<Vec<BatchEntry>> {
+    let accounts = value.get("accounts")?.as_array()?;
+    Some(
+        accounts
+            .iter()
+            .enumerate()
+            .map(|(index, account)| {
+                let credentials = account.get("credentials").unwrap_or(&Value::Null);
+                let label = [
+                    text(account, &["name", "email"]),
+                    text(credentials, &["email"]),
+                ]
+                .into_iter()
+                .find(|label| !label.is_empty())
+                .unwrap_or_else(|| format!("#{}", index + 1));
+                let platform = text(account, &["platform"]);
+                let skip = (!platform.is_empty() && platform != "openai")
+                    .then(|| format!("Skipped: a {platform} account, not ChatGPT"));
+                BatchEntry {
+                    label,
+                    value: account.clone(),
+                    skip,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The outcome of one account of a batch import.
+#[derive(Clone, serde::Serialize)]
+pub struct BatchItem {
+    pub label: String,
+    /// `imported`, `skipped` or `failed`.
+    pub status: String,
+    pub message: String,
+    pub account: Option<AccountView>,
+}
+
+/// Imports every account of an export one after another; one failure never stops the rest.
+pub async fn import_batch(
+    provider: Provider,
+    realm: Realm,
+    value: Value,
+) -> Result<Vec<BatchItem>, String> {
+    if provider != Provider::ChatGpt {
+        return Err("Batch import is available for ChatGPT accounts".into());
+    }
+    let entries = batch_entries(&value)
+        .ok_or("Expected an export with an \"accounts\" list; import a single account instead")?;
+    let mut report = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let item = |status: &str, message: String, account: Option<AccountView>| BatchItem {
+            label: entry.label.clone(),
+            status: status.into(),
+            message,
+            account,
+        };
+        report.push(match &entry.skip {
+            Some(reason) => item("skipped", reason.clone(), None),
+            None => match import(provider, realm, entry.value.clone(), None).await {
+                Ok(account) => item("imported", String::new(), Some(account)),
+                Err(error) => item("failed", error, None),
+            },
+        });
+    }
+    Ok(report)
 }
 
 /// An imported access token is used as-is only while it is present and unexpired (with a
@@ -402,6 +498,41 @@ async fn authorize_qoder(
     Ok(())
 }
 
+/// Validates a ChatGPT import; returns whether the refresh token was exchanged. An exported
+/// access token that is valid for more than five minutes is kept and proven with one catalog
+/// request, so the export's refresh token is not spent; an expired, unusable or rejected one
+/// falls back to the refresh token.
+async fn authorize_chatgpt(
+    client: &reqwest::Client,
+    a: &mut Account,
+) -> Result<bool, http::Failure> {
+    let has_refresh = !a.credentials.refresh_token.is_empty();
+    if !a.credentials.access_token.is_empty() && chatgpt::identity::apply(a).is_ok() {
+        if a.expires_at > now() + 300 {
+            match chatgpt::models::fetch(client, a).await {
+                Ok(_) => return Ok(false),
+                Err(error) if !has_refresh || !matches!(error.status, 401 | 403) => {
+                    return Err(error)
+                }
+                Err(_) => {}
+            }
+        } else if !has_refresh {
+            return Err(http::Failure::new(
+                401,
+                "This ChatGPT access token has expired and the import carries no refresh token",
+            ));
+        }
+    }
+    if !has_refresh {
+        return Err(http::Failure::new(
+            400,
+            "This import needs a ChatGPT refresh token or an access token with a chatgpt_account_id",
+        ));
+    }
+    chatgpt::auth::refresh(client, a).await?;
+    Ok(true)
+}
+
 pub async fn import(
     provider: Provider,
     realm: Realm,
@@ -432,6 +563,7 @@ pub async fn import(
     // Another import may have saved these credentials while we waited for the
     // serialized login route. Recheck under that route's guard before using them.
     reject_saved_credentials(&a, &store::all(provider)?)?;
+    let mut refreshed = false;
     match provider {
         Provider::Qoder => {
             let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
@@ -440,16 +572,16 @@ pub async fn import(
                 .map_err(|e| e.to_string())?;
         }
         Provider::ChatGpt => {
-            // The refresh token is the whole import: always exchange it, then require the
-            // workspace identity the new tokens carry.
             let client =
                 http::plain_login_client(provider, &route.exit).map_err(|e| e.to_string())?;
-            chatgpt::auth::refresh(&client, &mut a)
+            refreshed = authorize_chatgpt(&client, &mut a)
                 .await
                 .map_err(|e| e.to_string())?;
-            // The pasted refresh token is spent from here on.
-            chatgpt::identity::apply(&mut a)
-                .map_err(|e| salvage_chatgpt(&a, &pasted, e.to_string()))?;
+            // From a token exchange on, the pasted refresh token is spent.
+            if refreshed {
+                chatgpt::identity::apply(&mut a)
+                    .map_err(|e| salvage_chatgpt(&a, &pasted, e.to_string()))?;
+            }
         }
     }
     let a = match provider {
@@ -469,7 +601,13 @@ pub async fn import(
             route.node.as_deref(),
             &pasted,
         )
-        .map_err(|error| salvage_chatgpt(&a, &pasted, error))?,
+        .map_err(|error| {
+            if refreshed {
+                salvage_chatgpt(&a, &pasted, error)
+            } else {
+                error
+            }
+        })?,
     };
     drop(route);
     let id = a.id.clone();
@@ -580,6 +718,64 @@ fn save_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chatgpt_imports_read_every_known_credential_shape() {
+        // A sub2api export account, its bare credentials object, and a Codex auth.json.
+        let credentials = json!({"access_token": "at", "id_token": "it", "refresh_token": "rt",
+            "chatgpt_account_id": "acc", "expires_at": "2026-11-16T02:49:36.000Z"});
+        for value in [
+            json!({"name": "me@example.com", "platform": "openai", "credentials": credentials}),
+            credentials.clone(),
+            json!({"tokens": {"access_token": "at", "id_token": "it", "refresh_token": "rt",
+                "account_id": "acc"}}),
+        ] {
+            let a = imported_chatgpt(&value).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert_eq!(a.realm, Realm::Global);
+            assert_eq!(a.credentials.access_token, "at", "{value}");
+            assert_eq!(a.credentials.id_token, "it", "{value}");
+            assert_eq!(a.credentials.refresh_token, "rt", "{value}");
+            assert_eq!(a.credentials.chatgpt_account_id, "acc", "{value}");
+        }
+        let exported = imported_chatgpt(&credentials).unwrap();
+        assert_eq!(exported.expires_at, 1_794_797_376);
+        // The original shapes still work: a bare refresh token, or an object carrying one.
+        for value in [
+            json!("rt"),
+            json!({"refresh_token": "rt"}),
+            json!({"rt": "rt"}),
+        ] {
+            let a = imported_chatgpt(&value).unwrap();
+            assert_eq!(a.credentials.refresh_token, "rt");
+            assert!(a.credentials.access_token.is_empty());
+        }
+        for value in [json!(""), json!({}), json!({"credentials": {}}), json!(42)] {
+            assert!(imported_chatgpt(&value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn chatgpt_batch_entries_come_from_an_export_and_skip_other_platforms() {
+        let export = json!({"exported_at": "2026-11-07T14:47:05Z", "accounts": [
+            {"name": "a@example.com", "platform": "openai", "credentials": {"refresh_token": "ra"}},
+            {"name": "claude@example.com", "platform": "anthropic", "credentials": {"refresh_token": "rc"}},
+            {"credentials": {"email": "b@example.com", "refresh_token": "rb"}},
+        ]});
+        let entries = batch_entries(&export).expect("an export is a batch");
+        let labels: Vec<_> = entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["a@example.com", "claude@example.com", "b@example.com"]
+        );
+        assert!(entries[0].skip.is_none() && entries[2].skip.is_none());
+        assert!(entries[1].skip.as_deref().unwrap().contains("anthropic"));
+        // A single account is not a batch.
+        assert!(batch_entries(&json!({"refresh_token": "r"})).is_none());
+        assert!(batch_entries(&json!("r")).is_none());
+        assert!(batch_entries(&json!({"accounts": []})).is_some_and(|e| e.is_empty()));
+    }
+
     #[test]
     fn imported_device_identity_is_kept() {
         let account = imported_account(

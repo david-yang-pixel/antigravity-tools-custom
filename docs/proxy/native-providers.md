@@ -211,6 +211,7 @@ authentication, not an ordinary inference client key.
 | `/api/native-login/start` | `{"provider":"qoder","realm":"cn","account_id":null}`; returns the session `id` and `auth_url` |
 | `/api/native-login/poll`, `/api/native-login/cancel` | `{"provider":"qoder","id":"<login-session-id>"}` |
 | `/api/native-accounts/import` | Provider, region and `auth` credential JSON |
+| `/api/native-accounts/import-batch` | ChatGPT multi-account export (`auth.accounts`); per-account report |
 | `/api/native-accounts/update` | Provider/account `id`; optional `enabled`, `auto_refresh`, or `refresh:true`; no flags synchronizes metadata |
 | `/api/native-accounts/delete` | Provider/account `id` |
 | `/api/native-providers/settings` | Provider |
@@ -242,10 +243,28 @@ facts are in [chatgpt-codex-protocol.md](chatgpt-codex-protocol.md).
 ### Import and re-import
 
 There is no browser sign-in for ChatGPT (hence no realm; it is always `global`).
-Open **Accounts → ChatGPT → Import credentials** and paste either the bare refresh
-token or JSON such as `{"refresh_token":"..."}`. Identity is verified with OpenAI
-before saving. Headless: `import_native_account` / the matching admin route with
-`{"provider":"chatgpt","auth":"<token>"}` or `"auth":{"refresh_token":"..."}`.
+Open **Accounts → ChatGPT → Import credentials** and paste any of:
+
+- the bare refresh token, or JSON such as `{"refresh_token":"..."}`;
+- one account's credentials (`access_token`, `id_token`, `refresh_token`,
+  `chatgpt_account_id`, `expires_at`), bare or under `credentials`;
+- a Codex `auth.json` (`{"tokens": {...}}`);
+- a sub2api export (`{"accounts": [...]}`): every `openai` account is imported one
+  by one, other platforms are skipped, and the result lists each account.
+
+When the paste carries an access token that is valid for more than five minutes,
+it is kept and proven with one model-catalog request, so the import does not spend
+the refresh token; it is refreshed later, close to expiry. An expired or rejected
+access token falls back to the refresh token. Identity is verified with OpenAI
+before saving. Stop using an imported account in any other tool (sub2api, Codex):
+refresh tokens rotate, and two systems refreshing the same account can get its
+whole token family revoked.
+
+Headless: `import_native_account` / `POST /api/native-accounts/import` with
+`{"provider":"chatgpt","auth":<any single-account shape above>}`, and
+`import_native_accounts_batch` / `POST /api/native-accounts/import-batch` with
+`{"provider":"chatgpt","auth":{"accounts":[...]}}`, which returns one
+`{label, status: imported|skipped|failed, message, account}` per account.
 
 Each account row has a **Re-import** action. It opens the same input and sends
 `account_id`, replacing that account's credentials in place. A token that belongs

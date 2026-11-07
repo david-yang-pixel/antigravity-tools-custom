@@ -1083,6 +1083,176 @@ fn token_requests(server: &Mock) -> usize {
         .count()
 }
 
+/// Exported credentials whose access token is valid for another `valid_for` seconds.
+fn exported_credentials(account: &str, refresh: &str, valid_for: i64) -> Value {
+    let auth = json!({"chatgpt_account_id": account, "chatgpt_user_id": "u1",
+        "chatgpt_plan_type": "free"});
+    let exp = crate::modules::native_providers::now() + valid_for;
+    json!({
+        "access_token": jwt(json!({"exp": exp, "https://api.openai.com/auth": auth})),
+        "id_token": jwt(json!({"email": format!("{account}@example.com"),
+            "https://api.openai.com/auth": auth})),
+        "refresh_token": refresh,
+        "chatgpt_account_id": account,
+        "expires_at": exp,
+    })
+}
+
+/// A model catalog that also parses as a token response, for the single-body mock.
+fn catalog_and_tokens() -> Value {
+    let mut body = import_token_response(true);
+    body["models"] = json!([{"slug": "gpt-6-luna", "display_name": "GPT-6 Luna"}]);
+    body
+}
+
+#[tokio::test]
+async fn chatgpt_import_keeps_a_valid_exported_access_token_without_refreshing() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let server = mock(200, &[], catalog_and_tokens(), false).await;
+    let export = json!({"accounts": [{"name": "acc@example.com", "platform": "openai",
+        "credentials": exported_credentials("acc", "rt-exported", 7 * 86400)}]});
+    let view = login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        export["accounts"][0].clone(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.uid, "acc:u1");
+    // The exported refresh token is not spent: no token exchange, the access token is
+    // proven by one catalog request instead.
+    assert_eq!(token_requests(&server), 0);
+    assert!(server
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(path, _, _)| path.starts_with("/backend-api/codex/models")));
+    let saved = &store::all(Provider::ChatGpt).unwrap()[0];
+    assert_eq!(saved.credentials.refresh_token, "rt-exported");
+    assert_eq!(saved.nickname, "acc@example.com");
+    assert!(saved.expires_at > crate::modules::native_providers::now() + 6 * 86400);
+    assert!(saved
+        .credentials
+        .imported_refresh_sha256
+        .contains(&sha256("rt-exported")));
+}
+
+#[tokio::test]
+async fn chatgpt_import_refreshes_an_expired_or_rejected_exported_access_token() {
+    use crate::modules::native_providers::login;
+    use axum::{routing::any, Router};
+    let _sandbox = Sandbox::new();
+    // Expired: the refresh token is exchanged as before.
+    let server = mock(200, &[], catalog_and_tokens(), false).await;
+    login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!({"credentials": exported_credentials("acc", "rt-expired", -60)}),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(token_requests(&server), 1);
+    assert_eq!(
+        store::all(Provider::ChatGpt).unwrap()[0]
+            .credentials
+            .refresh_token,
+        "rotated"
+    );
+    drop(server);
+    for saved in store::all(Provider::ChatGpt).unwrap() {
+        store::remove(Provider::ChatGpt, &saved.id).unwrap();
+    }
+
+    // Unexpired but rejected by the catalog (revoked): fall back to the refresh token once.
+    let tokens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = tokens.clone();
+    let app = Router::new()
+        .route(
+            "/backend-api/codex/models",
+            any(|| async { (axum::http::StatusCode::UNAUTHORIZED, "{}") }),
+        )
+        .route(
+            "/oauth/token",
+            any(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { axum::Json(import_token_response(true)) }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    endpoints::set_test(Some(endpoints::Endpoints {
+        auth: format!("http://{addr}"),
+        backend: format!("http://{addr}/backend-api"),
+    }));
+    let _reset = ResetEndpoints;
+    login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!({"credentials": exported_credentials("acc", "rt-revoked", 86400)}),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(tokens.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        store::all(Provider::ChatGpt).unwrap()[0]
+            .credentials
+            .refresh_token,
+        "rotated"
+    );
+}
+
+#[tokio::test]
+async fn chatgpt_batch_import_reports_each_account() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let _server = mock(200, &[], catalog_and_tokens(), false).await;
+    let export = json!({"exported_at": "2026-11-07T14:47:05Z", "accounts": [
+        {"name": "one@example.com", "platform": "openai",
+            "credentials": exported_credentials("one", "rt-one", 86400)},
+        {"name": "claude@example.com", "platform": "anthropic", "credentials": {}},
+        {"name": "empty@example.com", "platform": "openai", "credentials": {}},
+        {"name": "two@example.com", "platform": "openai",
+            "credentials": exported_credentials("two", "rt-two", 86400)},
+    ]});
+    let report = login::import_batch(Provider::ChatGpt, Realm::Global, export.clone())
+        .await
+        .unwrap();
+    let outcome: Vec<_> = report
+        .iter()
+        .map(|item| (item.label.as_str(), item.status.as_str()))
+        .collect();
+    assert_eq!(
+        outcome,
+        [
+            ("one@example.com", "imported"),
+            ("claude@example.com", "skipped"),
+            ("empty@example.com", "failed"),
+            ("two@example.com", "imported"),
+        ]
+    );
+    assert!(report[2].message.contains("refresh token"));
+    assert_eq!(store::all(Provider::ChatGpt).unwrap().len(), 2);
+    // Importing the same export again saves nothing twice.
+    let again = login::import_batch(Provider::ChatGpt, Realm::Global, export)
+        .await
+        .unwrap();
+    assert_eq!(again[0].status, "failed");
+    assert!(again[0].message.contains("already saved"));
+    assert_eq!(store::all(Provider::ChatGpt).unwrap().len(), 2);
+    // Qoder exports have their own shape; the batch path is ChatGPT's.
+    assert!(
+        login::import_batch(Provider::Qoder, Realm::Cn, json!({"accounts": []}))
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
     use crate::modules::native_providers::login;
