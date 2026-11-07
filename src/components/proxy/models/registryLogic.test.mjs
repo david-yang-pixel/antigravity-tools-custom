@@ -47,8 +47,8 @@ test('OpenAI-compatible upstreams serve OpenAI and Anthropic endpoints only', ()
     assert.equal(model.image_generation, false);
 });
 
-test('native Qoder and ChatGPT publications retain their sources and supported client protocols', () => {
-    for (const provider_type of ['qoder', 'chatgpt']) {
+test('native ChatGPT publications retain their sources and supported client protocols', () => {
+    for (const provider_type of ['chatgpt']) {
         const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type, pools_native_models: true };
         const registry = view({ sources: [source], candidates: [candidate('native-c', source.id, 'same-native')], published_models: [publication('native-p', source.id, 'same-native', `${provider_type}-chat`)] });
         const [model] = logic.registryCatalog(registry);
@@ -192,14 +192,14 @@ test('extra target options stay within the source and hide ignored or unavailabl
 });
 
 test('pooled sources follow the backend flag, not the provider type', () => {
-    const qoder = { ...ag, id: 'qoder:default', provider_type: 'qoder', pools_native_models: true };
+    const chatgpt = { ...ag, id: 'chatgpt:default', provider_type: 'chatgpt', pools_native_models: true };
     // A future pooled provider needs no frontend change; a known type without the flag is not pooled.
     const future = { ...ag, id: 'future:one', provider_type: 'future', pools_native_models: true };
     const unflagged = { ...wb, id: 'workbuddy:other', pools_native_models: false };
-    const registry = view({ sources: [ag, wb, qoder, future, unflagged] });
+    const registry = view({ sources: [ag, wb, chatgpt, future, unflagged] });
     assert.equal(logic.pooledSource(registry, wb.id), true);
     assert.equal(logic.pooledSource(registry, ag.id), false);
-    assert.equal(logic.pooledSource(registry, qoder.id), true);
+    assert.equal(logic.pooledSource(registry, chatgpt.id), true);
     assert.equal(logic.pooledSource(registry, future.id), true);
     assert.equal(logic.pooledSource(registry, unflagged.id), false);
     assert.equal(logic.pooledSource(registry, 'missing'), false);
@@ -242,16 +242,16 @@ test('the primary target can be rebound within its source and is gated as a new 
     assert.equal(logic.mergePublications(legacy, [logic.withPrimaryTarget({ ...single, legacy: true }, 'b')])[0].legacy, false);
 });
 
-test('realm selection stays limited to WorkBuddy and Qoder; ChatGPT is always global', async () => {
+test('realm selection stays limited to WorkBuddy; ChatGPT is always global', async () => {
     const upstream = await readFile(new URL('./UpstreamModels.tsx', import.meta.url), 'utf8');
-    assert.match(upstream, /\['workbuddy', 'qoder'\]\.includes\(/);
+    assert.match(upstream, /provider_type === 'workbuddy'/);
     assert.doesNotMatch(upstream, /hasRealm[^\n]*chatgpt/);
 });
 
 test('every account-pool source asks for test content, as the backend requires', async () => {
     const upstream = await readFile(new URL('./UpstreamModels.tsx', import.meta.url), 'utf8');
     // The backend requires a system and user message for every source that pools native
-    // accounts (WorkBuddy, Qoder, ChatGPT); the editor follows the same backend flag.
+    // accounts (WorkBuddy, ChatGPT); the editor follows the same backend flag.
     assert.match(upstream, /const ownPrompt = !!report && pooledSource\(view, report\.source_id\)/);
     assert.doesNotMatch(upstream, /= !!report && hasRealm\(/);
 });

@@ -1046,7 +1046,50 @@ fn sources_report_whether_they_pool_native_ids() {
     assert!(registry
         .sources
         .iter()
-        .any(|s| s.provider_type == "qoder" && s.pools_native_models));
+        .any(|s| s.provider_type == "chatgpt" && s.pools_native_models));
+}
+
+#[test]
+fn records_of_retired_sources_are_dropped_on_load() {
+    let _dir = Sandbox::new();
+    view(&ids(&["Legacy"]), &HashMap::new()).unwrap();
+    let path = registry_path().unwrap();
+    let mut store = stored();
+    let kept = store.candidates.len();
+    let retired = "qoder:default";
+    let candidate = CandidateRecord {
+        id: candidate_id(retired, "lite"),
+        source_id: retired.into(),
+        native_model: "lite".into(),
+    };
+    let mut published = publication("qoder-lite", retired, "lite");
+    published.extra_native_models = ids(&["auto"]);
+    store.candidates.push(candidate.clone());
+    store.candidates.push(CandidateRecord {
+        id: candidate_id(retired, "auto"),
+        source_id: retired.into(),
+        native_model: "auto".into(),
+    });
+    store.published_models.push(published);
+    store.ignored_candidate_ids.push(candidate.id.clone());
+    store
+        .verification_results
+        .push(record("lite", retired, "verified", 1, None));
+    write_atomic(&path, &serde_json::to_vec(&store).unwrap()).unwrap();
+    let mut cache = CACHE.lock().unwrap();
+    let snapshot = load(&path, &mut cache).unwrap().unwrap();
+    assert_eq!(snapshot.store.candidates.len(), kept);
+    assert!(snapshot
+        .store
+        .published_models
+        .iter()
+        .all(|m| m.source_id != retired));
+    assert!(!snapshot.store.ignored_candidate_ids.contains(&candidate.id));
+    assert!(snapshot
+        .store
+        .verification_results
+        .iter()
+        .all(|r| r.candidate_id != candidate.id));
 }
 
 fn extra(mut model: PublishedModel, extras: &[&str]) -> PublishedModel {

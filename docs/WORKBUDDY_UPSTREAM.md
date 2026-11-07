@@ -76,7 +76,7 @@ Headless 与桌面端使用同一后台任务。管理员可向 `POST /api/workb
 
 ## 调度与会话
 
-「API 反代 → 账号轮换与会话调度」的调度模式和熔断配置对 Antigravity、WorkBuddy 和 Qoder 账号池生效，保存后热更新，不必重启：
+「API 反代 → 账号轮换与会话调度」的调度模式和熔断配置对 Antigravity、WorkBuddy 和 ChatGPT 账号池生效，保存后热更新，不必重启：
 
 - 缓存优先：同一会话保持账号，繁忙或冷却时按最大等待时长等待，超时返回不可用。0 秒表示不等待；最多 300 秒，且受请求超时约束。
 - 平衡轮换：优先复用会话账号；新请求发现该账号繁忙或冷却时选择其他可用账号。
@@ -131,8 +131,8 @@ Headless 使用 `gui_config.json` 中 `proxy.scheduling` 和 `circuit_breaker`�
 - 账号列表可为每个账号手动选择空闲节点、`直连` 或 `自动分配`，并测试该账号出口到其 WorkBuddy 端点的延迟。手动指定也不能把两个账号放到同一个节点。
 - 绑定节点不可用时请求直接失败并切换账号，**不会改绑到别的节点，也不会回退直连**。出口地址是该节点当前的地址，由订阅提供；程序不分配公网 IP。节点换地址或几条线路共用一个地址，取决于订阅本身。未启用出口时，账号仍从这台服务器的地址出去。
 - 配置保存在 `workbuddy_egress.json`（含订阅链接和绑定）；mihomo 工作目录为数据目录下 `egress/`（配置、日志 `mihomo.log`、订阅缓存）。
-- 订阅链接、节点筛选和自动分配与 Qoder 共用，同一个 mihomo 进程同时服务两个来源；开关和节点绑定按来源独立。同一来源内一个节点只给一个账号，WorkBuddy 账号与 Qoder 账号可以使用同一节点（上游是不同服务）。Qoder 的绑定存于同一文件的 `pools.qoder`。
-- 环境变量：`ABV_WORKBUDDY_EGRESS_ENABLED=true|false`、`ABV_EGRESS_SUBSCRIPTION=<订阅链接>`（仍兼容 `ABV_WORKBUDDY_EGRESS_SUBSCRIPTION`；被覆盖字段在界面锁定）、`ABV_MIHOMO_PATH=<可执行文件>`。Qoder 开关为 `ABV_QODER_EGRESS_ENABLED`。
+- 订阅链接、节点筛选和自动分配与 ChatGPT 共用，同一个 mihomo 进程同时服务两个来源；开关和节点绑定按来源独立。同一来源内一个节点只给一个账号，WorkBuddy 账号与 ChatGPT 账号可以使用同一节点（上游是不同服务）。ChatGPT 的绑定存于同一文件的 `pools.chatgpt`。
+- 环境变量：`ABV_WORKBUDDY_EGRESS_ENABLED=true|false`、`ABV_EGRESS_SUBSCRIPTION=<订阅链接>`（仍兼容 `ABV_WORKBUDDY_EGRESS_SUBSCRIPTION`；被覆盖字段在界面锁定）、`ABV_MIHOMO_PATH=<可执行文件>`。ChatGPT 开关为 `ABV_CHATGPT_EGRESS_ENABLED`。
 - mihomo 查找顺序：`ABV_MIHOMO_PATH` / 配置文件 `mihomo_path` → `<数据目录>/egress/bin/mihomo` → 程序同目录 → `PATH`。Docker 镜像已内置固定版本并校验 sha256；管理接口不能修改可执行文件路径。
 
 headless 授权可通过这些接口发起，然后在任意浏览器打开返回的官方链接，完成后轮询并调用账号同步接口。授权会话最多保留 10 分钟；取消后不能继续导入。公开网站请继续使用现有 HTTPS 和管理员鉴权。

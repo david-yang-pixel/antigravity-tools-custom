@@ -4,14 +4,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 const source = await readFile(new URL('./nativeProviders.ts', import.meta.url), 'utf8');
 const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } });
-const { nativeBalance, nativeAccountStatus } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
-test('unknown, unlimited and exhausted balances remain distinct', () => {
-    assert.equal(nativeBalance(null), '—');
-    assert.equal(nativeBalance({ remaining: null, unlimited: false }), '—');
-    assert.equal(nativeBalance({ remaining: null, unlimited: true }), '∞');
-    assert.equal(nativeBalance({ remaining: 0, unlimited: false }), '0');
-    assert.equal(nativeBalance({ remaining: Number.NaN, unlimited: false }), '—');
-});
+const { nativeAccountStatus } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 test('stale quota does not disable scheduling and refreshable expiry is separate from revocation', () => {
     const account = { enabled: true, auth_error: null, expires_at: 100, can_refresh: true, cooldown_until: 0, in_flight: 0, quota: null };
     assert.equal(nativeAccountStatus(account, 1000), 'ready');

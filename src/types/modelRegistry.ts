@@ -34,7 +34,7 @@ export interface PublishedModel {
     display_name: string;
     source_id: string;
     native_model: string;
-    // Extra same-source IDs scheduled with native_model; WorkBuddy/Qoder only, omitted when empty.
+    // Extra same-source IDs scheduled with native_model; WorkBuddy/ChatGPT only, omitted when empty.
     extra_native_models?: string[];
     enabled: boolean;
     legacy: boolean;

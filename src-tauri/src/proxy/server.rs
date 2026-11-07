@@ -1090,13 +1090,6 @@ impl AxumServer {
                 "/native-providers/settings/save",
                 post(admin_save_native_provider_settings),
             )
-            .route(
-                "/native-providers/client-version",
-                post(admin_check_native_client_version),
-            )
-            .route("/native-login/start", post(admin_start_native_login))
-            .route("/native-login/poll", post(admin_poll_native_login))
-            .route("/native-login/cancel", post(admin_cancel_native_login))
             .route("/native-egress", post(admin_get_native_egress))
             .route("/native-egress/save", post(admin_save_native_egress))
             .route("/native-egress/refresh", post(admin_refresh_native_egress))
@@ -2916,42 +2909,10 @@ async fn admin_get_native_provider_settings(
         .map(Json)
         .map_err(portal_admin_error)
 }
-async fn admin_check_native_client_version(
-    Json(payload): Json<crate::commands::native_providers::ClientVersionRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::native_providers::check_native_client_version(payload)
-        .await
-        .map(Json)
-        .map_err(portal_admin_error)
-}
 async fn admin_save_native_provider_settings(
     Json(payload): Json<crate::commands::native_providers::SettingsRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::native_providers::save_native_provider_settings(payload)
-        .await
-        .map(Json)
-        .map_err(portal_admin_error)
-}
-async fn admin_start_native_login(
-    Json(payload): Json<crate::commands::native_providers::LoginRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::native_providers::start_native_login(payload)
-        .await
-        .map(Json)
-        .map_err(portal_admin_error)
-}
-async fn admin_poll_native_login(
-    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::native_providers::poll_native_login(payload)
-        .await
-        .map(Json)
-        .map_err(portal_admin_error)
-}
-async fn admin_cancel_native_login(
-    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    crate::commands::native_providers::cancel_native_login(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

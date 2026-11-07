@@ -2,7 +2,7 @@
 //! event reading.
 use crate::modules::native_providers::{
     chatgpt::{client, endpoints, errors, quota},
-    http::{plain_client_for, Failure},
+    http::{client_for, Failure},
     Account,
 };
 use futures::{SinkExt, StreamExt};
@@ -81,7 +81,7 @@ pub(super) async fn connect(
     headers.remove(ACCEPT);
     headers.remove(CONTENT_TYPE);
     headers.insert("openai-beta", HeaderValue::from_static(BETA));
-    let http = tokio::time::timeout_at(deadline, plain_client_for(account))
+    let http = tokio::time::timeout_at(deadline, client_for(account))
         .await
         .map_err(|_| {
             Refused::Answered(

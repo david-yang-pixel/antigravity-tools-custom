@@ -235,7 +235,7 @@ pub async fn discover(
     } else if let Some(id) = super::custom_upstream::upstream_id(&request.source_id) {
         discover_custom(id).await?
     } else if let Some(provider) = NativeProvider::from_source(&request.source_id) {
-        discover_native(provider, request.realm, deadline).await?
+        discover_native(provider, deadline).await?
     } else {
         discover_workbuddy(request.realm, deadline).await?
     };
@@ -349,11 +349,7 @@ async fn discover_native_account(
         .await
         .map_err(|e| e.to_string())?;
     let models = match provider {
-        NativeProvider::Qoder => match native::http::client_for(&account).await {
-            Ok(client) => native::qoder::models(&client, &account).await,
-            Err(error) => Err(error),
-        },
-        NativeProvider::ChatGpt => match native::http::plain_client_for(&account).await {
+        NativeProvider::ChatGpt => match native::http::client_for(&account).await {
             Ok(client) => native::chatgpt::models::fetch(&client, &account).await,
             Err(error) => Err(error),
         },
@@ -368,26 +364,18 @@ async fn discover_native_account(
     Ok(ids)
 }
 
+/// Native accounts have no region filter: every ChatGPT account is global.
 async fn discover_native(
     provider: NativeProvider,
-    realm: Option<super::workbuddy::accounts::Realm>,
     deadline: tokio::time::Instant,
 ) -> Result<Sampled, String> {
     if !native::store::settings(provider)?.enabled {
         return Err("Enable this source before discovering its models".into());
     }
-    let realm = match provider {
-        NativeProvider::Qoder => realm.map(|realm| match realm {
-            super::workbuddy::accounts::Realm::Cn => native::Realm::Cn,
-            super::workbuddy::accounts::Realm::Global => native::Realm::Global,
-        }),
-        // Every ChatGPT account is global: a region filter has nothing to narrow.
-        NativeProvider::ChatGpt => None,
-    };
     let accounts = shuffled(
         native::store::all(provider)?
             .into_iter()
-            .filter(|a| a.enabled && realm.is_none_or(|r| r == a.realm))
+            .filter(|a| a.enabled)
             .collect(),
     );
     let mut attempts = 0;

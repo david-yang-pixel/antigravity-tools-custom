@@ -1,7 +1,7 @@
 //! Desktop and authenticated Web admin commands share the same native provider service.
 use crate::modules::egress::{self, Pool};
 use crate::modules::native_providers::{
-    self as native, AccountView, Provider, Realm, Settings, SettingsView,
+    self as native, AccountView, Provider, Settings, SettingsView,
 };
 use serde::Deserialize;
 
@@ -10,31 +10,10 @@ pub struct ProviderRequest {
     pub provider: Provider,
 }
 #[derive(Deserialize)]
-pub struct ClientVersionRequest {
-    pub provider: Provider,
-    #[serde(default)]
-    pub refresh: bool,
-}
-#[tauri::command]
-pub async fn check_native_client_version(
-    request: ClientVersionRequest,
-) -> Result<native::qoder::releases::ClientVersionView, String> {
-    match request.provider {
-        Provider::Qoder => Ok(native::qoder::releases::check(request.refresh).await),
-        Provider::ChatGpt => Err("Client version check is not available for ChatGPT".into()),
-    }
-}
-#[derive(Deserialize)]
 pub struct SettingsRequest {
     pub provider: Provider,
     pub enabled: bool,
     pub preferred_account_id: Option<String>,
-}
-#[derive(Deserialize)]
-pub struct LoginRequest {
-    pub provider: Provider,
-    pub realm: Realm,
-    pub account_id: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct SessionRequest {
@@ -44,9 +23,6 @@ pub struct SessionRequest {
 #[derive(Deserialize)]
 pub struct ImportRequest {
     pub provider: Provider,
-    /// Omitted for ChatGPT, whose accounts are always global; Qoder keeps its `cn` default.
-    #[serde(default)]
-    pub realm: Realm,
     pub auth: serde_json::Value,
     /// Re-import onto this saved account, through its own egress node.
     #[serde(default)]
@@ -84,40 +60,17 @@ pub async fn save_native_provider_settings(
         },
     )
 }
-#[tauri::command]
-pub async fn start_native_login(request: LoginRequest) -> Result<native::login::Started, String> {
-    native::login::start(
-        request.provider,
-        request.realm,
-        request.account_id.as_deref(),
-    )
-    .await
-}
-#[tauri::command]
-pub async fn poll_native_login(request: SessionRequest) -> Result<native::login::Poll, String> {
-    native::login::poll(request.provider, &request.id).await
-}
-#[tauri::command]
-pub async fn cancel_native_login(request: SessionRequest) -> Result<(), String> {
-    native::login::cancel(request.provider, &request.id).await
-}
 /// Imports every account of a multi-account export (ChatGPT, e.g. a sub2api export) and
 /// reports each one; a failed account never stops the rest.
 #[tauri::command]
 pub async fn import_native_accounts_batch(
     request: ImportRequest,
 ) -> Result<Vec<native::login::BatchItem>, String> {
-    native::login::import_batch(request.provider, request.realm, request.auth).await
+    native::login::import_batch(request.provider, request.auth).await
 }
 #[tauri::command]
 pub async fn import_native_account(request: ImportRequest) -> Result<AccountView, String> {
-    native::login::import(
-        request.provider,
-        request.realm,
-        request.auth,
-        request.account_id.as_deref(),
-    )
-    .await
+    native::login::import(request.provider, request.auth, request.account_id.as_deref()).await
 }
 #[tauri::command]
 pub async fn update_native_account(request: AccountRequest) -> Result<AccountView, String> {
@@ -137,10 +90,6 @@ pub async fn delete_native_account(request: AccountRequest) -> Result<(), String
     native::store::remove(request.provider, &request.id)?;
     egress::forget(Pool::Native(request.provider), &request.id);
     native::http::forget(&request.id);
-    match request.provider {
-        Provider::Qoder => native::qoder::sign::forget(&request.id),
-        Provider::ChatGpt => {}
-    }
     Ok(())
 }
 
@@ -183,7 +132,6 @@ pub async fn set_native_account_egress(
 pub async fn test_native_account_egress(request: SessionRequest) -> Result<egress::Probe, String> {
     let account = native::store::get(request.provider, &request.id)?;
     let url = match request.provider {
-        Provider::Qoder => format!("{}/", native::qoder::gateway(account.realm)),
         Provider::ChatGpt => "https://chatgpt.com/".to_owned(),
     };
     let direct_url = url.clone();
@@ -194,22 +142,13 @@ pub async fn test_native_account_egress(request: SessionRequest) -> Result<egres
         |exit| async move {
             let started = std::time::Instant::now();
             let timeout = std::time::Duration::from_secs(8);
-            let reached = match account.provider {
-                Provider::Qoder => native::http::client_on(&account, &exit)
-                    .map_err(|e| e.to_string())?
-                    .head(&direct_url)
-                    .timeout(timeout)
-                    .send()
-                    .await
-                    .is_ok(),
-                Provider::ChatGpt => native::http::plain_client_on(&account, &exit)
-                    .map_err(|e| e.to_string())?
-                    .head(&direct_url)
-                    .timeout(timeout)
-                    .send()
-                    .await
-                    .is_ok(),
-            };
+            let reached = native::http::client_on(&account, &exit)
+                .map_err(|e| e.to_string())?
+                .head(&direct_url)
+                .timeout(timeout)
+                .send()
+                .await
+                .is_ok();
             reached
                 .then(|| started.elapsed().as_millis() as u64)
                 .ok_or_else(|| {
