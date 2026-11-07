@@ -1,44 +1,34 @@
-# Native Qoder accounts
+# Native provider accounts
 
-Qoder is a built-in account source. Authorization, quota queries, refresh, model
-discovery and inference run in the Rust application; no external Python/Go gateway
-is required. The integration uses the client protocol described in the references
-below. Live compatibility must be checked with an authorized account.
+Native providers are account sources implemented in the Rust application: import,
+refresh, model discovery, scheduling and inference run in the gateway, with no
+external helper. The only native provider is **ChatGPT** (Codex backend); its
+details follow the shared sections below.
 
 ## Using an account
 
-1. Open **Accounts → Qoder**, choose China or Global, and request an authorization
-   link.
-2. Complete sign-in on the official website. The gateway polls Qoder's PKCE device
-   grant; no callback, local helper or server-side browser is involved. An existing
-   account's reauthorization must return the same provider, region and user identity.
-3. Sync balance and models. Quota failures preserve the previous snapshot and its
-   timestamp. Unknown balance and unlimited balance are separate states.
-4. In the model registry, fetch models from **Qoder**, explicitly test with your own
-   system/user text, then publish public IDs. Discovery, sign-in and background
+1. Open **Accounts → ChatGPT** and import credentials (see
+   [Import and re-import](#import-and-re-import)).
+2. Sync models. Quota is reported by the upstream on inference; a failure keeps the
+   previous snapshot and its timestamp.
+3. In the model registry, fetch models from **ChatGPT**, explicitly test with your
+   own system/user text, then publish public IDs. Discovery, import and background
    maintenance do not run inference or automatically publish models.
 
 Clients use the gateway's existing API address and client keys. Public model IDs
-bind explicitly to `qoder:default` and a provider-native model ID.
+bind explicitly to `chatgpt:default` and a provider-native model ID.
 
-Qoder's request payload carries no structured-output, tool-selection or
-parallel-call field. Requests with `response_format` / Responses `text.format`,
-`tool_choice` `required` or a forced function, or `parallel_tool_calls: false` while
-tools are offered are rejected with 400 before account selection instead of running
-unconstrained; `tool_choice: none` is honored by sending no tools.
+## Binding several native IDs to one public name
 
-## Binding China and Global IDs to one public name
-
-China and Global accounts often list different native IDs for the same model (for
-example `shared-model` and `shared-model-sg`). Bind them to one public name so
-clients request a single ID:
+A publication may bind more than one native ID of the same source, so clients
+request a single public ID:
 
 - The first ID is the primary `native_model`; the rest go in `extra_native_models`.
   All bound IDs share one account pool, scheduled by the existing policy with no
   preference between them.
 - Each request is sent with the native ID of the selected account: an account must
   list that ID in its model catalog. An account listing several bound IDs uses the
-  first one in the order above. Free-model and exhausted-quota checks apply per ID.
+  first one in the order above. Quota checks apply per ID.
 - Billing, statistics and the exposed model name always use the public ID, never a
   native ID. `x-mapped-model` reports the native ID actually sent.
 - Headless configuration: add the same JSON field to the published entry, either by
@@ -54,10 +44,10 @@ clients request a single ID:
 
 ```json
 {
-  "public_id": "qoder-model",
-  "source_id": "qoder:default",
-  "native_model": "shared-model",
-  "extra_native_models": ["shared-model-sg"]
+  "public_id": "gpt-model",
+  "source_id": "chatgpt:default",
+  "native_model": "gpt-model",
+  "extra_native_models": ["gpt-model-latest"]
 }
 ```
 
@@ -80,13 +70,11 @@ clients request a single ID:
   also apply to native accounts. Retry-After is a lower bound on backoff. Disabling
   the breaker clears local cooldowns but retains concurrency, model admission and
   account/quota checks. Antigravity-specific 5h/weekly rules are not native credits.
-- Background maintenance checks due accounts every minute. Model and quota polls
-  follow real use: they run about every 15–18 minutes (a stable per-account offset)
-  while the account completed a generation in the last six hours, and stop when it
-  is idle. An idle account whose last known balance is zero keeps a quota-only
-  recovery check at the same 15–18 minute interval, including after a restart.
-  This check does not fetch models or initialize UMID, and stops once credits
-  return. The 15-minute quota admission TTL is unchanged. Other idle accounts are
+- Background maintenance checks due accounts every minute. Model polls follow
+  real use: they run about every 15–18 minutes (a stable per-account offset) while
+  the account completed a generation in the last six hours, and stop when it is
+  idle. An idle account whose last known quota is exhausted keeps a recovery check
+  at the same interval, including after a restart, and stops once quota returns. The 15-minute quota admission TTL is unchanged. Other idle accounts are
   only renewed when their token is within five minutes of expiry. A catalog that
   was never fetched is always due, and manual sync is unaffected. Activity is
   tracked in memory, so after a restart normal catalog polls resume with the first
@@ -97,22 +85,15 @@ clients request a single ID:
   task before persistence; a new authorization or deletion rejects stale writes.
 - Default concurrency is five active inferences per account. The permit remains
   held through upstream streaming and is released on cancellation.
-- Authentication failures, rate limits and transient failures cool the affected
-  account. A request moves to another account only when nothing reached the
-  upstream (refresh, route or request-preparation failure), or once after a
-  connection failure without an HTTP response. Unsent attempts do not consume
-  that connection retry allowance; the five-account limit and shared deadline
-  still apply. An upstream answer — 401/403 after one refresh, 429, 5xx, or a
-  stream error before output — is returned to the client and is not replayed on
-  other accounts; a later request is scheduled away from the cooling account.
-  A failure during the same-account authorization retry retains the original
-  rejection, even if that retry fails before sending. A partially delivered
-  generation is never replayed.
-- A known, recent zero balance excludes credit-consuming models from scheduling.
-  Models that official metadata marks as free remain eligible, with the same
-  concurrency, authorization and cooldown limits. Unknown or stale quota data
-  does not invent an exhausted-account verdict. Zero Qoder credits are a valid
-  balance, including Standard accounts that only expose free models.
+- Failures are charged by the provider's own classification (see **Failover
+  policy** below). A request moves to another account when nothing reached the
+  upstream (refresh, route or request-preparation failure), once after a
+  connection failure without an HTTP response, or when the upstream answer is
+  classified as failover before any output. A partially delivered generation is
+  never replayed.
+- A known, recent exhausted quota window excludes the account from scheduling
+  until that window resets. Unknown or stale quota data does not invent an
+  exhausted-account verdict.
 - Removing an account removes its local credentials. Published bindings remain
   explicit records; requests need another eligible account for the same model.
 
@@ -122,8 +103,8 @@ Files are relative to the existing application data directory (`ABV_DATA_DIR`):
 
 | File | Contents |
 | --- | --- |
-| `qoder_accounts.enc` | Authenticated encrypted account vault (owner-only `0600`), including tokens and local account metadata |
-| `qoder_settings.json` | Source enablement and the optional preferred account ID |
+| `chatgpt_accounts.enc` | Authenticated encrypted account vault (owner-only `0600`), including tokens and local account metadata |
+| `chatgpt_settings.json` | Source enablement and the optional preferred account ID |
 
 Encryption uses the application's existing machine-bound crypto utility. Web and
 Tauri account views exclude credentials. A vault/settings error disables that
@@ -135,67 +116,37 @@ Provider settings have this shape:
 {"enabled":true,"preferred_account_id":null}
 ```
 
-| Environment variable | Default | Purpose |
-| --- | --- | --- |
-| `ABV_QODER_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
-| `ABV_QODER_MAX_CONCURRENCY` | `5` | Active requests per account, clamped to 1–8; explicit deployment overrides take precedence |
-| `ABV_QODER_VERSION` | `1.1.83` | Qoder client version (defaults to `1.1.75` in legacy mode) |
-| `ABV_QODER_LEGACY_PROTOCOL` | `false` | Explicit rollback to the previous Rust COSY signer and rustls transport; restart after changing |
-| `ABV_QODER_ALLOW_DIRECT_UMID` | `false` | Explicitly allow the official identity SDK to connect directly when Qoder uses a proxy; exposes the host network/machine identity outside that proxy |
-
 Without egress, the normal gateway upstream-proxy setting applies to native account
 traffic. Credential-bearing requests validate HTTPS service hosts and do not follow
 redirects.
 
-The official native UMID SDK uses its own network stack. When Qoder uses an account
-egress node or the general upstream proxy, modern model/inference signing fails
-before starting that SDK unless `ABV_QODER_ALLOW_DIRECT_UMID=true` is explicitly
-set. Alternatively, use the legacy protocol. Release detection does not invoke UMID.
-
-The Qoder account page checks the official npm `latest` release when opened and
-offers a manual refresh. It shows the bundled version and last successful check;
-version overrides and legacy mode are displayed separately. Checks use the general
-upstream proxy without account credentials, cache successful results for 24 hours,
-and retain the last successful result if npm is unavailable. Manual requests are
-limited to one per minute per gateway. No component is installed automatically.
-Headless administrators can use `POST /api/native-providers/client-version` with
-`{"provider":"qoder","refresh":false}` (or `true` for manual refresh).
-
 ## Account isolation and egress nodes
 
-- Every account has its own HTTP connection pool and TLS session cache (no socket
-  carries two accounts' tokens), and persisted machine/device ids. The default
-  1.1.83 protocol uses the official UMID machine code/token/type and the server's
-  normalized hostname. These describe the real host; separate accounts on the
-  same host are not presented as different physical machines. The older derived
-  address/hostname is used only with the explicit legacy protocol setting.
-- **Accounts → Qoder → Egress nodes** routes each account through one node of an
+- Every account has its own HTTP connection pool (no socket carries two accounts'
+  tokens); a route change rebuilds only that account's client.
+- **Accounts → ChatGPT → Egress nodes** routes each account through one node of an
   airport subscription, like WorkBuddy (see `docs/WORKBUDDY_UPSTREAM.md`). The
   subscription link, node filters and auto-assign are shared with WorkBuddy, and
   one mihomo process serves both; the switch and bindings are per source. Within
-  Qoder a node serves one account; a WorkBuddy account and a Qoder account may share
-  a node because they talk to different services.
-- Sign-in polling, credential import validation, refresh, model, quota and inference
-  requests all use the account's node. Login and import claim a free node and the
-  new account keeps it; reauthorization uses the account's bound node. A sign-in or
-  import of a saved account through a different node is refused. A bound account
-  whose node is unusable fails instead of falling back to the server's address.
-- The official native UMID component initializes its own device identity outside
-  this HTTP transport; its SDK traffic is not covered by the per-account proxy.
-  It is invoked lazily, uses a bounded process lifetime and caches successful
-  results, rather than introducing another background account heartbeat.
+  ChatGPT a node serves one account; a WorkBuddy account and a ChatGPT account may
+  share a node because they talk to different services.
+- Credential import validation, refresh, model and inference requests all use the
+  account's node. An import claims a free node and the new account keeps it; a
+  re-import uses the account's bound node. An import of a saved account through a
+  different node is refused. A bound account whose node is unusable fails instead
+  of falling back to the server's address.
 - `DIRECT` sends that account from this server's own address. With egress off the
   upstream-proxy setting applies, as before.
 - Subscription entries named `DIRECT` (case/whitespace variants included), or
   reported as type `Direct`, are excluded from the node list and auto-assignment.
   If no proxy candidates remain, assignment fails instead of selecting direct.
   Administrators can still explicitly choose `DIRECT` for an account.
-- Bindings are stored under `pools.qoder` in `workbuddy_egress.json` (the file keeps
-  its name; older versions ignore the new field).
+- Bindings are stored under `pools.chatgpt` in `workbuddy_egress.json` (the file
+  keeps its name; older versions ignore the field).
 
 | Environment variable | Purpose |
 | --- | --- |
-| `ABV_QODER_EGRESS_ENABLED` | `true`/`false`; locks Qoder's egress switch |
+| `ABV_CHATGPT_EGRESS_ENABLED` | `true`/`false`; locks ChatGPT's egress switch |
 | `ABV_EGRESS_SUBSCRIPTION` | Shared subscription link (`ABV_WORKBUDDY_EGRESS_SUBSCRIPTION` is still read) |
 | `ABV_MIHOMO_PATH` | mihomo executable |
 
@@ -207,10 +158,8 @@ authentication, not an ordinary inference client key.
 
 | Endpoint | Body |
 | --- | --- |
-| `/api/native-accounts/list` | `{"provider":"qoder"}` |
-| `/api/native-login/start` | `{"provider":"qoder","realm":"cn","account_id":null}`; returns the session `id` and `auth_url` |
-| `/api/native-login/poll`, `/api/native-login/cancel` | `{"provider":"qoder","id":"<login-session-id>"}` |
-| `/api/native-accounts/import` | Provider, region and `auth` credential JSON |
+| `/api/native-accounts/list` | `{"provider":"chatgpt"}` |
+| `/api/native-accounts/import` | Provider, `auth` credential, optional `account_id` to re-import onto a row |
 | `/api/native-accounts/import-batch` | ChatGPT multi-account export (`auth.accounts`); per-account report |
 | `/api/native-accounts/update` | Provider/account `id`; optional `enabled`, `auto_refresh`, or `refresh:true`; no flags synchronizes metadata |
 | `/api/native-accounts/delete` | Provider/account `id` |
@@ -222,18 +171,16 @@ authentication, not an ordinary inference client key.
 | `/api/native-egress/account` | Provider, account `id`, `node` (name, `"DIRECT"`, or `null` for auto-assign) |
 | `/api/native-egress/account/test` | Provider and account `id`; latency along the account's real path |
 
-Qoder credential import also accepts `personalToken`; it is exchanged for a job
-token. Imported account identity is checked with the provider before persistence.
-An access, refresh or personal token already saved for this provider is rejected
-before obtaining a login route or making a network request, even if the selected
-region differs. Refresh or reauthorize that account from its own row instead;
-this keeps its existing route and avoids discarding a rotated refresh token when
-an import is refused. Fresh credentials continue through normal import validation.
+Imported account identity is checked with the provider before persistence. An
+access or refresh token already saved for this provider (or a refresh token that
+was imported before and has since rotated) is rejected before obtaining a login
+route or making a network request. Re-import that account from its own row
+instead; this keeps its existing route and avoids discarding a rotated refresh
+token when an import is refused.
 
 ## ChatGPT accounts
 
-ChatGPT (Codex backend) is a second native provider (`provider: "chatgpt"`). It
-reuses the same account list, scheduling, egress and admin routes as Qoder. Protocol
+ChatGPT (Codex backend) is the native provider `provider: "chatgpt"`. Protocol
 facts are in [chatgpt-codex-protocol.md](chatgpt-codex-protocol.md).
 
 > **Risk note.** Using a ChatGPT subscription outside Codex may violate OpenAI's
@@ -268,7 +215,7 @@ Headless: `import_native_account` / `POST /api/native-accounts/import` with
 
 Each account row has a **Re-import** action. It opens the same input and sends
 `account_id`, replacing that account's credentials in place. A token that belongs
-to a different ChatGPT account is rejected. Qoder rejects `account_id`.
+to a different ChatGPT account is rejected.
 
 A credential that OpenAI rejects disables the account automatically; the row shows
 `auth_error` with a hint to re-import. Quota is shown as one percentage bar per
@@ -281,7 +228,7 @@ window on free accounts), with its reset time.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `ABV_CHATGPT_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
-| `ABV_CHATGPT_MAX_CONCURRENCY` | `5` | Active requests per account, clamped like Qoder's |
+| `ABV_CHATGPT_MAX_CONCURRENCY` | `5` | Active requests per account, clamped to 1–8 |
 | `ABV_CHATGPT_EGRESS_ENABLED` | `true`/`false` | Locks ChatGPT's egress switch |
 | `ABV_CHATGPT_CLIENT_VERSION` | `0.167.0` | Advertised Codex client version; semver, must be `>= 0.144.0`. The model catalog depends on it: an old version is offered fewer, older models (e.g. no `gpt-6-*`), so raise it when Codex releases add models |
 
@@ -306,12 +253,12 @@ conversation continues; the previous account's server-side state is not reused.
 
 ## Protocol scope and verification
 
-The shared Chat codec/relay serves Chat Completions, HTTP Responses and Anthropic
-Messages, including streaming and function-tool history. Common authentication,
-model admission, limits, monitoring and usage accounting remain in the gateway.
-Native sources do not reuse Gemini thought signatures or claim Gemini/image
-generation endpoint support. Hosted Responses tools such as `web_search` remain
-subject to the existing Chat codec's limitations.
+ChatGPT speaks the Responses wire: Responses clients get it passed through, and
+Chat Completions / Anthropic Messages clients are bridged through the shared Chat
+relay, including streaming and function-tool history. Common authentication, model
+admission, limits, monitoring and usage accounting remain in the gateway. Native
+sources do not reuse Gemini thought signatures or claim Gemini/image generation
+endpoint support.
 
 Run focused checks on a development machine with the normal Rust/Tauri dependencies:
 
@@ -319,7 +266,6 @@ Run focused checks on a development machine with the normal Rust/Tauri dependenc
 cd src-tauri
 cargo test --lib native_providers
 cargo test --lib proxy::upstream::native::tests
-cargo test -p qoder-client --lib --locked
 ```
 
 Frontend checks:
@@ -329,39 +275,23 @@ Frontend checks:
 node --test src/types/nativeProviders.test.mjs src/components/proxy/models/registryLogic.test.mjs
 ```
 
-Tests cover vault/view credential isolation, stale-refresh rejection, quota
-parsing, shared/unlimited balances, device grant cancellation, account rotation,
-COSY signing, explicit model publication, source isolation and stream/tool/usage
-conversion. Offline checks do not establish successful real-account authorization
-or provider-side model permissions. Full desktop builds require the repository's
+Offline checks do not establish successful real-account authorization or
+provider-side model permissions. Full desktop builds require the repository's
 platform dependencies and CI.
 
-## Protocol references
+## Removed Qoder source
 
-- [qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub): device token
-  exchange, COSY public key/encoding, model catalog and quota wire layout (MIT).
-- `@qoder-ai/qodercli@1.1.83`: pinned Apache-2.0 WASM signer/decoder and native
-  UMID components. Provenance, npm integrity, per-file checksums and license are
-  in `src-tauri/crates/qoder-client/vendor/`. See
-  [client compatibility](../QODER_CLIENT_FINGERPRINT.md) for the transport profile,
-  offline evidence, runtime requirements and rollback setting.
+The native Qoder source was removed. On upgrade:
 
-The integration uses independently implemented Rust state management and protocol
-adapters; it does not bundle or run the referenced gateway.
+- `model_registry.json` records bound to `qoder:default` (candidates, publications,
+  ignore marks and verification results) are dropped when the registry loads and
+  disappear from the file on the next saved change. Clients requesting a former
+  Qoder public model ID get the usual unknown-model answer.
+- `qoder_accounts.enc`, `qoder_settings.json` and the `pools.qoder` egress bindings
+  are no longer read; delete them by hand if you no longer need them. The
+  `ABV_QODER_*` environment variables have no effect.
+- The device-grant sign-in endpoints (`/api/native-login/*`) and the client version
+  check (`/api/native-providers/client-version`) were removed with it.
 
-The modern Qoder protocol embeds OpenSSL 3.5, the WASM module and the native
-identity helper for the build target. No Node installation or runtime downloads
-are needed. The first model/inference request extracts the verified helper under
-`<data-dir>/qoder-runtime/`; that directory must be writable and permit execution.
-The official helper supports Linux/macOS x64 and ARM64, and Windows x64. For a
-protocol regression or unsupported helper platform, set
-`ABV_QODER_LEGACY_PROTOCOL=true` and restart to select the previous COSY/rustls
-path. Modern failures do not automatically downgrade or replay the request.
-
-## Rolling back the integration
-
-Before reverting to a version that does not recognize the native Qoder source,
-unpublish their models and back up the data directory. Restore the pre-integration
-`model_registry.json` when reverting: older versions also reject native candidate
-records, even after unpublishing. Keep existing Antigravity/WorkBuddy bindings. Account vaults use the current
-machine's encryption identity and are not portable plaintext credential exports.
+Account vaults use the current machine's encryption identity and are not portable
+plaintext credential exports.

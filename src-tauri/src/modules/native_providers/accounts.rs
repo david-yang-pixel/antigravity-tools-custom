@@ -86,7 +86,7 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
     if !force && (a.expires_at == 0 || a.expires_at > now() + 300) {
         return Ok(a);
     }
-    if a.credentials.refresh_token.is_empty() && a.credentials.personal_token.is_empty() {
+    if a.credentials.refresh_token.is_empty() {
         if a.expires_at > now() {
             return Ok(a);
         }
@@ -95,10 +95,11 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
             "This account requires browser authorization again",
         ));
     }
-    let result = match Client::for_account(&a).await {
-        Ok(Client::Qoder(client)) => qoder::refresh(&client, &mut a).await,
-        Ok(Client::ChatGpt(client)) => chatgpt::auth::refresh(&client, &mut a).await,
-        Err(error) => Err(error),
+    let result = match a.provider {
+        Provider::ChatGpt => match http::client_for(&a).await {
+            Ok(client) => chatgpt::auth::refresh(&client, &mut a).await,
+            Err(error) => Err(error),
+        },
     };
     if let Err(error) = result {
         // A dead credential turns the account off instead of retrying it every minute;
@@ -126,44 +127,18 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
 pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountView, String> {
     sync_metadata(provider, id, force, true).await
 }
-/// The transport one saved account's provider speaks, on that account's egress route.
-enum Client {
-    Qoder(qoder_client::transport::Client),
-    ChatGpt(reqwest::Client),
-}
-impl Client {
-    async fn for_account(a: &Account) -> Result<Self, Failure> {
-        Ok(match a.provider {
-            Provider::Qoder => Self::Qoder(http::client_for(a).await?),
-            Provider::ChatGpt => Self::ChatGpt(http::plain_client_for(a).await?),
-        })
-    }
-}
 /// Catalog (only when `catalog`) and quota. A `None` quota means the provider has no quota
 /// endpoint and the stored snapshot stays as it is (ChatGPT reports quota on inference).
 async fn fetch_metadata(
-    client: &Client,
+    client: &reqwest::Client,
     a: &Account,
     catalog: bool,
 ) -> (
     Option<Result<Vec<Model>, Failure>>,
     Option<Result<Quota, Failure>>,
 ) {
-    match client {
-        Client::Qoder(client) => {
-            let (models, quota) = tokio::join!(
-                async {
-                    if catalog {
-                        Some(qoder::models(client, a).await)
-                    } else {
-                        None
-                    }
-                },
-                qoder::quota(client, a)
-            );
-            (models, Some(quota))
-        }
-        Client::ChatGpt(client) => {
+    match a.provider {
+        Provider::ChatGpt => {
             let models = if catalog {
                 Some(chatgpt::models::fetch(client, a).await)
             } else {
@@ -184,7 +159,7 @@ async fn sync_metadata(
     let mut a = fresh(provider, id, force)
         .await
         .map_err(|e| e.to_string())?;
-    let client = Client::for_account(&a).await.map_err(|e| e.to_string())?;
+    let client = http::client_for(&a).await.map_err(|e| e.to_string())?;
     let (mut models, mut quota) = fetch_metadata(&client, &a, catalog).await;
     fn unauthorized<T>(r: &Option<Result<T, Failure>>) -> bool {
         r.as_ref()
@@ -257,6 +232,7 @@ impl Lease {
     pub fn success(&mut self) {
         self.finish(None);
     }
+    #[cfg(test)]
     pub fn failure(&mut self, status: u16) {
         self.failure_after(status, None);
     }
@@ -433,8 +409,7 @@ pub(super) fn work(a: &Account, at: i64) -> Option<Work> {
     if needs_quota_recovery(a) {
         return Some(Work::Quota);
     }
-    let refreshable =
-        !a.credentials.refresh_token.is_empty() || !a.credentials.personal_token.is_empty();
+    let refreshable = !a.credentials.refresh_token.is_empty();
     (refreshable && a.expires_at > 0 && a.expires_at <= at + RENEW_WINDOW_SECS)
         .then_some(Work::Renew)
 }

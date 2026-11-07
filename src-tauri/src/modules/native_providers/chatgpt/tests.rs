@@ -1112,14 +1112,9 @@ async fn chatgpt_import_keeps_a_valid_exported_access_token_without_refreshing()
     let server = mock(200, &[], catalog_and_tokens(), false).await;
     let export = json!({"accounts": [{"name": "acc@example.com", "platform": "openai",
         "credentials": exported_credentials("acc", "rt-exported", 7 * 86400)}]});
-    let view = login::import(
-        Provider::ChatGpt,
-        Realm::Global,
-        export["accounts"][0].clone(),
-        None,
-    )
-    .await
-    .unwrap();
+    let view = login::import(Provider::ChatGpt, export["accounts"][0].clone(), None)
+        .await
+        .unwrap();
     assert_eq!(view.uid, "acc:u1");
     // The exported refresh token is not spent: no token exchange, the access token is
     // proven by one catalog request instead.
@@ -1149,7 +1144,6 @@ async fn chatgpt_import_refreshes_an_expired_or_rejected_exported_access_token()
     let server = mock(200, &[], catalog_and_tokens(), false).await;
     login::import(
         Provider::ChatGpt,
-        Realm::Global,
         json!({"credentials": exported_credentials("acc", "rt-expired", -60)}),
         None,
     )
@@ -1192,7 +1186,6 @@ async fn chatgpt_import_refreshes_an_expired_or_rejected_exported_access_token()
     let _reset = ResetEndpoints;
     login::import(
         Provider::ChatGpt,
-        Realm::Global,
         json!({"credentials": exported_credentials("acc", "rt-revoked", 86400)}),
         None,
     )
@@ -1220,7 +1213,7 @@ async fn chatgpt_batch_import_reports_each_account() {
         {"name": "two@example.com", "platform": "openai",
             "credentials": exported_credentials("two", "rt-two", 86400)},
     ]});
-    let report = login::import_batch(Provider::ChatGpt, Realm::Global, export.clone())
+    let report = login::import_batch(Provider::ChatGpt, export.clone())
         .await
         .unwrap();
     let outcome: Vec<_> = report
@@ -1239,18 +1232,12 @@ async fn chatgpt_batch_import_reports_each_account() {
     assert!(report[2].message.contains("refresh token"));
     assert_eq!(store::all(Provider::ChatGpt).unwrap().len(), 2);
     // Importing the same export again saves nothing twice.
-    let again = login::import_batch(Provider::ChatGpt, Realm::Global, export)
+    let again = login::import_batch(Provider::ChatGpt, export)
         .await
         .unwrap();
     assert_eq!(again[0].status, "failed");
     assert!(again[0].message.contains("already saved"));
     assert_eq!(store::all(Provider::ChatGpt).unwrap().len(), 2);
-    // Qoder exports have their own shape; the batch path is ChatGPT's.
-    assert!(
-        login::import_batch(Provider::Qoder, Realm::Cn, json!({"accounts": []}))
-            .await
-            .is_err()
-    );
 }
 
 #[tokio::test]
@@ -1267,8 +1254,8 @@ async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
     .into_iter()
     .enumerate()
     {
-        // The requested realm is ignored: ChatGPT accounts are always global.
-        let view = login::import(Provider::ChatGpt, Realm::Cn, auth.clone(), None)
+        // ChatGPT accounts are always global.
+        let view = login::import(Provider::ChatGpt, auth.clone(), None)
             .await
             .unwrap_or_else(|e| panic!("{auth}: {e}"));
         assert_eq!(view.realm, Realm::Global);
@@ -1281,8 +1268,6 @@ async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
         assert_eq!(a.credentials.refresh_token, "rotated");
         assert_eq!(a.credentials.chatgpt_account_id, "acc");
         assert_eq!(a.nickname, "me@example.com");
-        // ChatGPT has no Qoder device identity.
-        assert!(a.credentials.machine_id.is_empty() && a.credentials.device_id.is_empty());
         assert_eq!(token_requests(&server), n + 1);
     }
     let form: std::collections::HashMap<String, String> = {
@@ -1292,7 +1277,7 @@ async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
     };
     assert_eq!(form["refresh_token"], "rt-bare");
     for bad in [json!(""), json!({}), json!({"access_token": "a"}), json!(5)] {
-        let error = login::import(Provider::ChatGpt, Realm::Global, bad.clone(), None)
+        let error = login::import(Provider::ChatGpt, bad.clone(), None)
             .await
             .err()
             .unwrap_or_else(|| panic!("{bad} was accepted"));
@@ -1307,13 +1292,13 @@ async fn chatgpt_import_rejects_saved_refresh_token_before_network() {
     let _sandbox = Sandbox::new();
     // The token rotates on import, so the saved refresh token is no longer the pasted one.
     let server = mock(200, &[], import_token_response(true), false).await;
-    login::import(Provider::ChatGpt, Realm::Global, json!("rt-dup"), None)
+    login::import(Provider::ChatGpt, json!("rt-dup"), None)
         .await
         .unwrap();
     let before = serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap();
     assert_eq!(before[0]["credentials"]["refresh_token"], "rotated");
     for again in [json!("rt-dup"), json!({"refresh_token": " rt-dup "})] {
-        let error = login::import(Provider::ChatGpt, Realm::Global, again, None)
+        let error = login::import(Provider::ChatGpt, again, None)
             .await
             .err()
             .unwrap();
@@ -1361,14 +1346,9 @@ async fn chatgpt_row_reimport_with_egress_reenables_the_same_account() {
     write_egress(json!({"pools": {"chatgpt": {"enabled": true,
         "bindings": {saved.id.clone(): "DIRECT"}}}}));
     let server = mock(200, &[], import_token_response(true), false).await;
-    let view = login::import(
-        Provider::ChatGpt,
-        Realm::Global,
-        json!("new-rt"),
-        Some(&saved.id),
-    )
-    .await
-    .unwrap();
+    let view = login::import(Provider::ChatGpt, json!("new-rt"), Some(&saved.id))
+        .await
+        .unwrap();
     assert_eq!(view.id, saved.id);
     assert!(view.enabled);
     assert_eq!(token_requests(&server), 1);
@@ -1387,14 +1367,9 @@ async fn chatgpt_reimport_keeps_a_manually_disabled_account_off() {
     let saved = saved_chatgpt("acc:u1");
     accounts::configure(Provider::ChatGpt, &saved.id, Some(false), None).unwrap();
     let _server = mock(200, &[], import_token_response(true), false).await;
-    let view = login::import(
-        Provider::ChatGpt,
-        Realm::Global,
-        json!("new-rt"),
-        Some(&saved.id),
-    )
-    .await
-    .unwrap();
+    let view = login::import(Provider::ChatGpt, json!("new-rt"), Some(&saved.id))
+        .await
+        .unwrap();
     assert_eq!(view.id, saved.id);
     assert!(!view.enabled);
 }
@@ -1412,15 +1387,10 @@ async fn chatgpt_row_reimport_rejects_a_token_of_another_account() {
     let saved = saved_chatgpt("other:u9");
     let before = serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap();
     let _server = mock(200, &[], import_token_response(true), false).await;
-    let error = login::import(
-        Provider::ChatGpt,
-        Realm::Global,
-        json!("new-rt"),
-        Some(&saved.id),
-    )
-    .await
-    .err()
-    .unwrap();
+    let error = login::import(Provider::ChatGpt, json!("new-rt"), Some(&saved.id))
+        .await
+        .err()
+        .unwrap();
     assert!(
         error.starts_with("This token belongs to a different ChatGPT account"),
         "{error}"
@@ -1445,15 +1415,10 @@ async fn chatgpt_wrong_row_reimport_persists_onto_the_matching_account() {
     .unwrap();
     let row_before = serde_json::to_value(store::get(Provider::ChatGpt, &row.id).unwrap()).unwrap();
     let server = mock(200, &[], import_token_response(true), false).await;
-    let error = login::import(
-        Provider::ChatGpt,
-        Realm::Global,
-        json!("new-rt"),
-        Some(&row.id),
-    )
-    .await
-    .err()
-    .unwrap();
+    let error = login::import(Provider::ChatGpt, json!("new-rt"), Some(&row.id))
+        .await
+        .err()
+        .unwrap();
     assert_eq!(
         error,
         "This token belongs to ChatGPT account owner@example.com; its credentials were updated there"
@@ -1477,7 +1442,7 @@ async fn chatgpt_wrong_row_reimport_persists_onto_the_matching_account() {
         .imported_refresh_sha256
         .contains(&sha256("new-rt")));
     // The spent token is now recognized before any network request.
-    let again = login::import(Provider::ChatGpt, Realm::Global, json!("new-rt"), None)
+    let again = login::import(Provider::ChatGpt, json!("new-rt"), None)
         .await
         .err()
         .unwrap();
@@ -1499,15 +1464,10 @@ async fn chatgpt_salvage_reenables_only_a_dead_credential_account() {
     })
     .unwrap();
     let _server = mock(200, &[], import_token_response(true), false).await;
-    login::import(
-        Provider::ChatGpt,
-        Realm::Global,
-        json!("new-rt"),
-        Some(&row.id),
-    )
-    .await
-    .err()
-    .unwrap();
+    login::import(Provider::ChatGpt, json!("new-rt"), Some(&row.id))
+        .await
+        .err()
+        .unwrap();
     let revived = store::get(Provider::ChatGpt, &owner.id).unwrap();
     assert!(revived.enabled);
     assert!(!revived.credential_dead);
@@ -1519,15 +1479,10 @@ async fn chatgpt_salvage_reenables_only_a_dead_credential_account() {
         a.credential_dead = false;
     })
     .unwrap();
-    login::import(
-        Provider::ChatGpt,
-        Realm::Global,
-        json!("newer-rt"),
-        Some(&row.id),
-    )
-    .await
-    .err()
-    .unwrap();
+    login::import(Provider::ChatGpt, json!("newer-rt"), Some(&row.id))
+        .await
+        .err()
+        .unwrap();
     assert!(!store::get(Provider::ChatGpt, &owner.id).unwrap().enabled);
 }
 
@@ -1566,7 +1521,7 @@ async fn chatgpt_bound_elsewhere_import_points_to_the_account_row() {
         backend: format!("http://{addr}/backend-api"),
     }));
     let _reset = ResetEndpoints;
-    let error = login::import(Provider::ChatGpt, Realm::Global, json!("new-rt"), None)
+    let error = login::import(Provider::ChatGpt, json!("new-rt"), None)
         .await
         .err()
         .unwrap();

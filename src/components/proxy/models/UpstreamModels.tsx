@@ -7,7 +7,7 @@ import RegistryDialog from './RegistryDialog';
 export interface UpstreamPick { source_id: string; realm: WorkBuddyRealm }
 
 export const realmLabels: Record<WorkBuddyRealm, string> = { cn: '国内版 / China', global: '国际版 / Global' };
-export const hasRealm = (view: ModelRegistryView, sourceId: string) => ['workbuddy', 'qoder'].includes(view.sources.find(s => s.id === sourceId)?.provider_type || '');
+export const hasRealm = (view: ModelRegistryView, sourceId: string) => view.sources.find(s => s.id === sourceId)?.provider_type === 'workbuddy';
 // An OpenAI-compatible upstream is served by one API key rather than an account pool.
 export const isKeySource = (view: ModelRegistryView, sourceId: string) => view.sources.find(s => s.id === sourceId)?.provider_type === 'openai_compatible';
 
@@ -54,7 +54,7 @@ export default function UpstreamModels({ view, pick, report, busy, testing, test
     // A published model can take more aliases; public IDs stay unique, which the publish dialog enforces.
     const aliases = (c: CandidateModel) => view.published_models.filter(p => p.source_id === c.source_id && p.native_model === c.native_model).map(p => p.public_id);
     const sourceEnabled = !!view.sources.find(s => s.id === report?.source_id)?.enabled;
-    // Account-pool sources (WorkBuddy, Qoder, ChatGPT) test with content the administrator
+    // Account-pool sources (WorkBuddy, ChatGPT) test with content the administrator
     // writes; nothing is pre-filled. The backend flag decides, as it does for the request.
     const ownPrompt = !!report && pooledSource(view, report.source_id);
     const [editing, setEditing] = useState<string | null>(null);

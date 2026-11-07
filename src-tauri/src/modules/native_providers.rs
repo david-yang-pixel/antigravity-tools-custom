@@ -1,4 +1,4 @@
-//! Native provider accounts (currently Qoder). Only the provider module knows its wire
+//! Native provider accounts (currently ChatGPT). Only the provider module knows its wire
 //! protocol; authorization, encrypted persistence, refresh, scheduling and account views
 //! are shared.
 #[path = "native_providers/accounts.rs"]
@@ -9,12 +9,8 @@ pub mod chatgpt;
 pub mod http;
 #[path = "native_providers/login.rs"]
 pub mod login;
-#[path = "native_providers/qoder.rs"]
-pub mod qoder;
 #[path = "native_providers/store.rs"]
 pub mod store;
-#[path = "native_providers/wire.rs"]
-pub mod wire;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,27 +21,23 @@ const MAX_ACCOUNT_CONCURRENCY: usize = 8;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    Qoder,
     ChatGpt,
 }
 
 impl Provider {
-    pub const ALL: [Self; 2] = [Self::Qoder, Self::ChatGpt];
+    pub const ALL: [Self; 1] = [Self::ChatGpt];
     pub fn key(self) -> &'static str {
         match self {
-            Self::Qoder => "qoder",
             Self::ChatGpt => "chatgpt",
         }
     }
     pub fn name(self) -> &'static str {
         match self {
-            Self::Qoder => "Qoder",
             Self::ChatGpt => "ChatGPT",
         }
     }
     pub fn source(self) -> &'static str {
         match self {
-            Self::Qoder => "qoder:default",
             Self::ChatGpt => "chatgpt:default",
         }
     }
@@ -101,6 +93,7 @@ pub struct Quota {
     pub packs: Vec<QuotaPack>,
 }
 impl Quota {
+    #[cfg(test)]
     pub fn from_packs(unit: &str, packs: Vec<QuotaPack>) -> Self {
         let unlimited = packs.iter().any(|p| p.unlimited);
         let sum = |f: fn(&QuotaPack) -> Option<f64>| -> Option<f64> {
@@ -146,22 +139,9 @@ impl Quota {
 pub struct Credentials {
     pub access_token: String,
     pub refresh_token: String,
-    #[serde(default)]
-    pub personal_token: String,
-    #[serde(default)]
-    pub machine_id: String,
-    #[serde(default)]
-    pub device_id: String,
+    /// Subscription plan (ChatGPT `plan_type`).
     #[serde(default)]
     pub user_type: String,
-    #[serde(default)]
-    pub organization_id: String,
-    #[serde(default)]
-    pub organization_name: String,
-    #[serde(default)]
-    pub organization_tags: Option<Value>,
-    #[serde(default)]
-    pub data_policy_agreed: Option<bool>,
     #[serde(default)]
     pub id_token: String,
     #[serde(default)]
@@ -212,14 +192,7 @@ impl Account {
             enabled: true,
             auto_refresh: true,
             expires_at: 0,
-            credentials: match provider {
-                Provider::Qoder => Credentials {
-                    machine_id: uuid::Uuid::new_v4().to_string(),
-                    device_id: uuid::Uuid::new_v4().to_string(),
-                    ..Default::default()
-                },
-                Provider::ChatGpt => Credentials::default(),
-            },
+            credentials: Credentials::default(),
             models: Vec::new(),
             verified_models: BTreeMap::new(),
             models_updated_at: 0,
@@ -272,8 +245,7 @@ impl From<&Account> for AccountView {
             enabled: a.enabled,
             auto_refresh: a.auto_refresh,
             expires_at: a.expires_at,
-            can_refresh: !a.credentials.refresh_token.is_empty()
-                || !a.credentials.personal_token.is_empty(),
+            can_refresh: !a.credentials.refresh_token.is_empty(),
             models: a.models.clone(),
             models_updated_at: a.models_updated_at,
             quota: a.quota.clone(),
@@ -338,12 +310,6 @@ pub fn number(value: &Value, keys: &[&str]) -> Option<f64> {
             .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
             .filter(|n| n.is_finite())
     })
-}
-pub fn payload(value: &Value) -> &Value {
-    ["Data", "data", "Result", "result"]
-        .iter()
-        .find_map(|key| value.get(*key).filter(|v| v.is_object()))
-        .unwrap_or(value)
 }
 pub fn epoch(value: &Value) -> Option<i64> {
     if let Some(n) = value.as_i64().or_else(|| value.as_str()?.parse().ok()) {

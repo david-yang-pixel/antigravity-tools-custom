@@ -27,6 +27,10 @@ const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ID_BYTES: usize = 512;
 const MAX_RECORD_ID_BYTES: usize = 2048;
 const MAX_SAFE_REVISION: u64 = 9_007_199_254_740_991;
+/// Sources of providers that were removed from the gateway (Qoder). Their stored
+/// candidates, publications and evidence are dropped on load instead of failing the whole
+/// registry as unknown sources; the next saved change persists the pruned registry.
+const RETIRED_SOURCES: &[&str] = &["qoder:default"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -277,7 +281,7 @@ fn provider(source: &str) -> Result<&'static str, String> {
         _ => Err("Unknown model source".into()),
     }
 }
-/// Provider family of a source (`antigravity`, `workbuddy`, `qoder`, `openai_compatible`),
+/// Provider family of a source (`antigravity`, `workbuddy`, `chatgpt`, `openai_compatible`),
 /// or `unknown`.
 pub fn provider_type(source: &str) -> &'static str {
     provider(source).unwrap_or("unknown")
@@ -440,6 +444,27 @@ fn validate_store(store: &StoredRegistry) -> Result<(), String> {
     }
     Ok(())
 }
+/// Removes every record of a [`RETIRED_SOURCES`] source, together with the ignore marks and
+/// verification results that refer to its candidates.
+fn prune_retired_sources(store: &mut StoredRegistry) {
+    let retired = |source: &str| RETIRED_SOURCES.contains(&source);
+    let dropped: HashSet<String> = store
+        .candidates
+        .iter()
+        .filter(|c| retired(&c.source_id))
+        .map(|c| c.id.clone())
+        .collect();
+    store.candidates.retain(|c| !retired(&c.source_id));
+    store
+        .published_models
+        .retain(|model| !retired(&model.source_id));
+    store
+        .ignored_candidate_ids
+        .retain(|id| !dropped.contains(id));
+    store
+        .verification_results
+        .retain(|result| !dropped.contains(&result.candidate_id));
+}
 fn registry_path() -> Result<PathBuf, String> {
     Ok(account::get_data_dir()?.join("model_registry.json"))
 }
@@ -474,8 +499,9 @@ fn load(path: &Path, cache: &mut Option<Cached>) -> Result<Option<Arc<Snapshot>>
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err("Model registry file size limit exceeded".into());
     }
-    let store: StoredRegistry =
+    let mut store: StoredRegistry =
         serde_json::from_slice(&bytes).map_err(|_| "Corrupt model_registry.json; access denied")?;
+    prune_retired_sources(&mut store);
     validate_store(&store).map_err(|error| format!("Invalid model_registry.json: {error}"))?;
     if file_stamp(path).as_ref() != Some(&stamp) {
         return Err("Model registry conflict: file changed while reading; reload and retry".into());
@@ -1520,11 +1546,8 @@ pub fn validate_refresh_request(request: &RefreshModelCandidatesRequest) -> Resu
 }
 
 pub fn validate_discovery_request(request: &DiscoverUpstreamModelsRequest) -> Result<(), String> {
-    if provider(&request.source_id)? != "workbuddy"
-        && native_providers::Provider::from_source(&request.source_id).is_none()
-        && request.realm.is_some()
-    {
-        return Err("Only native account providers have a region".into());
+    if provider(&request.source_id)? != "workbuddy" && request.realm.is_some() {
+        return Err("Only WorkBuddy accounts have a region".into());
     }
     Ok(())
 }

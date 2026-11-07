@@ -1,8 +1,9 @@
 # Isolated BoringSSL native symbols
 
 This is a build-only patch of `boring-sys2` **4.15.15**, the version already used
-by rquest in this repository. It permits that BoringSSL and Qoder's vendored
-OpenSSL 3.5 to run in one executable without duplicate symbols or ABI interposition.
+by rquest in this repository. It lets that BoringSSL run in one executable with an
+OpenSSL build without duplicate symbols or ABI interposition. (It was introduced for
+the since-removed Qoder client, which vendored OpenSSL 3.5.)
 It does not update BoringSSL or change any TLS algorithms, extensions or profiles.
 
 The unmodified upstream crate archive is committed under `vendor/`, verified by
@@ -33,7 +34,4 @@ is involved. This patch requires the bundled non-FIPS source; custom/precompiled
 BoringSSL overrides and FIPS mode fail explicitly.
 
 The normal CMake/compiler/libclang requirements are unchanged. The extra native
-pass increases a cold build's time. The gateway regression test
-`cargo test -p qoder-client --test tls_coexistence --locked` constructs both clients
-in one process and captures their actual ClientHellos, including Qoder's pinned
-Node cipher list and rquest's Chrome HTTP/2 offer.
+pass increases a cold build's time.

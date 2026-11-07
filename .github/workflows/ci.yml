@@ -98,10 +98,6 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked --lib native_providers -- --test-threads=1
 
-      - name: Qoder signing queue regression tests
-        working-directory: src-tauri
-        run: cargo test --locked -p qoder-client --lib signing_queue -- --test-threads=1
-
   # Tauri 构建测试（不打包）
   build-tauri:
     name: Build Tauri App

@@ -1,5 +1,5 @@
 //! Per-account egress shared by the native account pools (WorkBuddy and the native
-//! providers such as Qoder). With a pool's egress enabled, each of its accounts'
+//! providers such as ChatGPT). With a pool's egress enabled, each of its accounts'
 //! upstream traffic (inference, refresh, models, quota, login) leaves through one node
 //! of an airport subscription, served by a managed mihomo process. An account bound to
 //! a node fails closed when that node is unusable: it never falls back to the server's
@@ -8,7 +8,7 @@
 //! All pools share one subscription and one mihomo process; each pool has its own
 //! switch and bindings. A node is exclusive within a pool: auto-assignment and manual
 //! assignment both refuse a node another account of the same pool already holds. Pools
-//! talk to unrelated upstream services, so a WorkBuddy account and a Qoder account may
+//! talk to unrelated upstream services, so a WorkBuddy account and a ChatGPT account may
 //! use the same node. The exit address is whatever that node currently uses; this
 //! process does not allocate public addresses. `DIRECT` is an explicit per-account
 //! choice and shares this server's address.
@@ -810,7 +810,7 @@ mod tests {
     use super::*;
 
     const WB: Pool = Pool::WorkBuddy;
-    const QODER: Pool = Pool::Native(Provider::Qoder);
+    const NATIVE: Pool = Pool::Native(Provider::ChatGpt);
 
     fn node(name: &str, delay: Option<u64>, alive: Option<bool>) -> Node {
         Node {
@@ -856,7 +856,7 @@ mod tests {
             exclude: String::new(),
             ..Default::default()
         };
-        for pool in [WB, QODER] {
+        for pool in [WB, NATIVE] {
             for rejected in [&direct, &mixed_case, &renamed] {
                 assert_eq!(
                     choose(std::slice::from_ref(rejected), &settings, pool),
@@ -881,43 +881,43 @@ mod tests {
         let mut settings = Settings::default();
         settings.bindings.insert("wb".into(), "JP 02".into());
         assert_eq!(choose(&nodes, &settings, WB), None);
-        assert_eq!(choose(&nodes, &settings, QODER).as_deref(), Some("JP 02"));
-        assert!(!node_in_use(&settings, QODER, "JP 02", None));
+        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("JP 02"));
+        assert!(!node_in_use(&settings, NATIVE, "JP 02", None));
         settings
-            .bindings_mut(QODER)
+            .bindings_mut(NATIVE)
             .insert("q1".into(), "JP 02".into());
-        assert!(node_in_use(&settings, QODER, "JP 02", Some("q2")));
-        assert!(!node_in_use(&settings, QODER, "JP 02", Some("q1")));
-        assert_eq!(choose(&nodes, &settings, QODER), None);
+        assert!(node_in_use(&settings, NATIVE, "JP 02", Some("q2")));
+        assert!(!node_in_use(&settings, NATIVE, "JP 02", Some("q1")));
+        assert_eq!(choose(&nodes, &settings, NATIVE), None);
         assert_eq!(settings.bindings(WB).len(), 1);
     }
 
     #[test]
     fn pool_switches_are_independent_and_the_workbuddy_layout_is_kept() {
         let mut settings = Settings::default();
-        settings.set_enabled(QODER, true);
-        assert!(settings.enabled(QODER) && !settings.enabled(WB));
+        settings.set_enabled(NATIVE, true);
+        assert!(settings.enabled(NATIVE) && !settings.enabled(WB));
         settings.subscription_url = "https://sub.example/x".into();
         assert!(settings.routing());
-        settings.set_enabled(QODER, false);
+        settings.set_enabled(NATIVE, false);
         assert!(!settings.routing());
         settings.set_enabled(WB, true);
         let value = serde_json::to_value(&settings).unwrap();
         assert_eq!(value["enabled"], true);
-        assert_eq!(value["pools"]["qoder"]["enabled"], false);
+        assert_eq!(value["pools"]["chatgpt"]["enabled"], false);
         // A file written before pools existed still loads.
         let legacy: Settings =
             serde_json::from_value(serde_json::json!({"enabled": true, "bindings": {"a": "HK"}}))
                 .unwrap();
         assert_eq!(legacy.bindings(WB)["a"], "HK");
-        assert!(legacy.bindings(QODER).is_empty());
+        assert!(legacy.bindings(NATIVE).is_empty());
     }
 
     #[test]
     fn routing_users_never_collide_across_pools() {
         assert_eq!(WB.user("abc"), "abc");
-        assert_eq!(QODER.user("abc"), "qoder-abc");
-        assert_ne!(WB.login_user(), QODER.login_user());
+        assert_eq!(NATIVE.user("abc"), "chatgpt-abc");
+        assert_ne!(WB.login_user(), NATIVE.login_user());
     }
 
     #[test]
@@ -946,7 +946,7 @@ mod tests {
         assert!(node_in_use(&Settings::default(), WB, "hold-fast", None));
         // Another pool's login does not see this pool's hold.
         assert_eq!(
-            choose(&nodes, &Settings::default(), QODER).as_deref(),
+            choose(&nodes, &Settings::default(), NATIVE).as_deref(),
             Some("hold-fast")
         );
         hold.release();
@@ -1007,7 +1007,7 @@ mod tests {
         assert!(load().unwrap().bindings.is_empty());
         adopt(WB, "one", Some("node-a"));
         adopt(WB, "two", Some("node-a"));
-        adopt(QODER, "three", Some("node-a"));
+        adopt(NATIVE, "three", Some("node-a"));
         let settings = load().unwrap();
         assert_eq!(
             settings.bindings(WB).get("one").map(String::as_str),
@@ -1015,7 +1015,7 @@ mod tests {
         );
         assert!(settings.bindings(WB).get("two").is_none());
         assert_eq!(
-            settings.bindings(QODER).get("three").map(String::as_str),
+            settings.bindings(NATIVE).get("three").map(String::as_str),
             Some("node-a")
         );
     }
@@ -1023,8 +1023,8 @@ mod tests {
     #[tokio::test]
     async fn a_disabled_pool_keeps_its_usual_path() {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
-        assert_eq!(exit_for(QODER, "any").await.unwrap(), Exit::Off);
-        let route = login_route(QODER, None).await.unwrap();
+        assert_eq!(exit_for(NATIVE, "any").await.unwrap(), Exit::Off);
+        let route = login_route(NATIVE, None).await.unwrap();
         assert!(route.node.is_none());
         assert_eq!(route.exit, Exit::Off);
     }
