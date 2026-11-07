@@ -599,3 +599,41 @@ async fn chatgpt_probe_verifies_text() {
     assert_eq!(body["store"], false);
     assert_eq!(body["input"][0]["role"], "user");
 }
+
+#[tokio::test]
+async fn chatgpt_unauthorized_after_refresh_retry_fails_over() {
+    let _sandbox = Sandbox::new();
+    setup(2);
+    let unauthorized = reply(
+        401,
+        json!({"error":{"message":"Provided authentication token is expired."}}),
+    );
+    let server = upstream(vec![
+        unauthorized.clone(),
+        reply(
+            200,
+            json!({"access_token":"access-renewed","expires_in":3600}),
+        ),
+        unauthorized,
+        hello(),
+    ])
+    .await;
+    let (status, _, body) = call("/v1/chat/completions", chat(true), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Hel"));
+    let requests = server.requests();
+    let paths: Vec<&str> = requests.iter().map(|(p, _, _)| p.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/backend-api/codex/responses",
+            "/oauth/token",
+            "/backend-api/codex/responses",
+            "/backend-api/codex/responses",
+        ]
+    );
+    // The same account retries once with the renewed token, then another account serves.
+    assert_eq!(account_of(&requests[0].1), account_of(&requests[2].1));
+    assert_eq!(requests[2].1["authorization"], "Bearer access-renewed");
+    assert_ne!(account_of(&requests[2].1), account_of(&requests[3].1));
+}
