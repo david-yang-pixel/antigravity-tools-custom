@@ -953,4 +953,141 @@ mod relay {
         );
         assert!(server.seen().is_empty(), "no upstream connection is opened");
     }
+
+    #[tokio::test]
+    async fn ws_local_prewarm_continues_into_relay() {
+        let _sandbox = Sandbox::new();
+        setup(1);
+        let server = upstream(
+            accept_all(),
+            Box::new(|_, _| Step::Events(answer("resp_1", "a1"))),
+        )
+        .await;
+        let mut client = connect().await;
+        let mut prewarm = create(vec![user("u0")]);
+        prewarm["generate"] = json!(false);
+        let events = client.turn(prewarm).await;
+        let prewarm_id = completed(&events)["response"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(server.seen().is_empty(), "the prewarm is answered locally");
+        let events = client
+            .turn(continue_from(&prewarm_id, vec![user("u1")]))
+            .await;
+        assert_eq!(completed(&events)["response"]["id"], "resp_1");
+        let frames = server.frames();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].1.get("previous_response_id").is_none());
+        assert!(frames[0].1.get("generate").is_none());
+        assert_eq!(
+            texts(&frames[0].1),
+            pairs(&[("user", "u0"), ("user", "u1")])
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_mid_turn_drop_sends_error_and_next_turn_reconnects() {
+        let _sandbox = Sandbox::new();
+        setup(1);
+        let server = upstream(
+            accept_all(),
+            Box::new(|call, _| {
+                if call.nth == 0 {
+                    let mut events = answer("resp_0", "a");
+                    events.pop();
+                    Step::Close(events)
+                } else {
+                    Step::Events(answer("resp_1", "b"))
+                }
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        let events = client.turn(create(vec![user("u1")])).await;
+        assert!(events
+            .iter()
+            .any(|e| e["type"] == "response.output_text.delta"));
+        let last = events.last().unwrap();
+        assert_eq!(last["type"], "error");
+        assert_eq!(last["error"]["code"], "upstream_disconnected");
+        let events = client.turn(create(vec![user("u1")])).await;
+        assert_eq!(completed(&events)["response"]["id"], "resp_1");
+        assert_eq!(server.handshakes().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ws_pre_output_quota_event_moves_turn() {
+        let _sandbox = Sandbox::new();
+        setup(2);
+        let server = upstream(
+            accept_all(),
+            Box::new(|call, _| {
+                if call.first {
+                    Step::Events(vec![json!({"type":"error","error":{
+                        "type":"usage_limit_reached","code":"usage_limit_reached",
+                        "message":"The usage limit has been reached","resets_in_seconds":3600}})])
+                } else {
+                    Step::Events(answer("resp_B", "b"))
+                }
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        let events = client.turn(create(vec![user("u1")])).await;
+        assert!(!events.iter().any(|e| e["type"] == "error"), "{events:?}");
+        assert_eq!(completed(&events)["response"]["id"], "resp_B");
+        let frames = server.frames();
+        assert_eq!(frames.len(), 2);
+        assert_ne!(frames[0].0, frames[1].0);
+        assert_eq!(texts(&frames[1].1), pairs(&[("user", "u1")]));
+    }
+
+    #[tokio::test]
+    async fn ws_validation_error_is_not_replayed() {
+        let _sandbox = Sandbox::new();
+        setup(2);
+        let server = upstream(
+            accept_all(),
+            Box::new(|_, _| {
+                Step::Events(vec![error_event(
+                    "context_length_exceeded",
+                    "Your input exceeds the context window of this model.",
+                )])
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        let events = client.turn(create(vec![user("u1")])).await;
+        let last = events.last().unwrap();
+        assert_eq!(last["error"]["code"], "context_length_exceeded");
+        assert_eq!(server.frames().len(), 1);
+        assert_eq!(server.handshakes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ws_failover_tries_at_most_three_accounts() {
+        let _sandbox = Sandbox::new();
+        setup(4);
+        let server = upstream(
+            Box::new(|_| {
+                Some((
+                    429,
+                    json!({"error":{"type":"rate_limit_exceeded","message":"Slow down"}}),
+                ))
+            }),
+            Box::new(|_, _| Step::Events(answer("resp_1", "a"))),
+        )
+        .await;
+        let mut client = connect().await;
+        let events = client.turn(create(vec![user("u1")])).await;
+        let last = events.last().unwrap();
+        assert_eq!(last["type"], "error");
+        assert_eq!(last["status"], 429);
+        assert_eq!(last["error"]["message"], "Slow down");
+        let accounts: std::collections::HashSet<String> =
+            server.handshakes().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(server.handshakes().len(), 3);
+        assert_eq!(accounts.len(), 3);
+    }
 }

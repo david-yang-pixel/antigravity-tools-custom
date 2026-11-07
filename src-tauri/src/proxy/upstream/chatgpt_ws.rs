@@ -125,6 +125,12 @@ fn failure_event(failure: &Failure, upstream: Option<Value>) -> Value {
         .unwrap_or_else(|| error_event(failure.status, "native_upstream_failed", &failure.message))
 }
 
+/// A turn lost to the connection (drop or stall) after it was sent: not the account's fault,
+/// so the account is not cooled down and the client's retry can use it again.
+fn transport_fault(status: u16, message: &str) -> Failure {
+    Failure::classified(status, message, Penalty::Neutral, false)
+}
+
 fn upstream_error(event: &Value) -> &Value {
     event
         .get("error")
@@ -668,8 +674,7 @@ impl Relay {
                     } else {
                         "ChatGPT produced no output before the request timeout"
                     };
-                    let failure = Failure::new(504, message);
-                    lease.settle(&failure);
+                    lease.settle(&transport_fault(504, message));
                     return self
                         .finish(error_event(504, "upstream_timeout", message))
                         .await;
@@ -680,7 +685,7 @@ impl Relay {
                         return Outcome::Stale;
                     }
                     let message = "ChatGPT connection closed mid-turn; retry the turn";
-                    lease.settle(&Failure::new(502, message));
+                    lease.settle(&transport_fault(502, message));
                     return self
                         .finish(error_event(502, "upstream_disconnected", message))
                         .await;
