@@ -1890,8 +1890,9 @@
       "authError": "憑證已被 OpenAI 拒絕，帳號已自動停用。請在此列重新匯入。"
     },
     "quota": {
-      "window5h": "5 小時視窗",
-      "window7d": "7 天視窗",
+      "windowMinutes": "{{count}} 分鐘視窗",
+      "windowHours": "{{count}} 小時視窗",
+      "windowDays": "{{count}} 天視窗",
       "reset": "{{time}} 重置",
       "used": "已用 {{percent}}%"
     }

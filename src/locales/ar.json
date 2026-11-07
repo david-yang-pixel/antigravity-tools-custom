@@ -1592,8 +1592,9 @@
       "authError": "Credential rejected by OpenAI; the account was disabled. Re-import it from this row."
     },
     "quota": {
-      "window5h": "5-hour window",
-      "window7d": "7-day window",
+      "windowMinutes": "{{count}}-minute window",
+      "windowHours": "{{count}}-hour window",
+      "windowDays": "{{count}}-day window",
       "reset": "Resets {{time}}",
       "used": "{{percent}}% used"
     }

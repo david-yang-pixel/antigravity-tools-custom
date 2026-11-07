@@ -32,9 +32,20 @@ fn window(h: &HeaderMap, which: &str) -> Option<Window> {
     })
 }
 
-/// Windows labelled `(label, window)`; 5h first. The smaller known window is "5h"; a single
-/// known window of at most 360 minutes is "5h"; with none known primary is "7d".
-fn labelled(h: &HeaderMap) -> Vec<(&'static str, Window)> {
+/// A window's name from its reported length: whole days as `Nd`, whole hours as `Nh`,
+/// otherwise minutes as `Nm` (300 → "5h", 10080 → "7d", 43200 → "30d").
+fn length_name(minutes: i64) -> String {
+    match minutes {
+        m if m >= 1440 && m % 1440 == 0 => format!("{}d", m / 1440),
+        m if m >= 60 && m % 60 == 0 => format!("{}h", m / 60),
+        m => format!("{m}m"),
+    }
+}
+
+/// Windows named `(name, window)`, shorter first. A window that reports its length is named
+/// by it; one that does not falls back to its rank: the smaller known window is "5h", a single
+/// known window of at most 360 minutes is "5h", and with no lengths known primary is "7d".
+fn labelled(h: &HeaderMap) -> Vec<(String, Window)> {
     let (primary, secondary) = (window(h, "primary"), window(h, "secondary"));
     let minutes = |w: &Option<Window>| w.as_ref().and_then(|w| w.minutes);
     let primary_is_short = match (minutes(&primary), minutes(&secondary)) {
@@ -50,7 +61,14 @@ fn labelled(h: &HeaderMap) -> Vec<(&'static str, Window)> {
     };
     [("5h", short), ("7d", long)]
         .into_iter()
-        .filter_map(|(name, w)| Some((name, w?)))
+        .filter_map(|(rank, w)| {
+            let w = w?;
+            let name = w
+                .minutes
+                .filter(|m| *m > 0)
+                .map_or_else(|| rank.to_owned(), length_name);
+            Some((name, w))
+        })
         .collect()
 }
 
@@ -58,7 +76,7 @@ pub fn from_headers(h: &HeaderMap, at: i64) -> Option<Quota> {
     let packs: Vec<QuotaPack> = labelled(h)
         .into_iter()
         .map(|(name, w)| QuotaPack {
-            name: name.into(),
+            name,
             total: Some(100.0),
             used: Some(w.used),
             remaining: Some(100.0 - w.used),

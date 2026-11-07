@@ -1617,8 +1617,9 @@
       "authError": "OpenAI가 자격 증명을 거부하여 계정이 자동으로 비활성화되었습니다. 이 행에서 다시 가져오세요."
     },
     "quota": {
-      "window5h": "5시간 구간",
-      "window7d": "7일 구간",
+      "windowMinutes": "{{count}}분 구간",
+      "windowHours": "{{count}}시간 구간",
+      "windowDays": "{{count}}일 구간",
       "reset": "{{time}}에 초기화",
       "used": "{{percent}}% 사용"
     }
