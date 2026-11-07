@@ -61,6 +61,8 @@ pub fn configure(
     let a = store::update(provider, id, None, |a| {
         if let Some(value) = enabled {
             a.enabled = value;
+            // The administrator decides from here on.
+            a.credential_dead = false;
         }
         if let Some(value) = auto_refresh {
             a.auto_refresh = value;
@@ -93,16 +95,23 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
             "This account requires browser authorization again",
         ));
     }
-    let result = match http::client_for(&a).await {
-        Ok(client) => match provider {
-            Provider::Qoder => qoder::refresh(&client, &mut a).await,
-        },
+    let result = match Client::for_account(&a).await {
+        Ok(Client::Qoder(client)) => qoder::refresh(&client, &mut a).await,
+        Ok(Client::ChatGpt(client)) => chatgpt::auth::refresh(&client, &mut a).await,
         Err(error) => Err(error),
     };
     if let Err(error) = result {
+        // A dead credential turns the account off instead of retrying it every minute;
+        // the administrator has to authorize it again.
+        let dead = matches!(error.penalty, Some(http::Penalty::Disable { .. }));
         let _ = store::update(provider, id, Some(&a.revision), |a| {
             a.auth_error = Some(error.to_string());
-            a.next_sync_at = now() + 60;
+            if dead {
+                a.enabled = false;
+                a.credential_dead = true;
+            } else {
+                a.next_sync_at = now() + 60;
+            }
         });
         return Err(error);
     }
@@ -117,22 +126,51 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
 pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountView, String> {
     sync_metadata(provider, id, force, true).await
 }
+/// The transport one saved account's provider speaks, on that account's egress route.
+enum Client {
+    Qoder(qoder_client::transport::Client),
+    ChatGpt(reqwest::Client),
+}
+impl Client {
+    async fn for_account(a: &Account) -> Result<Self, Failure> {
+        Ok(match a.provider {
+            Provider::Qoder => Self::Qoder(http::client_for(a).await?),
+            Provider::ChatGpt => Self::ChatGpt(http::plain_client_for(a).await?),
+        })
+    }
+}
+/// Catalog (only when `catalog`) and quota. A `None` quota means the provider has no quota
+/// endpoint and the stored snapshot stays as it is (ChatGPT reports quota on inference).
 async fn fetch_metadata(
-    client: &qoder_client::transport::Client,
+    client: &Client,
     a: &Account,
     catalog: bool,
-) -> (Option<Result<Vec<Model>, Failure>>, Result<Quota, Failure>) {
-    match a.provider {
-        Provider::Qoder => tokio::join!(
-            async {
-                if catalog {
-                    Some(qoder::models(client, a).await)
-                } else {
-                    None
-                }
-            },
-            qoder::quota(client, a)
-        ),
+) -> (
+    Option<Result<Vec<Model>, Failure>>,
+    Option<Result<Quota, Failure>>,
+) {
+    match client {
+        Client::Qoder(client) => {
+            let (models, quota) = tokio::join!(
+                async {
+                    if catalog {
+                        Some(qoder::models(client, a).await)
+                    } else {
+                        None
+                    }
+                },
+                qoder::quota(client, a)
+            );
+            (models, Some(quota))
+        }
+        Client::ChatGpt(client) => {
+            let models = if catalog {
+                Some(chatgpt::models::fetch(client, a).await)
+            } else {
+                None
+            };
+            (models, None)
+        }
     }
 }
 async fn sync_metadata(
@@ -146,17 +184,33 @@ async fn sync_metadata(
     let mut a = fresh(provider, id, force)
         .await
         .map_err(|e| e.to_string())?;
-    let client = http::client_for(&a).await.map_err(|e| e.to_string())?;
+    let client = Client::for_account(&a).await.map_err(|e| e.to_string())?;
     let (mut models, mut quota) = fetch_metadata(&client, &a, catalog).await;
-    if models
-        .as_ref()
-        .is_some_and(|r| r.as_ref().is_err_and(|e| e.status == 401))
-        || quota.as_ref().err().is_some_and(|e| e.status == 401)
-    {
+    fn unauthorized<T>(r: &Option<Result<T, Failure>>) -> bool {
+        r.as_ref()
+            .is_some_and(|r| r.as_ref().is_err_and(|e| e.status == 401))
+    }
+    if unauthorized(&models) || unauthorized(&quota) {
         a = fresh(provider, id, true).await.map_err(|e| e.to_string())?;
         (models, quota) = fetch_metadata(&client, &a, catalog).await;
     }
+    // A metadata answer can declare the credential dead just like a refresh can.
+    let dead = [
+        models.as_ref().and_then(|r| r.as_ref().err()),
+        quota.as_ref().and_then(|r| r.as_ref().err()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|e| match &e.penalty {
+        Some(http::Penalty::Disable { message }) => Some(message.clone()),
+        _ => None,
+    });
     let updated = store::update(provider, id, Some(&a.revision), |stored| {
+        if let Some(message) = dead {
+            stored.enabled = false;
+            stored.credential_dead = true;
+            stored.auth_error = Some(message);
+        }
         match models {
             Some(Ok(models)) => {
                 stored.models = models;
@@ -167,11 +221,12 @@ async fn sync_metadata(
             None => {}
         }
         match quota {
-            Ok(quota) => {
+            Some(Ok(quota)) => {
                 stored.quota = Some(quota);
                 stored.quota_error = None;
             }
-            Err(error) => stored.quota_error = Some(error.to_string()),
+            Some(Err(error)) => stored.quota_error = Some(error.to_string()),
+            None => {}
         }
         stored.last_sync_at = now();
         stored.next_sync_at = now() + sync_interval(id);
@@ -216,6 +271,39 @@ impl Lease {
             "Provider request failed"
         };
         self.finish(Some((retry_after.unwrap_or(1).min(86400) as i64, message)));
+    }
+    /// Settles the lease by the provider's own classification, falling back to the
+    /// status-derived breaker rules when the failure carries none.
+    pub fn settle(&mut self, failure: &Failure) {
+        use http::Penalty;
+        match &failure.penalty {
+            None => self.failure_after(failure.status, None),
+            Some(Penalty::Breaker { retry_after }) => {
+                self.failure_after(failure.status, *retry_after)
+            }
+            Some(Penalty::Until { at, message }) => {
+                if self.finished {
+                    return;
+                }
+                self.finish(Some((1, message)));
+                if let Ok(mut r) = RUNTIME.lock() {
+                    if let Some(r) = r.get_mut(&self.account.id) {
+                        r.cooldown_until = r.cooldown_until.max(*at);
+                    }
+                }
+            }
+            Some(Penalty::Neutral) => self.finished = true,
+            Some(Penalty::Disable { message }) => {
+                // A re-import changes the revision; a stale request must not disable it.
+                let revision = Some(self.account.revision.as_str());
+                let _ = store::update(self.account.provider, &self.account.id, revision, |a| {
+                    a.enabled = false;
+                    a.credential_dead = true;
+                    a.auth_error = Some(message.clone());
+                });
+                self.failure_after(failure.status, None);
+            }
+        }
     }
     fn finish(&mut self, failure: Option<(i64, &str)>) {
         if self.finished {

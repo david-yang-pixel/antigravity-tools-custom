@@ -3,9 +3,12 @@
 
 pub mod chat_codec;
 pub(crate) mod chat_relay;
+pub mod chatgpt_ws;
 pub mod client;
 pub mod native;
 pub mod openai_compat;
+pub(crate) mod responses_relay;
+pub mod responses_wire;
 pub mod retry;
 pub mod workbuddy;
 

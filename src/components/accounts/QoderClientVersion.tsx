@@ -36,7 +36,7 @@ export default function QoderClientVersion() {
     return <div className="rounded-lg border border-gray-200 px-4 py-3 text-sm dark:border-gray-700">
         <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                <span className="font-medium">{t('nativeProviders.clientVersion.title')}</span>
+                <span className="font-medium">{t('nativeProviders.clientVersion.title', { provider: 'Qoder' })}</span>
                 {version && <span className="text-gray-600 dark:text-gray-400">{t('nativeProviders.clientVersion.bundled', { version: version.bundled_version })}</span>}
                 {version?.latest_version && <span className="text-gray-600 dark:text-gray-400">{t('nativeProviders.clientVersion.latest', { version: version.latest_version })}</span>}
                 <span role="status" aria-live="polite" className={`rounded-full px-2 py-0.5 text-xs ${failed || (!busy && version?.update_available) ? 'bg-amber-50 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>{t(`nativeProviders.clientVersion.${status}`)}</span>

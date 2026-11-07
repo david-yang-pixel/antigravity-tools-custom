@@ -1603,5 +1603,23 @@
     "confirm": "Xóa ngay",
     "cancel": "Hủy bỏ",
     "success": "Đã xóa bộ nhớ đệm khối suy nghĩ thành công và sẽ tự động tạo lại."
+  },
+  "nativeProviders": {
+    "chatgpt": {
+      "importHint": "Paste a ChatGPT (Codex) credential: a bare refresh token, JSON such as {\"refresh_token\":\"...\"}, a Codex auth.json, or a sub2api export (several accounts import one by one). A still-valid access token is kept, so its refresh token is not spent on import. Identity is verified with OpenAI before saving. ChatGPT has no browser sign-in here.",
+      "importPlaceholder": "A bare refresh token, {\"refresh_token\":\"...\"}, auth.json or a sub2api export",
+      "batchResult": "Imported {{imported}}, skipped {{skipped}}, failed {{failed}}",
+      "reimport": "Re-import",
+      "reimportTitle": "Re-import credentials",
+      "reimportHint": "Replace the credentials of this account. A token for a different ChatGPT account is rejected.",
+      "authError": "Credential rejected by OpenAI; the account was disabled. Re-import it from this row."
+    },
+    "quota": {
+      "windowMinutes": "{{count}}-minute window",
+      "windowHours": "{{count}}-hour window",
+      "windowDays": "{{count}}-day window",
+      "reset": "Resets {{time}}",
+      "used": "{{percent}}% used"
+    }
   }
 }

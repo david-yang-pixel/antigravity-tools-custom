@@ -1879,5 +1879,23 @@
     },
     "announcement": "公告",
     "announcement_dismiss": "關閉公告"
+  },
+  "nativeProviders": {
+    "chatgpt": {
+      "importHint": "貼上 ChatGPT（Codex）憑證：可以是純 refresh token、形如 {\"refresh_token\":\"...\"} 的 JSON、Codex 的 auth.json，或 sub2api 匯出檔（多個帳號會逐一匯入）。access token 仍有效時會直接使用，匯入時不消耗 refresh token。儲存前會向 OpenAI 驗證身分。ChatGPT 不支援瀏覽器登入。",
+      "importPlaceholder": "純 refresh token、{\"refresh_token\":\"...\"}、auth.json 或 sub2api 匯出檔",
+      "batchResult": "已匯入 {{imported}} 個，略過 {{skipped}} 個，失敗 {{failed}} 個",
+      "reimport": "重新匯入",
+      "reimportTitle": "重新匯入憑證",
+      "reimportHint": "取代此帳號的憑證；不同 ChatGPT 帳號的 token 會被拒絕。",
+      "authError": "憑證已被 OpenAI 拒絕，帳號已自動停用。請在此列重新匯入。"
+    },
+    "quota": {
+      "windowMinutes": "{{count}} 分鐘視窗",
+      "windowHours": "{{count}} 小時視窗",
+      "windowDays": "{{count}} 天視窗",
+      "reset": "{{time}} 重置",
+      "used": "已用 {{percent}}%"
+    }
   }
 }

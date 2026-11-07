@@ -1606,5 +1606,23 @@
     "confirm": "今すぐ削除",
     "cancel": "キャンセル",
     "success": "思考ブロックのキャッシュを正常に削除しました。自動的に再構築されます。"
+  },
+  "nativeProviders": {
+    "chatgpt": {
+      "importHint": "ChatGPT（Codex）の認証情報を貼り付けます：refresh token のみ、{\"refresh_token\":\"...\"} 形式の JSON、Codex の auth.json、または sub2api のエクスポート（複数アカウントは 1 件ずつインポート）。有効な access token はそのまま使うため、インポート時に refresh token を消費しません。保存前に OpenAI で本人確認します。ChatGPT はブラウザーでのサインインに対応していません。",
+      "importPlaceholder": "refresh token、{\"refresh_token\":\"...\"}、auth.json または sub2api のエクスポート",
+      "batchResult": "インポート {{imported}} 件、スキップ {{skipped}} 件、失敗 {{failed}} 件",
+      "reimport": "再インポート",
+      "reimportTitle": "認証情報を再インポート",
+      "reimportHint": "このアカウントの認証情報を置き換えます。別の ChatGPT アカウントのトークンは拒否されます。",
+      "authError": "認証情報が OpenAI に拒否され、アカウントは自動的に無効化されました。この行から再インポートしてください。"
+    },
+    "quota": {
+      "windowMinutes": "{{count}} 分ウィンドウ",
+      "windowHours": "{{count}} 時間ウィンドウ",
+      "windowDays": "{{count}} 日ウィンドウ",
+      "reset": "{{time}} にリセット",
+      "used": "{{percent}}% 使用"
+    }
   }
 }

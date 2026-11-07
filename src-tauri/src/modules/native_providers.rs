@@ -3,6 +3,8 @@
 //! are shared.
 #[path = "native_providers/accounts.rs"]
 pub mod accounts;
+#[path = "native_providers/chatgpt.rs"]
+pub mod chatgpt;
 #[path = "native_providers/http.rs"]
 pub mod http;
 #[path = "native_providers/login.rs"]
@@ -24,23 +26,27 @@ const MAX_ACCOUNT_CONCURRENCY: usize = 8;
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Qoder,
+    ChatGpt,
 }
 
 impl Provider {
-    pub const ALL: [Self; 1] = [Self::Qoder];
+    pub const ALL: [Self; 2] = [Self::Qoder, Self::ChatGpt];
     pub fn key(self) -> &'static str {
         match self {
             Self::Qoder => "qoder",
+            Self::ChatGpt => "chatgpt",
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Qoder => "Qoder",
+            Self::ChatGpt => "ChatGPT",
         }
     }
     pub fn source(self) -> &'static str {
         match self {
             Self::Qoder => "qoder:default",
+            Self::ChatGpt => "chatgpt:default",
         }
     }
     pub fn from_source(source: &str) -> Option<Self> {
@@ -118,7 +124,21 @@ impl Quota {
         }
     }
     pub fn exhausted(&self) -> bool {
-        !self.unlimited && now() - self.updated_at < 900 && self.remaining.is_some_and(|n| n <= 0.0)
+        if self.unlimited || !self.remaining.is_some_and(|n| n <= 0.0) {
+            return false;
+        }
+        // Percent windows reset at a known time (`expires_at`): a full window stays
+        // exhausted until then, however old the snapshot. Balance quotas have no such
+        // reset, so their snapshot is trusted only while fresh.
+        let at = now();
+        if self.unit == "%"
+            && self.packs.iter().any(|p| {
+                p.remaining.is_some_and(|n| n <= 0.0) && p.expires_at.is_some_and(|r| r > at)
+            })
+        {
+            return true;
+        }
+        at - self.updated_at < 900
     }
 }
 
@@ -142,6 +162,14 @@ pub struct Credentials {
     pub organization_tags: Option<Value>,
     #[serde(default)]
     pub data_policy_agreed: Option<bool>,
+    #[serde(default)]
+    pub id_token: String,
+    #[serde(default)]
+    pub chatgpt_account_id: String,
+    /// SHA-256 (hex) of every refresh token pasted into an import for this account, so a
+    /// token that was rotated away cannot be imported (and replayed) again.
+    #[serde(default)]
+    pub imported_refresh_sha256: Vec<String>,
 }
 
 /// This value is persisted only inside an authenticated, encrypted vault. Never serialize
@@ -164,6 +192,10 @@ pub struct Account {
     pub quota_error: Option<String>,
     pub models_error: Option<String>,
     pub auth_error: Option<String>,
+    /// The provider declared the credential dead and the account was turned off for it;
+    /// a new authorization turns it back on.
+    #[serde(default)]
+    pub credential_dead: bool,
     pub last_sync_at: i64,
     pub next_sync_at: i64,
     /// New authorizations replace this value, invalidating an older refresh in flight.
@@ -180,10 +212,13 @@ impl Account {
             enabled: true,
             auto_refresh: true,
             expires_at: 0,
-            credentials: Credentials {
-                machine_id: uuid::Uuid::new_v4().to_string(),
-                device_id: uuid::Uuid::new_v4().to_string(),
-                ..Default::default()
+            credentials: match provider {
+                Provider::Qoder => Credentials {
+                    machine_id: uuid::Uuid::new_v4().to_string(),
+                    device_id: uuid::Uuid::new_v4().to_string(),
+                    ..Default::default()
+                },
+                Provider::ChatGpt => Credentials::default(),
             },
             models: Vec::new(),
             verified_models: BTreeMap::new(),
@@ -192,6 +227,7 @@ impl Account {
             quota_error: None,
             models_error: None,
             auth_error: None,
+            credential_dead: false,
             last_sync_at: 0,
             next_sync_at: 0,
             revision: uuid::Uuid::new_v4().to_string(),
@@ -321,4 +357,4 @@ pub fn epoch(value: &Value) -> Option<i64> {
 
 #[cfg(test)]
 #[path = "native_providers/tests.rs"]
-mod tests;
+pub(crate) mod tests;

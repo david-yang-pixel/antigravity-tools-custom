@@ -1,7 +1,7 @@
 {
   "nativeProviders": {
     "clientVersion": {
-      "title": "Qoder CLI 版本",
+      "title": "{{provider}} CLI 版本",
       "bundled": "网关内置 {{version}}",
       "latest": "官方最新 {{version}}",
       "checking": "正在检测",
@@ -76,7 +76,23 @@
     "deleteTitle": "移除账号",
     "deleteHint": "移除 {{name}} 的本地凭证？该账号将停止参与轮换。",
     "authorized": "账号授权已保存",
-    "loginExpired": "授权已过期，请重新获取链接。"
+    "loginExpired": "授权已过期，请重新获取链接。",
+    "chatgpt": {
+      "importHint": "粘贴 ChatGPT（Codex）凭证：可以是纯 refresh token、形如 {\"refresh_token\":\"...\"} 的 JSON、Codex 的 auth.json，或 sub2api 导出文件（多个账号会逐个导入）。access token 仍有效时会直接使用，导入时不消耗 refresh token。保存前会向 OpenAI 验证身份。ChatGPT 不支持浏览器登录。",
+      "importPlaceholder": "纯 refresh token、{\"refresh_token\":\"...\"}、auth.json 或 sub2api 导出文件",
+      "batchResult": "已导入 {{imported}} 个，跳过 {{skipped}} 个，失败 {{failed}} 个",
+      "reimport": "重新导入",
+      "reimportTitle": "重新导入凭证",
+      "reimportHint": "替换此账号的凭证；不同 ChatGPT 账号的 token 会被拒绝。",
+      "authError": "凭证已被 OpenAI 拒绝，账号已自动停用。请在此行重新导入。"
+    },
+    "quota": {
+      "windowMinutes": "{{count}} 分钟窗口",
+      "windowHours": "{{count}} 小时窗口",
+      "windowDays": "{{count}} 天窗口",
+      "reset": "{{time}} 重置",
+      "used": "已用 {{percent}}%"
+    }
   },
   "topup": {
     "pending_orders": "待支付订单",
@@ -1352,7 +1368,7 @@
       "scheduling": {
         "title": "账号轮换与会话调度",
         "title_tooltip": "控制会话如何绑定到账号，以及触发限流时的行为。",
-        "subtitle": "调度模式、最大等待时长、清除会话绑定及熔断退避统一作用于 Antigravity、WorkBuddy 和 Qoder 账号池。固定账号按上游分别设置。",
+        "subtitle": "调度模式、最大等待时长、清除会话绑定及熔断退避统一作用于 Antigravity、WorkBuddy、Qoder 和 ChatGPT 账号池。固定账号按上游分别设置。",
         "mode": "调度模式",
         "mode_tooltip": "缓存优先：绑定账号，限流时强制等待（最大化缓存）；平衡：绑定账号，限流时自动热切；性能优先：不绑定，全自动轮换。",
         "modes": {

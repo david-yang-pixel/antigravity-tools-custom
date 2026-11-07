@@ -2,14 +2,14 @@ use super::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
-struct Sandbox {
+pub(crate) struct Sandbox {
     _guard: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
     overrides: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 impl Sandbox {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let guard = crate::modules::account::SHARED_TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -19,6 +19,10 @@ impl Sandbox {
             "ABV_QODER_ENABLED",
             "ABV_QODER_MAX_CONCURRENCY",
             "ABV_QODER_EGRESS_ENABLED",
+            "ABV_CHATGPT_ENABLED",
+            "ABV_CHATGPT_MAX_CONCURRENCY",
+            "ABV_CHATGPT_EGRESS_ENABLED",
+            "ABV_CHATGPT_CLIENT_VERSION",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -53,6 +57,27 @@ impl Drop for Sandbox {
         } else {
             std::env::remove_var("ABV_DATA_DIR");
         }
+    }
+}
+/// Points ChatGPT at a closed local port so a test that only expects failures can never
+/// reach the real service; restores the production endpoints on drop.
+pub(super) struct OfflineChatGpt;
+impl OfflineChatGpt {
+    pub(super) fn new() -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap();
+        chatgpt::endpoints::set_test(Some(chatgpt::endpoints::Endpoints {
+            auth: format!("http://127.0.0.1:{port}"),
+            backend: format!("http://127.0.0.1:{port}/backend-api"),
+        }));
+        Self
+    }
+}
+impl Drop for OfflineChatGpt {
+    fn drop(&mut self) {
+        chatgpt::endpoints::set_test(None);
     }
 }
 fn account(provider: Provider, uid: &str) -> Account {
@@ -164,6 +189,30 @@ fn identity_urls_cannot_choose_an_untrusted_credential_destination() {
     }
     assert!(
         http::official_url(Provider::Qoder, "https://openapi.qoder.sh/api/v1/userinfo").is_ok()
+    );
+}
+#[test]
+fn chatgpt_service_urls_stay_on_openai_hosts_and_skip_the_chat_wire() {
+    for good in [
+        "https://chatgpt.com/backend-api/codex/models",
+        "https://auth.openai.com/oauth/token",
+    ] {
+        assert!(
+            http::official_url(Provider::ChatGpt, good).is_ok(),
+            "{good}"
+        );
+    }
+    for bad in [
+        "https://chatgpt.com.attacker.example/a",
+        "https://openapi.qoder.sh/a",
+        "http://chatgpt.com/a",
+    ] {
+        assert!(http::official_url(Provider::ChatGpt, bad).is_err(), "{bad}");
+    }
+    assert!(http::official_url(Provider::Qoder, "https://chatgpt.com/a").is_err());
+    assert_eq!(
+        wire::event(Provider::ChatGpt, "[DONE]").unwrap_err().status,
+        500
     );
 }
 #[test]
@@ -823,6 +872,7 @@ async fn native_model_discovery_requires_explicit_publication_and_keeps_source_b
     use std::sync::Arc;
     use tower::ServiceExt;
     let _sandbox = Sandbox::new();
+    let _offline = OfflineChatGpt::new();
     let mapping = HashMap::new();
     for provider in Provider::ALL {
         store::upsert(account(provider, provider.key()), None).unwrap();
@@ -1268,6 +1318,7 @@ async fn duplicate_import_is_rejected_before_egress_and_preserves_saved_tokens()
             "refreshToken":a.credentials.refresh_token,
             "expiresAt":a.expires_at
         }}),
+        None,
     )
     .await
     .err()
@@ -1304,6 +1355,7 @@ async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() 
         Provider::Qoder,
         Realm::Cn,
         json!({"refreshToken":a.credentials.refresh_token}),
+        None,
     );
     tokio::pin!(import);
     // The vault is empty at the first guard; suspend at the held login lock.
@@ -1317,6 +1369,66 @@ async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() 
         .err()
         .unwrap();
     assert!(error.contains("already saved"), "{error}");
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn qoder_import_ignores_refresh_fingerprints() {
+    use sha2::{Digest, Sha256};
+    let _sandbox = Sandbox::new();
+    // Client creation fails locally, so a token past the duplicate guard never leaves
+    // this machine; the error then comes from the transport, not the guard.
+    let mut config = crate::models::AppConfig::default();
+    config.proxy.upstream_proxy.enabled = true;
+    config.proxy.upstream_proxy.url = "http://127.0.0.1:invalid".into();
+    crate::modules::config::save_app_config(&config).unwrap();
+    let mut a = account(Provider::Qoder, "rotated-away");
+    a.credentials.refresh_token = "rotated".into();
+    a.credentials.imported_refresh_sha256 = vec![format!("{:x}", Sha256::digest(b"old-rt"))];
+    let a = store::upsert(a, None).unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":"old-rt"}),
+        None,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(!error.contains("already saved"), "{error}");
+    let saved = store::get(Provider::Qoder, &a.id).unwrap();
+    assert_eq!(saved.credentials.refresh_token, "rotated");
+}
+
+#[tokio::test]
+async fn qoder_import_with_account_id_is_refused_before_egress() {
+    let _sandbox = Sandbox::new();
+    let a = store::upsert(account(Provider::Qoder, "row-import"), None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    // Any login route fails locally: the refusal must come before it.
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("workbuddy_egress.json"),
+        "invalid egress settings",
+    )
+    .unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":"new-refresh"}),
+        Some(&a.id),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(
+        error,
+        "Qoder accounts reauthorize from their row's browser login"
+    );
     assert_eq!(
         serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
         before
@@ -1473,3 +1585,135 @@ fn publication_targets_lease_the_only_enabled_accounts_native_id() {
     assert_eq!(lease.account.id, global.id);
     assert_eq!(lease.model, "shared-model-sg");
 }
+
+async fn settle_lease(uid: &str, breaker_enabled: bool) -> (Account, accounts::Lease) {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let a = store::upsert(account(Provider::Qoder, uid), None).unwrap();
+    let manager = crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
+    manager
+        .update_circuit_breaker_config(crate::models::CircuitBreakerConfig {
+            enabled: breaker_enabled,
+            ..Default::default()
+        })
+        .await;
+    let policy = Policy::live(&manager, None).await;
+    let lease = accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &["shared-model"],
+        "",
+        &policy,
+        &HashSet::new(),
+    )
+    .unwrap()
+    .unwrap();
+    (a, lease)
+}
+
+#[tokio::test]
+async fn lease_settle_until_blocks_even_with_breaker_disabled() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-until", false).await;
+    lease.settle(&http::Failure::classified(
+        429,
+        "q",
+        http::Penalty::Until {
+            at: now() + 3600,
+            message: "Account quota exhausted",
+        },
+        true,
+    ));
+    drop(lease);
+    let r = accounts::runtime(&a.id);
+    assert!(r.cooldown_until >= now() + 3599);
+    assert_eq!(r.last_error.as_deref(), Some("Account quota exhausted"));
+}
+
+#[tokio::test]
+async fn lease_settle_neutral_leaves_counters_untouched() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-neutral", true).await;
+    lease.settle(&http::Failure::classified(
+        400,
+        "q",
+        http::Penalty::Neutral,
+        false,
+    ));
+    drop(lease);
+    let r = accounts::runtime(&a.id);
+    assert_eq!(r.failures, 0);
+    assert_eq!(r.cooldown_until, 0);
+}
+
+#[tokio::test]
+async fn lease_settle_disable_turns_account_off() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-disable", true).await;
+    lease.settle(&http::Failure::classified(
+        401,
+        "q",
+        http::Penalty::Disable {
+            message: "dead".into(),
+        },
+        true,
+    ));
+    drop(lease);
+    let stored = store::get(Provider::Qoder, &a.id).unwrap();
+    assert!(!stored.enabled);
+    assert_eq!(stored.auth_error.as_deref(), Some("dead"));
+    assert_eq!(accounts::runtime(&a.id).failures, 1);
+}
+
+#[tokio::test]
+async fn lease_settle_disable_skips_a_reimported_account() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-disable-stale", true).await;
+    // The account is re-imported while the request is in flight.
+    let reimported = store::upsert(account(Provider::Qoder, "settle-disable-stale"), None).unwrap();
+    assert_eq!(reimported.id, a.id);
+    assert_ne!(reimported.revision, lease.account.revision);
+    lease.settle(&http::Failure::classified(
+        401,
+        "q",
+        http::Penalty::Disable {
+            message: "dead".into(),
+        },
+        true,
+    ));
+    drop(lease);
+    let stored = store::get(Provider::Qoder, &a.id).unwrap();
+    assert!(stored.enabled);
+    assert!(!stored.credential_dead);
+    assert_eq!(stored.auth_error, None);
+}
+
+#[tokio::test]
+async fn lease_settle_without_penalty_matches_failure_after() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-plain-a", true).await;
+    lease.settle(&http::Failure::new(429, "x"));
+    drop(lease);
+    store::remove(Provider::Qoder, &a.id).unwrap();
+    let (b, mut lease) = settle_lease("settle-plain-b", true).await;
+    lease.failure_after(429, None);
+    drop(lease);
+    let (ra, rb) = (accounts::runtime(&a.id), accounts::runtime(&b.id));
+    assert_eq!(ra.failures, rb.failures);
+    assert_eq!(ra.last_error, rb.last_error);
+    assert!((ra.cooldown_until - rb.cooldown_until).abs() <= 1);
+    assert_eq!(ra.failures, 1);
+}
+
+#[test]
+fn plain_clients_are_cached_per_account_and_route() {
+    use crate::modules::egress::Exit;
+    let a = account(Provider::Qoder, "plain-cache");
+    assert!(!http::plain_cached(&a.id));
+    http::plain_client_on(&a, &Exit::Direct).unwrap();
+    assert!(http::plain_cached(&a.id));
+    http::plain_client_on(&a, &Exit::Direct).unwrap();
+    http::forget(&a.id);
+    assert!(!http::plain_cached(&a.id));
+}
+
+#[path = "chatgpt_dispatch_tests.rs"]
+mod chatgpt_dispatch;

@@ -4,9 +4,9 @@ import { request } from '../../../utils/request';
 import { registryError } from './registryLogic';
 import type { NativeAccount, NativeProvider, NativeSettings } from '../../../types/nativeProviders';
 
-const labels: Record<NativeProvider, string> = { qoder: 'Qoder' };
+const labels: Record<NativeProvider, string> = { qoder: 'Qoder', chatgpt: 'ChatGPT' };
 
-// Native provider (Qoder) source switch and fixed account, next to WorkBuddy's.
+// Native provider (Qoder, ChatGPT) source switch and fixed account, next to WorkBuddy's.
 // Automatic selection follows the global scheduling mode configured on this page.
 export default function NativeSourceSettings({ provider }: { provider: NativeProvider }) {
     const label = labels[provider];
