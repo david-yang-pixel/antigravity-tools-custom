@@ -7,14 +7,7 @@ license = "CC-BY-NC-SA-4.0"
 edition = "2021"
 
 [workspace]
-exclude = ["crates/boring-sys2"]
 resolver = "2"
-
-[patch.crates-io]
-# Keep the existing BoringSSL version/protocol while isolating its native symbols
-# from any OpenSSL linked into the same binary. This patch only changes source
-# packaging and symbol names.
-boring-sys2 = { path = "crates/boring-sys2" }
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
