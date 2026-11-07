@@ -47,8 +47,8 @@ test('OpenAI-compatible upstreams serve OpenAI and Anthropic endpoints only', ()
     assert.equal(model.image_generation, false);
 });
 
-test('native Qoder publications retain their sources and supported client protocols', () => {
-    for (const provider_type of ['qoder']) {
+test('native Qoder and ChatGPT publications retain their sources and supported client protocols', () => {
+    for (const provider_type of ['qoder', 'chatgpt']) {
         const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type, pools_native_models: true };
         const registry = view({ sources: [source], candidates: [candidate('native-c', source.id, 'same-native')], published_models: [publication('native-p', source.id, 'same-native', `${provider_type}-chat`)] });
         const [model] = logic.registryCatalog(registry);
@@ -240,4 +240,10 @@ test('the primary target can be rebound within its source and is gated as a new 
     assert.equal(logic.needsUnverifiedConfirmation(registry, [logic.withPrimaryTarget(base, 'b')]), false);
     const legacy = view({ ...registry, published_models: [{ ...single, legacy: true }] });
     assert.equal(logic.mergePublications(legacy, [logic.withPrimaryTarget({ ...single, legacy: true }, 'b')])[0].legacy, false);
+});
+
+test('realm selection stays limited to WorkBuddy and Qoder; ChatGPT is always global', async () => {
+    const upstream = await readFile(new URL('./UpstreamModels.tsx', import.meta.url), 'utf8');
+    assert.match(upstream, /\['workbuddy', 'qoder'\]\.includes\(/);
+    assert.doesNotMatch(upstream, /hasRealm[^\n]*chatgpt/);
 });

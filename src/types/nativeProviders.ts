@@ -1,4 +1,4 @@
-export type NativeProvider = 'qoder';
+export type NativeProvider = 'qoder' | 'chatgpt';
 export type NativeRealm = 'cn' | 'global';
 export interface NativeClientVersion {
     bundled_version: string;

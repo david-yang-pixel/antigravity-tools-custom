@@ -1,7 +1,7 @@
 {
   "nativeProviders": {
     "clientVersion": {
-      "title": "Qoder CLI version",
+      "title": "{{provider}} CLI version",
       "bundled": "Bundled {{version}}",
       "latest": "Official latest {{version}}",
       "checking": "Checking",
@@ -76,7 +76,21 @@
     "deleteTitle": "Remove account",
     "deleteHint": "Remove local credentials for {{name}}? This account will stop participating in rotation.",
     "authorized": "Account authorization saved",
-    "loginExpired": "Authorization expired. Get a new link."
+    "loginExpired": "Authorization expired. Get a new link.",
+    "chatgpt": {
+      "importHint": "Paste a ChatGPT (Codex) credential: either the bare refresh token, or JSON such as {\"refresh_token\":\"...\"}. Identity is verified with OpenAI before saving. ChatGPT has no browser sign-in here.",
+      "importPlaceholder": "{\"refresh_token\":\"...\"} or a bare token",
+      "reimport": "Re-import",
+      "reimportTitle": "Re-import credentials",
+      "reimportHint": "Replace the credentials of this account. A token for a different ChatGPT account is rejected.",
+      "authError": "Credential rejected by OpenAI; the account was disabled. Re-import it from this row."
+    },
+    "quota": {
+      "window5h": "5-hour window",
+      "window7d": "7-day window",
+      "reset": "Resets {{time}}",
+      "used": "{{percent}}% used"
+    }
   },
   "topup": {
     "pending_orders": "Pending payments",
@@ -1361,7 +1375,7 @@
       "scheduling": {
         "title": "Account Rotation & Scheduling",
         "title_tooltip": "Controls how sessions are bound to accounts and how rate limits are handled.",
-        "subtitle": "Scheduling, wait limits, session reset and circuit-breaker backoff apply to Antigravity, WorkBuddy and Qoder pools. Fixed accounts are selected separately for each provider.",
+        "subtitle": "Scheduling, wait limits, session reset and circuit-breaker backoff apply to Antigravity, WorkBuddy, Qoder and ChatGPT pools. Fixed accounts are selected separately for each provider.",
         "mode": "Scheduling Mode",
         "mode_tooltip": "Cache-First: Bind session to account, wait on rate limit (maximize cache utility); Balance: Bind session, switch account on rate limit; Performance: Standard Round-robin.",
         "modes": {

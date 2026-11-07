@@ -1606,5 +1606,21 @@
     "confirm": "Borrar ahora",
     "cancel": "Cancelar",
     "success": "La caché de bloques de pensamiento se ha borrado correctamente y se reconstruirá automáticamente."
+  },
+  "nativeProviders": {
+    "chatgpt": {
+      "importHint": "Paste a ChatGPT (Codex) credential: either the bare refresh token, or JSON such as {\"refresh_token\":\"...\"}. Identity is verified with OpenAI before saving. ChatGPT has no browser sign-in here.",
+      "importPlaceholder": "{\"refresh_token\":\"...\"} or a bare token",
+      "reimport": "Re-import",
+      "reimportTitle": "Re-import credentials",
+      "reimportHint": "Replace the credentials of this account. A token for a different ChatGPT account is rejected.",
+      "authError": "Credential rejected by OpenAI; the account was disabled. Re-import it from this row."
+    },
+    "quota": {
+      "window5h": "5-hour window",
+      "window7d": "7-day window",
+      "reset": "Resets {{time}}",
+      "used": "{{percent}}% used"
+    }
   }
 }
