@@ -59,8 +59,11 @@ pub fn prepare(mut body: Value, model: &str, mode: Mode) -> Result<Value, Failur
     }
     let system = take_system_messages(root);
     set_instructions(root, system);
+    // An incremental WebSocket turn continues server-side state: its tool outputs answer calls
+    // the upstream already holds and its item references must stay intact.
+    let incremental = mode == Mode::WebSocket && root.contains_key("previous_response_id");
     if let Some(items) = root.get_mut("input").and_then(Value::as_array_mut) {
-        normalize_items(items);
+        normalize_items(items, incremental);
     }
     normalize_reasoning(root);
     flatten_tools(root);
@@ -120,11 +123,14 @@ fn shorten_call_id(id: &str) -> String {
     format!("call_{}", &digest[..MAX_CALL_ID - "call_".len()])
 }
 
-fn normalize_items(items: &mut Vec<Value>) {
+fn normalize_items(items: &mut Vec<Value>, incremental: bool) {
     let mut renamed: HashMap<String, String> = HashMap::new();
     for item in items.iter_mut().filter_map(Value::as_object_mut) {
-        item.remove("id");
-        if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+        let reasoning = item.get("type").and_then(Value::as_str) == Some("reasoning");
+        if reasoning || !incremental {
+            item.remove("id");
+        }
+        if reasoning {
             if !item.get("summary").is_some_and(Value::is_array) {
                 item.insert("summary".into(), json!([]));
             }
@@ -138,6 +144,9 @@ fn normalize_items(items: &mut Vec<Value>) {
                 *id = short;
             }
         }
+    }
+    if incremental {
+        return;
     }
     let calls: HashSet<String> = items
         .iter()

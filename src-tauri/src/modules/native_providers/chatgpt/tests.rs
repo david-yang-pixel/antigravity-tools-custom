@@ -455,14 +455,33 @@ fn classify_table() {
 
     for status in [500, 503, 529] {
         let f = classify(status, &[], "boom");
+        assert!(matches!(f.penalty, Some(Penalty::Neutral)) && f.failover && f.status == status);
+    }
+    let f = classify(405, &[], "");
+    assert!(f.failover && matches!(f.penalty, Some(Penalty::Neutral)) && f.status == 405);
+    for body in [
+        r#"{"error":{"message":"An error occurred while processing your request. Please try again."}}"#,
+        r#"{"error":{"message":"You can retry your request, or contact us through help.openai.com. request id abc"}}"#,
+    ] {
+        let f = classify(400, &[], body);
+        assert!(matches!(f.penalty, Some(Penalty::Neutral)) && f.failover && f.status == 503);
+    }
+    for body in [
+        r#"{"error":{"code":"model_not_found","message":"x"}}"#,
+        r#"{"error":{"message":"The model `gpt-9` does not exist or you do not have access"}}"#,
+    ] {
+        let f = classify(400, &[], body);
+        assert!(matches!(f.penalty, Some(Penalty::Neutral)) && f.failover && f.status == 400);
+    }
+    for body in [
+        r#"{"error":{"message":"This model's maximum context length is 1 tokens"}}"#,
+        r#"{"error":{"type":"invalid_request_error","code":"whatever","message":"bad"}}"#,
+        r#"{"error":{"code":"content_policy_violation","message":"no"}}"#,
+    ] {
+        let f = classify(400, &[], body);
         assert!(
-            matches!(
-                f.penalty,
-                Some(Penalty::Breaker {
-                    retry_after: Some(5)
-                })
-            ) && f.failover
-                && f.status == status
+            matches!(f.penalty, Some(Penalty::Neutral)) && !f.failover && f.status == 400,
+            "{body}"
         );
     }
     for body in [
@@ -500,4 +519,35 @@ fn classify_event_maps_stream_errors() {
         1000,
     );
     assert!(matches!(f.penalty, Some(Penalty::Until { at: 1030, .. })));
+    // Fallback: unknown server-looking errors fail over; request faults do not.
+    let f = errors::classify_event(
+        &json!({"type": "error", "error": {"code": "server_error"}}),
+        1000,
+    );
+    assert!(f.failover && f.status == 502);
+    let f = errors::classify_event(
+        &json!({"type": "error", "error": {"code": "mystery"}}),
+        1000,
+    );
+    assert!(f.failover && f.status == 502);
+    let f = errors::classify_event(
+        &json!({"type": "error", "error": {"type": "invalid_request_error", "code": "mystery"}}),
+        1000,
+    );
+    assert!(!f.failover && f.status == 400 && matches!(f.penalty, Some(Penalty::Neutral)));
+}
+
+#[test]
+fn websocket_incremental_turn_keeps_tool_outputs() {
+    let input = json!([
+        {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+        {"type": "item_reference", "id": "rs_1"}]);
+    let out = prep(
+        json!({"previous_response_id": "r", "input": input.clone()}),
+        Mode::WebSocket,
+    );
+    assert_eq!(out["input"], input);
+    // Without a previous response the orphan is still dropped.
+    let out = prep(json!({"input": input}), Mode::WebSocket);
+    assert_eq!(out["input"].as_array().unwrap().len(), 1);
 }

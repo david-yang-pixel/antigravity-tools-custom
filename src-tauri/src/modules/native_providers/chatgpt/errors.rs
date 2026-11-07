@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 const QUOTA_EXHAUSTED: &str = "Account quota exhausted";
 const SHORT_COOLDOWN: u64 = 5;
 const OVERLOADED_CODES: [&str; 2] = ["server_is_overloaded", "slow_down"];
-const OVERLOADED_TEXT: [&str; 3] = [
+const OVERLOADED_TEXT: [&str; 5] = [
+    "an error occurred while processing your request",
+    "you can retry your request",
     "selected model is at capacity",
     "servers are currently overloaded",
     "server is overloaded",
@@ -60,6 +62,22 @@ fn overloaded(codes: &[&str], text: &str) -> bool {
     let text = text.to_lowercase();
     codes.iter().any(|c| OVERLOADED_CODES.contains(c))
         || OVERLOADED_TEXT.iter().any(|t| text.contains(t))
+}
+
+fn model_not_found(codes: &[&str], text: &str) -> bool {
+    let text = text.to_lowercase();
+    codes.contains(&"model_not_found")
+        || (text.contains("model")
+            && (text.contains("does not exist") || text.contains("not found")))
+}
+
+/// Validation, content-policy and context-window errors belong to the request, not the account.
+fn request_fault(codes: &[&str], text: &str) -> bool {
+    let text = text.to_lowercase();
+    codes.iter().any(|c| {
+        matches!(*c, "invalid_request_error" | "context_length_exceeded") || c.contains("policy")
+    }) || text.contains("maximum context length")
+        || text.contains("context length")
 }
 
 fn cloudflare(headers: &HeaderMap, raw: &str) -> bool {
@@ -121,13 +139,9 @@ pub fn classify(status: u16, headers: &HeaderMap, body: &str, at: i64) -> Failur
             fail(429, penalty, true)
         }
         400 if overloaded(&codes, &text) => fail(503, Penalty::Neutral, true),
-        500.. => fail(
-            status,
-            Penalty::Breaker {
-                retry_after: Some(SHORT_COOLDOWN),
-            },
-            true,
-        ),
+        400 if model_not_found(&codes, &text) => fail(400, Penalty::Neutral, true),
+        // Server-side trouble and unsupported methods are not the account's fault.
+        405 | 500.. => fail(status, Penalty::Neutral, true),
         // Context-length, policy and other validation errors belong to the request.
         _ => fail(status, Penalty::Neutral, false),
     }
@@ -156,7 +170,10 @@ pub fn classify_event(event: &Value, at: i64) -> Failure {
         .any(|c| matches!(*c, "token_revoked" | "token_invalidated"))
     {
         401
-    } else if overloaded(&found, &text) || found.contains(&"context_length_exceeded") {
+    } else if overloaded(&found, &text)
+        || model_not_found(&found, &text)
+        || request_fault(&found, &text)
+    {
         400
     } else {
         502
