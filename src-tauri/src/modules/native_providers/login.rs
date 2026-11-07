@@ -353,8 +353,14 @@ fn fingerprint(token: &str) -> String {
 /// Check all saved regions, including when the administrator selected the wrong one.
 fn reject_saved_credentials(a: &Account, saved: &[Account]) -> Result<(), String> {
     let supplied = &a.credentials;
-    // A rotated refresh token is no longer saved verbatim; its import fingerprint still is.
-    let pasted = (!supplied.refresh_token.is_empty()).then(|| fingerprint(&supplied.refresh_token));
+    // A rotated ChatGPT refresh token is no longer saved verbatim; its import fingerprint
+    // still is.
+    let pasted = match a.provider {
+        Provider::Qoder => None,
+        Provider::ChatGpt => {
+            (!supplied.refresh_token.is_empty()).then(|| fingerprint(&supplied.refresh_token))
+        }
+    };
     if saved.iter().any(|previous| {
         let credentials = &previous.credentials;
         [
@@ -402,6 +408,10 @@ pub async fn import(
     value: Value,
     account_id: Option<&str>,
 ) -> Result<AccountView, String> {
+    // Only ChatGPT re-imports onto a row; Qoder rows reauthorize through the device grant.
+    if provider == Provider::Qoder && account_id.is_some() {
+        return Err("Qoder accounts reauthorize from their row's browser login".into());
+    }
     let mut a = match provider {
         Provider::Qoder => imported_account(provider, realm, &value),
         Provider::ChatGpt => imported_chatgpt(&value)?,
@@ -475,7 +485,7 @@ pub async fn import(
             a.credentials.device_id = previous.credentials.device_id;
         }
     }
-    if !pasted.is_empty() {
+    if provider == Provider::ChatGpt && !pasted.is_empty() {
         a.credentials
             .imported_refresh_sha256
             .push(fingerprint(&pasted));

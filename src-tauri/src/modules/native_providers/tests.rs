@@ -1353,6 +1353,66 @@ async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() 
     );
 }
 
+#[tokio::test]
+async fn qoder_import_ignores_refresh_fingerprints() {
+    use sha2::{Digest, Sha256};
+    let _sandbox = Sandbox::new();
+    // Client creation fails locally, so a token past the duplicate guard never leaves
+    // this machine; the error then comes from the transport, not the guard.
+    let mut config = crate::models::AppConfig::default();
+    config.proxy.upstream_proxy.enabled = true;
+    config.proxy.upstream_proxy.url = "http://127.0.0.1:invalid".into();
+    crate::modules::config::save_app_config(&config).unwrap();
+    let mut a = account(Provider::Qoder, "rotated-away");
+    a.credentials.refresh_token = "rotated".into();
+    a.credentials.imported_refresh_sha256 = vec![format!("{:x}", Sha256::digest(b"old-rt"))];
+    let a = store::upsert(a, None).unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":"old-rt"}),
+        None,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(!error.contains("already saved"), "{error}");
+    let saved = store::get(Provider::Qoder, &a.id).unwrap();
+    assert_eq!(saved.credentials.refresh_token, "rotated");
+}
+
+#[tokio::test]
+async fn qoder_import_with_account_id_is_refused_before_egress() {
+    let _sandbox = Sandbox::new();
+    let a = store::upsert(account(Provider::Qoder, "row-import"), None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    // Any login route fails locally: the refusal must come before it.
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("workbuddy_egress.json"),
+        "invalid egress settings",
+    )
+    .unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":"new-refresh"}),
+        Some(&a.id),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(
+        error,
+        "Qoder accounts reauthorize from their row's browser login"
+    );
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}
+
 fn model(id: &str, is_free: bool) -> Model {
     Model {
         id: id.into(),
