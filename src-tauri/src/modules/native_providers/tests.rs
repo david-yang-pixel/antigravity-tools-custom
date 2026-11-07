@@ -19,6 +19,10 @@ impl Sandbox {
             "ABV_QODER_ENABLED",
             "ABV_QODER_MAX_CONCURRENCY",
             "ABV_QODER_EGRESS_ENABLED",
+            "ABV_CHATGPT_ENABLED",
+            "ABV_CHATGPT_MAX_CONCURRENCY",
+            "ABV_CHATGPT_EGRESS_ENABLED",
+            "ABV_CHATGPT_CLIENT_VERSION",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -164,6 +168,30 @@ fn identity_urls_cannot_choose_an_untrusted_credential_destination() {
     }
     assert!(
         http::official_url(Provider::Qoder, "https://openapi.qoder.sh/api/v1/userinfo").is_ok()
+    );
+}
+#[test]
+fn chatgpt_service_urls_stay_on_openai_hosts_and_skip_the_chat_wire() {
+    for good in [
+        "https://chatgpt.com/backend-api/codex/models",
+        "https://auth.openai.com/oauth/token",
+    ] {
+        assert!(
+            http::official_url(Provider::ChatGpt, good).is_ok(),
+            "{good}"
+        );
+    }
+    for bad in [
+        "https://chatgpt.com.attacker.example/a",
+        "https://openapi.qoder.sh/a",
+        "http://chatgpt.com/a",
+    ] {
+        assert!(http::official_url(Provider::ChatGpt, bad).is_err(), "{bad}");
+    }
+    assert!(http::official_url(Provider::Qoder, "https://chatgpt.com/a").is_err());
+    assert_eq!(
+        wire::event(Provider::ChatGpt, "[DONE]").unwrap_err().status,
+        500
     );
 }
 #[test]

@@ -943,3 +943,183 @@ async fn url_rejects_foreign_hosts() {
     );
     assert!(endpoints::url("http://evil.com", "/x").is_err());
 }
+
+// ---- shared layer: import, refresh persistence and metadata sync ----
+
+fn import_token_response(rotate: bool) -> Value {
+    let auth = json!({"chatgpt_account_id": "acc", "chatgpt_user_id": "u1",
+        "chatgpt_plan_type": "plus"});
+    let mut body = json!({
+        "access_token": jwt(json!({"exp": 4_000_000_000i64, "https://api.openai.com/auth": auth})),
+        "id_token": jwt(json!({"email": "me@example.com", "https://api.openai.com/auth": auth})),
+        "expires_in": 3600,
+    });
+    if rotate {
+        body["refresh_token"] = json!("rotated");
+    }
+    body
+}
+
+fn token_requests(server: &Mock) -> usize {
+    server
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _, _)| path == "/oauth/token")
+        .count()
+}
+
+#[tokio::test]
+async fn chatgpt_import_accepts_bare_and_object_refresh_tokens() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let server = mock(200, &[], import_token_response(true), false).await;
+    for (n, auth) in [
+        json!("rt-bare"),
+        json!({"refresh_token": "rt-snake"}),
+        json!({"refreshToken": "rt-camel"}),
+        json!({"rt": "rt-short"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // The requested realm is ignored: ChatGPT accounts are always global.
+        let view = login::import(Provider::ChatGpt, Realm::Cn, auth.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{auth}: {e}"));
+        assert_eq!(view.realm, Realm::Global);
+        assert_eq!(view.uid, "acc:u1");
+        let saved = store::all(Provider::ChatGpt).unwrap();
+        assert_eq!(saved.len(), 1, "{auth}");
+        let a = &saved[0];
+        assert_eq!(a.realm, Realm::Global);
+        assert_eq!(a.uid, "acc:u1");
+        assert_eq!(a.credentials.refresh_token, "rotated");
+        assert_eq!(a.credentials.chatgpt_account_id, "acc");
+        assert_eq!(a.nickname, "me@example.com");
+        // ChatGPT has no Qoder device identity.
+        assert!(a.credentials.machine_id.is_empty() && a.credentials.device_id.is_empty());
+        assert_eq!(token_requests(&server), n + 1);
+    }
+    let form: std::collections::HashMap<String, String> = {
+        let seen = server.seen.lock().unwrap();
+        let (_, _, body) = seen.iter().find(|(p, _, _)| p == "/oauth/token").unwrap();
+        url::form_urlencoded::parse(body).into_owned().collect()
+    };
+    assert_eq!(form["refresh_token"], "rt-bare");
+    for bad in [json!(""), json!({}), json!({"access_token": "a"}), json!(5)] {
+        let error = login::import(Provider::ChatGpt, Realm::Global, bad.clone())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{bad} was accepted"));
+        assert!(error.contains("refresh token"), "{bad}: {error}");
+    }
+    assert_eq!(token_requests(&server), 4);
+}
+
+#[tokio::test]
+async fn chatgpt_import_rejects_saved_refresh_token_before_network() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    // No rotation: the saved refresh token stays the one the administrator pasted.
+    let server = mock(200, &[], import_token_response(false), false).await;
+    login::import(Provider::ChatGpt, Realm::Global, json!("rt-dup"))
+        .await
+        .unwrap();
+    let before = serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap();
+    let error = login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!({"refresh_token": "rt-dup"}),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(error.contains("already saved"), "{error}");
+    assert_eq!(token_requests(&server), 1);
+    let after = store::all(Provider::ChatGpt).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].credentials.refresh_token, "rt-dup");
+    assert_eq!(
+        before[0]["credentials"],
+        serde_json::to_value(&after[0]).unwrap()["credentials"]
+    );
+}
+
+#[tokio::test]
+async fn chatgpt_dead_refresh_disables_account() {
+    use crate::modules::native_providers::accounts;
+    let _sandbox = Sandbox::new();
+    let _server = mock(400, &[], json!({"error": "invalid_grant"}), false).await;
+    let a = store::upsert(chatgpt_account(), None).unwrap();
+    let error = accounts::fresh(Provider::ChatGpt, &a.id, true)
+        .await
+        .err()
+        .expect("a dead refresh token must fail");
+    assert_eq!(error.status, 401);
+    let stored = store::get(Provider::ChatGpt, &a.id).unwrap();
+    assert!(!stored.enabled);
+    assert!(
+        stored
+            .auth_error
+            .as_deref()
+            .is_some_and(|e| e.contains("invalid_grant")),
+        "{:?}",
+        stored.auth_error
+    );
+    // A disabled account gets no retry schedule; credentials are left as they were.
+    assert_eq!(stored.next_sync_at, a.next_sync_at);
+    assert_eq!(stored.credentials.refresh_token, "r1");
+}
+
+#[tokio::test]
+async fn chatgpt_sync_keeps_quota_and_updates_models() {
+    use crate::modules::native_providers::{accounts, Model, Quota, QuotaPack};
+    let _sandbox = Sandbox::new();
+    let server = mock(
+        200,
+        &[],
+        json!({"models": [{"slug": "gpt-5", "display_name": "GPT-5", "context_window": 272000}]}),
+        false,
+    )
+    .await;
+    let mut a = chatgpt_account();
+    a.expires_at = crate::modules::native_providers::now() + 7200;
+    a.models = vec![Model {
+        id: "old-model".into(),
+        name: "Old".into(),
+        ..Default::default()
+    }];
+    let pack = QuotaPack {
+        name: "5h".into(),
+        total: Some(100.0),
+        remaining: Some(40.0),
+        used: Some(60.0),
+        unlimited: false,
+        expires_at: Some(4_000_000_000),
+    };
+    a.quota = Some(Quota {
+        updated_at: 1_700_000_000,
+        ..Quota::from_packs("%", vec![pack])
+    });
+    a.quota_error = Some("previous quota note".into());
+    let a = store::upsert(a, None).unwrap();
+    let view = accounts::sync(Provider::ChatGpt, &a.id, false)
+        .await
+        .unwrap();
+    assert!(view.models_error.is_none(), "{:?}", view.models_error);
+    let stored = store::get(Provider::ChatGpt, &a.id).unwrap();
+    let ids: Vec<_> = stored.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-5"]);
+    assert_eq!(stored.models[0].context_window, 272000);
+    let quota = stored.quota.expect("stored quota survives a sync");
+    assert_eq!(quota.updated_at, 1_700_000_000);
+    assert_eq!(quota.unit, "%");
+    assert_eq!(quota.packs[0].remaining, Some(40.0));
+    assert_eq!(stored.quota_error.as_deref(), Some("previous quota note"));
+    // Only the catalog was requested: no refresh, no quota endpoint.
+    let seen = server.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].0.starts_with("/backend-api/codex/models"));
+}

@@ -93,17 +93,22 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
             "This account requires browser authorization again",
         ));
     }
-    let result = match http::client_for(&a).await {
-        Ok(client) => match provider {
-            Provider::Qoder => qoder::refresh(&client, &mut a).await,
-            Provider::ChatGpt => Err(Failure::new(501, "ChatGPT support is incomplete")),
-        },
+    let result = match Client::for_account(&a).await {
+        Ok(Client::Qoder(client)) => qoder::refresh(&client, &mut a).await,
+        Ok(Client::ChatGpt(client)) => chatgpt::auth::refresh(&client, &mut a).await,
         Err(error) => Err(error),
     };
     if let Err(error) = result {
+        // A dead credential turns the account off instead of retrying it every minute;
+        // the administrator has to authorize it again.
+        let dead = matches!(error.penalty, Some(http::Penalty::Disable { .. }));
         let _ = store::update(provider, id, Some(&a.revision), |a| {
             a.auth_error = Some(error.to_string());
-            a.next_sync_at = now() + 60;
+            if dead {
+                a.enabled = false;
+            } else {
+                a.next_sync_at = now() + 60;
+            }
         });
         return Err(error);
     }
@@ -118,26 +123,51 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
 pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountView, String> {
     sync_metadata(provider, id, force, true).await
 }
+/// The transport one saved account's provider speaks, on that account's egress route.
+enum Client {
+    Qoder(qoder_client::transport::Client),
+    ChatGpt(reqwest::Client),
+}
+impl Client {
+    async fn for_account(a: &Account) -> Result<Self, Failure> {
+        Ok(match a.provider {
+            Provider::Qoder => Self::Qoder(http::client_for(a).await?),
+            Provider::ChatGpt => Self::ChatGpt(http::plain_client_for(a).await?),
+        })
+    }
+}
+/// Catalog (only when `catalog`) and quota. A `None` quota means the provider has no quota
+/// endpoint and the stored snapshot stays as it is (ChatGPT reports quota on inference).
 async fn fetch_metadata(
-    client: &qoder_client::transport::Client,
+    client: &Client,
     a: &Account,
     catalog: bool,
-) -> (Option<Result<Vec<Model>, Failure>>, Result<Quota, Failure>) {
-    match a.provider {
-        Provider::Qoder => tokio::join!(
-            async {
-                if catalog {
-                    Some(qoder::models(client, a).await)
-                } else {
-                    None
-                }
-            },
-            qoder::quota(client, a)
-        ),
-        Provider::ChatGpt => (
-            None,
-            Err(Failure::new(501, "ChatGPT support is incomplete")),
-        ),
+) -> (
+    Option<Result<Vec<Model>, Failure>>,
+    Option<Result<Quota, Failure>>,
+) {
+    match client {
+        Client::Qoder(client) => {
+            let (models, quota) = tokio::join!(
+                async {
+                    if catalog {
+                        Some(qoder::models(client, a).await)
+                    } else {
+                        None
+                    }
+                },
+                qoder::quota(client, a)
+            );
+            (models, Some(quota))
+        }
+        Client::ChatGpt(client) => {
+            let models = if catalog {
+                Some(chatgpt::models::fetch(client, a).await)
+            } else {
+                None
+            };
+            (models, None)
+        }
     }
 }
 async fn sync_metadata(
@@ -151,13 +181,13 @@ async fn sync_metadata(
     let mut a = fresh(provider, id, force)
         .await
         .map_err(|e| e.to_string())?;
-    let client = http::client_for(&a).await.map_err(|e| e.to_string())?;
+    let client = Client::for_account(&a).await.map_err(|e| e.to_string())?;
     let (mut models, mut quota) = fetch_metadata(&client, &a, catalog).await;
-    if models
-        .as_ref()
-        .is_some_and(|r| r.as_ref().is_err_and(|e| e.status == 401))
-        || quota.as_ref().err().is_some_and(|e| e.status == 401)
-    {
+    fn unauthorized<T>(r: &Option<Result<T, Failure>>) -> bool {
+        r.as_ref()
+            .is_some_and(|r| r.as_ref().is_err_and(|e| e.status == 401))
+    }
+    if unauthorized(&models) || unauthorized(&quota) {
         a = fresh(provider, id, true).await.map_err(|e| e.to_string())?;
         (models, quota) = fetch_metadata(&client, &a, catalog).await;
     }
@@ -172,11 +202,12 @@ async fn sync_metadata(
             None => {}
         }
         match quota {
-            Ok(quota) => {
+            Some(Ok(quota)) => {
                 stored.quota = Some(quota);
                 stored.quota_error = None;
             }
-            Err(error) => stored.quota_error = Some(error.to_string()),
+            Some(Err(error)) => stored.quota_error = Some(error.to_string()),
+            None => {}
         }
         stored.last_sync_at = now();
         stored.next_sync_at = now() + sync_interval(id);

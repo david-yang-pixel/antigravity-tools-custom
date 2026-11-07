@@ -102,6 +102,13 @@ pub async fn start(
     realm: Realm,
     account_id: Option<&str>,
 ) -> Result<Started, String> {
+    // Only Qoder has a device grant; ChatGPT accounts are imported from a refresh token.
+    match provider {
+        Provider::Qoder => {}
+        Provider::ChatGpt => {
+            return Err("ChatGPT accounts are added by importing a refresh token".into())
+        }
+    }
     let mut a = Account::new(provider, realm);
     let mut preferred = None;
     if let Some(id) = account_id {
@@ -303,6 +310,26 @@ fn imported_account(provider: Provider, realm: Realm, value: &Value) -> Account 
     a
 }
 
+/// A ChatGPT import is one refresh token: a bare JSON string, or an object carrying it.
+/// ChatGPT accounts always live in the global realm, whatever the request says.
+fn imported_chatgpt(value: &Value) -> Result<Account, String> {
+    let token = match value {
+        Value::String(token) => token.trim().to_owned(),
+        Value::Object(_) => text(value, &["refresh_token", "refreshToken", "rt"])
+            .trim()
+            .to_owned(),
+        _ => String::new(),
+    };
+    if token.is_empty() {
+        return Err(
+            "Paste a ChatGPT refresh token, as a string or as {\"refresh_token\": \"...\"}".into(),
+        );
+    }
+    let mut a = Account::new(Provider::ChatGpt, Realm::Global);
+    a.credentials.refresh_token = token;
+    Ok(a)
+}
+
 /// An imported access token is used as-is only while it is present and unexpired (with a
 /// one-minute margin); otherwise any refresh/personal credential is exchanged first.
 fn needs_refresh_before_import(a: &Account, at: i64) -> bool {
@@ -333,8 +360,34 @@ fn reject_saved_credentials(a: &Account, saved: &[Account]) -> Result<(), String
     Ok(())
 }
 
+/// Validates an imported Qoder export and fills its identity.
+async fn authorize_qoder(
+    client: &qoder_client::transport::Client,
+    a: &mut Account,
+) -> Result<(), http::Failure> {
+    let refreshed = needs_refresh_before_import(a, now());
+    if refreshed {
+        qoder::refresh(client, a).await?;
+    }
+    if let Err(error) = qoder::identity(client, a).await {
+        // An export may carry an access token that was revoked or expired without a
+        // recorded expiry; retry once with the refresh credential before giving up.
+        let refreshable =
+            !a.credentials.refresh_token.is_empty() || !a.credentials.personal_token.is_empty();
+        if refreshed || !refreshable || !matches!(error.status, 401 | 403) {
+            return Err(error);
+        }
+        qoder::refresh(client, a).await?;
+        qoder::identity(client, a).await?;
+    }
+    Ok(())
+}
+
 pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<AccountView, String> {
-    let mut a = imported_account(provider, realm, &value);
+    let mut a = match provider {
+        Provider::Qoder => imported_account(provider, realm, &value),
+        Provider::ChatGpt => imported_chatgpt(&value)?,
+    };
     reject_saved_credentials(&a, &store::all(provider)?)?;
     // The account does not exist yet: validate it through the node a new account
     // would take, and keep that node for it.
@@ -342,27 +395,23 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
     // Another import may have saved these credentials while we waited for the
     // serialized login route. Recheck under that route's guard before using them.
     reject_saved_credentials(&a, &store::all(provider)?)?;
-    let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
-    let refreshed = needs_refresh_before_import(&a, now());
-    if refreshed {
-        qoder::refresh(&client, &mut a)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Err(error) = qoder::identity(&client, &mut a).await {
-        // An export may carry an access token that was revoked or expired without a
-        // recorded expiry; retry once with the refresh credential before giving up.
-        let refreshable =
-            !a.credentials.refresh_token.is_empty() || !a.credentials.personal_token.is_empty();
-        if refreshed || !refreshable || !matches!(error.status, 401 | 403) {
-            return Err(error.to_string());
+    match provider {
+        Provider::Qoder => {
+            let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
+            authorize_qoder(&client, &mut a)
+                .await
+                .map_err(|e| e.to_string())?;
         }
-        qoder::refresh(&client, &mut a)
-            .await
-            .map_err(|e| e.to_string())?;
-        qoder::identity(&client, &mut a)
-            .await
-            .map_err(|e| e.to_string())?;
+        Provider::ChatGpt => {
+            // The refresh token is the whole import: always exchange it, then require the
+            // workspace identity the new tokens carry.
+            let client =
+                http::plain_login_client(provider, &route.exit).map_err(|e| e.to_string())?;
+            chatgpt::auth::refresh(&client, &mut a)
+                .await
+                .map_err(|e| e.to_string())?;
+            chatgpt::identity::apply(&mut a).map_err(|e| e.to_string())?;
+        }
     }
     if bound_elsewhere(provider, &a, route.node.as_deref())? {
         return Err(BOUND_ELSEWHERE.into());
@@ -371,10 +420,14 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
         .get("auth")
         .filter(|v| v.is_object())
         .unwrap_or(&value);
-    if let Some(previous) = store::all(provider)?
-        .into_iter()
-        .find(|previous| previous.uid == a.uid && previous.realm == a.realm)
-    {
+    // Only Qoder accounts carry a device identity worth keeping across imports.
+    let previous = match provider {
+        Provider::Qoder => store::all(provider)?
+            .into_iter()
+            .find(|previous| previous.uid == a.uid && previous.realm == a.realm),
+        Provider::ChatGpt => None,
+    };
+    if let Some(previous) = previous {
         if text(root, &["machineId", "machine_id"]).is_empty() {
             a.credentials.machine_id = previous.credentials.machine_id;
         }

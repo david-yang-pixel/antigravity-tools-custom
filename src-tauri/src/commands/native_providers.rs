@@ -21,7 +21,7 @@ pub async fn check_native_client_version(
 ) -> Result<native::qoder::releases::ClientVersionView, String> {
     match request.provider {
         Provider::Qoder => Ok(native::qoder::releases::check(request.refresh).await),
-        Provider::ChatGpt => Err("ChatGPT support is incomplete".into()),
+        Provider::ChatGpt => Err("Client version check is not available for ChatGPT".into()),
     }
 }
 #[derive(Deserialize)]
@@ -44,6 +44,8 @@ pub struct SessionRequest {
 #[derive(Deserialize)]
 pub struct ImportRequest {
     pub provider: Provider,
+    /// Omitted for ChatGPT, whose accounts are always global; Qoder keeps its `cn` default.
+    #[serde(default)]
     pub realm: Realm,
     pub auth: serde_json::Value,
 }
@@ -118,7 +120,10 @@ pub async fn delete_native_account(request: AccountRequest) -> Result<(), String
     native::store::remove(request.provider, &request.id)?;
     egress::forget(Pool::Native(request.provider), &request.id);
     native::http::forget(&request.id);
-    native::qoder::sign::forget(&request.id);
+    match request.provider {
+        Provider::Qoder => native::qoder::sign::forget(&request.id),
+        Provider::ChatGpt => {}
+    }
     Ok(())
 }
 
@@ -162,7 +167,7 @@ pub async fn test_native_account_egress(request: SessionRequest) -> Result<egres
     let account = native::store::get(request.provider, &request.id)?;
     let url = match request.provider {
         Provider::Qoder => format!("{}/", native::qoder::gateway(account.realm)),
-        Provider::ChatGpt => return Err("ChatGPT support is incomplete".into()),
+        Provider::ChatGpt => "https://chatgpt.com/".to_owned(),
     };
     let direct_url = url.clone();
     egress::test_account(
@@ -171,14 +176,26 @@ pub async fn test_native_account_egress(request: SessionRequest) -> Result<egres
         &url,
         |exit| async move {
             let started = std::time::Instant::now();
-            native::http::client_on(&account, &exit)
-                .map_err(|e| e.to_string())?
-                .head(&direct_url)
-                .timeout(std::time::Duration::from_secs(8))
-                .send()
-                .await
-                .map(|_| started.elapsed().as_millis() as u64)
-                .map_err(|_| {
+            let timeout = std::time::Duration::from_secs(8);
+            let reached = match account.provider {
+                Provider::Qoder => native::http::client_on(&account, &exit)
+                    .map_err(|e| e.to_string())?
+                    .head(&direct_url)
+                    .timeout(timeout)
+                    .send()
+                    .await
+                    .is_ok(),
+                Provider::ChatGpt => native::http::plain_client_on(&account, &exit)
+                    .map_err(|e| e.to_string())?
+                    .head(&direct_url)
+                    .timeout(timeout)
+                    .send()
+                    .await
+                    .is_ok(),
+            };
+            reached
+                .then(|| started.elapsed().as_millis() as u64)
+                .ok_or_else(|| {
                     format!(
                         "{} is unreachable from this server",
                         request.provider.name()
