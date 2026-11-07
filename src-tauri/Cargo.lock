@@ -600,16 +600,14 @@ dependencies = [
 [[package]]
 name = "boring-sys2"
 version = "4.15.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab6c876a958d17057d9d3a31075bb9609237413a1fe665432782c31ef596eb6b"
 dependencies = [
  "autocfg",
  "bindgen",
  "cmake",
- "flate2",
  "fs_extra",
  "fslock",
- "object",
- "sha2",
- "tar",
 ]
 
 [[package]]
@@ -3445,15 +3443,6 @@ dependencies = [
  "objc2-foundation",
  "objc2-javascript-core",
  "objc2-security",
-]
-
-[[package]]
-name = "object"
-version = "0.37.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
