@@ -75,12 +75,15 @@ struct Prepared {
 struct Refusal {
     failure: Failure,
     upstream: Option<Value>,
+    /// Events of a 200 stream that failed before output, ending with the failure event.
+    prelude: Vec<String>,
 }
 impl From<Failure> for Refusal {
     fn from(failure: Failure) -> Self {
         Self {
             failure,
             upstream: None,
+            prelude: Vec::new(),
         }
     }
 }
@@ -192,7 +195,9 @@ pub async fn route(
     .await
     {
         Ok(v) => v,
-        Err(refusal) => return refused(refusal, prepared.mode),
+        Err(refusal) => {
+            return refused(refusal, prepared.mode, streaming, &published.public_id).await
+        }
     };
     let mut headers = HeaderMap::new();
     for (key, value) in [
@@ -301,8 +306,24 @@ fn failed(e: Failure) -> Response {
     )
 }
 /// A Responses passthrough client receives the upstream's own error object (with the
-/// mapped status); every other client the generic error.
-fn refused(refusal: Refusal, mode: WireMode) -> Response {
+/// mapped status); every other client the generic error. A streaming passthrough client
+/// whose refusal arrived inside a 200 stream receives that stream instead: the buffered
+/// events and the upstream's failure event, as the upstream sent them.
+async fn refused(refusal: Refusal, mode: WireMode, streaming: bool, alias: &str) -> Response {
+    if mode == WireMode::Passthrough
+        && streaming
+        && refusal.upstream.is_some()
+        && !refusal.prelude.is_empty()
+    {
+        let events = futures::stream::iter(refusal.prelude.into_iter().map(Ok)).boxed();
+        return ResponsesRelay {
+            alias: alias.to_owned(),
+            headers: HeaderMap::new(),
+            error_code: "native_upstream_failed",
+        }
+        .run(events, true)
+        .await;
+    }
     match refusal.upstream {
         Some(mut error) if mode == WireMode::Passthrough => {
             if error.get("message").is_none() {
@@ -643,7 +664,11 @@ async fn open(
                         (error, reached, None)
                     }
                 };
-                let refusal = |failure| Refusal { failure, upstream };
+                let refusal = |failure| Refusal {
+                    failure,
+                    upstream,
+                    prelude: Vec::new(),
+                };
                 if provider == Provider::ChatGpt {
                     lease.settle(&error);
                 }
@@ -684,11 +709,17 @@ async fn open(
         {
             charge(&mut lease, &e);
             // A ChatGPT failure event names the upstream's own error.
+            let upstream = match provider {
+                Provider::Qoder => None,
+                Provider::ChatGpt => prelude.last().and_then(|e| chatgpt::event_error(e)),
+            };
             let refusal = Refusal {
-                upstream: match provider {
-                    Provider::Qoder => None,
-                    Provider::ChatGpt => prelude.last().and_then(|e| chatgpt::event_error(e)),
+                prelude: if upstream.is_some() {
+                    prelude
+                } else {
+                    Vec::new()
                 },
+                upstream,
                 failure: e,
             };
             // Unclassified: another account would receive the same request.

@@ -725,24 +725,38 @@ async fn chatgpt_responses_client_gets_upstream_error_before_output() {
         ]),
     ])
     .await;
-    // Once as an HTTP answer, once as a stream event before output.
-    for expected_requests in [1, 2] {
-        let (status, _, body) = call(
-            "/v1/responses",
-            json!({"model":PUBLIC,"stream":true,"input":"hi"}),
-            &[],
-        )
-        .await;
+    let assert_json = |status: StatusCode, body: &str| {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        let value: Value = serde_json::from_str(&body).unwrap();
+        let value: Value = serde_json::from_str(body).unwrap();
         assert_eq!(value["error"]["code"], "context_length_exceeded", "{body}");
         assert_eq!(value["error"]["type"], "invalid_request_error");
         assert_eq!(
             value["error"]["message"],
             "Your input exceeds the context window"
         );
-        assert_eq!(server.requests().len(), expected_requests);
+    };
+    let request = |stream: bool| json!({"model":PUBLIC,"stream":stream,"input":"hi"});
+    // An HTTP answer is returned as the upstream's error object.
+    let (status, _, body) = call("/v1/responses", request(true), &[]).await;
+    assert_json(status, &body);
+    assert_eq!(server.requests().len(), 1);
+    // A stream event before output reaches a streaming client as the stream it was: Codex
+    // reads context-window errors only from SSE.
+    let (status, headers, body) = call("/v1/responses", request(true), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers["content-type"], "text/event-stream");
+    let received = frames(&body);
+    let names: Vec<&str> = received.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["response.created", "response.failed"], "{body}");
+    for (_, data) in &received {
+        assert_eq!(data["response"]["model"], PUBLIC);
     }
+    assert_eq!(received[1].1["response"]["error"], error);
+    assert_eq!(server.requests().len(), 2);
+    // A non-streaming client keeps the JSON error.
+    let (status, _, body) = call("/v1/responses", request(false), &[]).await;
+    assert_json(status, &body);
+    assert_eq!(server.requests().len(), 3);
 }
 
 #[tokio::test]
