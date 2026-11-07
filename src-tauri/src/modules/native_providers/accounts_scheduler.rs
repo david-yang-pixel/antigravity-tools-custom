@@ -88,8 +88,7 @@ pub fn try_acquire(
                 && !a.credentials.access_token.is_empty()
                 && (a.expires_at == 0
                     || a.expires_at > now()
-                    || !a.credentials.refresh_token.is_empty()
-                    || !a.credentials.personal_token.is_empty())
+                    || !a.credentials.refresh_token.is_empty())
         })
         .collect();
     if picks.is_empty() {

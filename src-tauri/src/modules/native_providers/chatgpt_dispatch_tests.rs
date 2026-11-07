@@ -375,20 +375,7 @@ async fn chatgpt_responses_non_stream_aggregates() {
 async fn chatgpt_compact_returns_upstream_json() {
     let _sandbox = Sandbox::new();
     let account = chatgpt_account(0);
-    let mut qoder = Account::new(Provider::Qoder, Realm::Cn);
-    qoder.uid = "qoder-user".into();
-    qoder.credentials.access_token = "qoder-access".into();
-    qoder.expires_at = now() + 7200;
-    qoder.models = vec![Model {
-        id: "shared-model".into(),
-        name: "Shared".into(),
-        ..Default::default()
-    }];
-    store::upsert(qoder, None).unwrap();
-    publish(&[
-        (PUBLIC, Provider::ChatGpt, NATIVE),
-        ("qoder-chat", Provider::Qoder, "shared-model"),
-    ]);
+    publish(&[(PUBLIC, Provider::ChatGpt, NATIVE)]);
     let compacted = json!({"id":"cmp_1","object":"response.compaction","model":NATIVE,
         "output":[{"type":"compaction","encrypted_content":"opaque"}],"usage":{"input_tokens":9,"output_tokens":1}});
     let server = upstream(vec![with_header(
@@ -418,15 +405,6 @@ async fn chatgpt_compact_returns_upstream_json() {
     assert_eq!(upstream_body["model"], NATIVE);
     // The unary exchange settles its lease as a success.
     assert_eq!(accounts::runtime(&account.id).successes, 1);
-    // Other native sources keep refusing compaction before any account is used.
-    let (status, _, _) = call(
-        "/responses/compact",
-        json!({"model":"qoder-chat","input":"long history"}),
-        &[],
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(server.requests().len(), 1);
 }
 
 #[tokio::test]

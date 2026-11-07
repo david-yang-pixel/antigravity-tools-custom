@@ -4,7 +4,7 @@ use super::{NativeEvents, Prepared, WireMode};
 use crate::modules::native_providers::{
     chatgpt::{client, errors, payload},
     http::{Failure, Penalty},
-    now, store, Account, Provider,
+    now, store, Account,
 };
 use crate::proxy::{
     session_manager::SessionManager,
@@ -24,7 +24,7 @@ fn responses_session(scope: &str, body: &Value) -> String {
     if let Ok(chat) = codec::request_for(
         codec::Protocol::Responses,
         body.clone(),
-        super::dialect(Provider::ChatGpt),
+        codec::Dialect::OPENAI_COMPATIBLE,
     ) {
         return SessionManager::account_session_key(scope, &chat);
     }
@@ -70,10 +70,11 @@ pub(super) fn prepare(
             )
         }
         Some(protocol) => {
-            let chat = codec::request_for(protocol, request, super::dialect(Provider::ChatGpt))
+            // The Responses wire carries `text.format`, every tool_choice and
+            // parallel_tool_calls, so nothing is rejected up front.
+            let chat = codec::request_for(protocol, request, codec::Dialect::OPENAI_COMPATIBLE)
                 .map_err(|e| Failure::new(400, e))?;
             let chat = openai_compat::prepare(chat, model);
-            super::representable(Provider::ChatGpt, &chat)?;
             let session = SessionManager::account_session_key(scope, &chat);
             let responses = responses_wire::from_chat(chat).map_err(|e| Failure::new(400, e))?;
             (
