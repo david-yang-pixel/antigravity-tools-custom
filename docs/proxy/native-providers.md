@@ -221,7 +221,8 @@ A credential that OpenAI rejects disables the account automatically; the row sho
 `auth_error` with a hint to re-import. Quota is shown as one percentage bar per
 rate-limit window the upstream reports, named by the window's own length
 (`x-codex-*-window-minutes`, e.g. 5 hours and 7 days on paid plans, or a 30-day
-window on free accounts), with its reset time.
+window on free accounts), with its reset time. Windows are shown side by side, and the account list pages
+ten accounts at a time.
 
 ### Environment variables
 

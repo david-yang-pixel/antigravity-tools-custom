@@ -6,14 +6,18 @@ import type { TFunction } from 'i18next';
 import { request } from '../../utils/request';
 import { quotaWindow } from '../../utils/quotaWindow';
 import ModalDialog from '../common/ModalDialog';
+import Pagination from '../common/Pagination';
 import { showToast } from '../common/ToastContainer';
 import WorkBuddyEgressPanel, { WorkBuddyEgressCell, egressArgs, nativeEgress, type EgressView } from './WorkBuddyEgress';
 import { nativeAccountStatus, type BatchItem, type NativeAccount, type NativeProvider, type NativeSettings } from '../../types/nativeProviders';
 
+const PAGE_SIZE = 10;
 const input = 'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800';
 const button = 'inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-800';
 const action = 'inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:hover:bg-gray-800';
 const date = (seconds: number) => seconds > 0 ? new Date(seconds * 1000).toLocaleString() : '—';
+// Month, day and time only: keeps reset and maintenance times on one line.
+const shortDate = (seconds: number) => seconds > 0 ? new Date(seconds * 1000).toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const percent = (value: number) => Math.min(100, Math.max(0, Math.round(value)));
 const labels: Record<NativeProvider, string> = { chatgpt: 'ChatGPT' };
@@ -21,17 +25,18 @@ const labels: Record<NativeProvider, string> = { chatgpt: 'ChatGPT' };
 const windowKeys = { minute: 'nativeProviders.quota.windowMinutes', hour: 'nativeProviders.quota.windowHours', day: 'nativeProviders.quota.windowDays' } as const;
 
 // ChatGPT quota: one percentage bar per rate-limit window, named by its reported length
-// (e.g. 5 hours, 7 days, or 30 days on free accounts), with its reset time.
+// (e.g. 5 hours, 7 days, or 30 days on free accounts), with its reset time. Windows sit
+// side by side so a row stays as short as one window.
 function WindowBars({ quota, t }: { quota: NativeAccount['quota']; t: TFunction }) {
     if (!quota?.packs.length) return <div className="font-medium">—</div>;
-    return <div className="space-y-2">{quota.packs.map(pack => {
+    return <div className="grid grid-flow-col auto-cols-[minmax(7.5rem,1fr)] gap-4">{quota.packs.map(pack => {
         const used = percent(pack.used ?? 0);
         const window = quotaWindow(pack.name);
         const label = window ? t(windowKeys[window.unit], { count: window.count }) : pack.name;
         return <div key={pack.name}>
-            <div className="flex justify-between gap-2 text-xs"><span>{label}</span><span className="tabular-nums text-gray-500">{t('nativeProviders.quota.used', { percent: used })}</span></div>
+            <div className="flex justify-between gap-2 whitespace-nowrap text-xs"><span>{label}</span><span className="tabular-nums text-gray-500">{t('nativeProviders.quota.used', { percent: used })}</span></div>
             <div role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={used} className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"><div className={`h-full ${used >= 90 ? 'bg-red-500' : used >= 70 ? 'bg-amber-500' : 'bg-green-500'}`} style={{ width: `${used}%` }} /></div>
-            {pack.expires_at ? <div className="mt-0.5 text-xs text-gray-500">{t('nativeProviders.quota.reset', { time: date(pack.expires_at) })}</div> : null}
+            {pack.expires_at ? <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500" title={date(pack.expires_at)}>{t('nativeProviders.quota.reset', { time: shortDate(pack.expires_at) })}</div> : null}
         </div>;
     })}</div>;
 }
@@ -50,9 +55,14 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
     const [deleting, setDeleting] = useState<NativeAccount | null>(null);
     const [now, setNow] = useState(Date.now() / 1000);
     const [egress, setEgress] = useState<EgressView | null>(null);
+    const [page, setPage] = useState(1);
     const egressApi = useMemo(() => nativeEgress(provider), [provider]);
     const alive = useRef(true);
     const locked = useRef(false);
+    const totalPages = Math.max(1, Math.ceil(accounts.length / PAGE_SIZE));
+    const currentPage = Math.min(page, totalPages);
+    const visibleAccounts = accounts.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+    useEffect(() => { setPage(current => Math.min(current, totalPages)); }, [totalPages]);
 
     const load = useCallback(async () => {
         try {
@@ -125,22 +135,24 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
             </div>}
             {loading ? <div role="status" className="flex items-center justify-center gap-2 p-10 text-gray-500"><Loader2 size={18} className="animate-spin" />{t('nativeProviders.loading')}</div> : !accounts.length ? <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center dark:border-gray-700"><h2 className="font-medium">{t('nativeProviders.empty')}</h2><p className="mt-2 text-sm text-gray-500">{t('nativeProviders.emptyHint', { provider: label })}</p></div> :
                 <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-700" role="region" aria-label={t('nativeProviders.title', { provider: label })} tabIndex={0}>
-                    <table className="w-full text-left text-sm"><thead className="bg-gray-50 dark:bg-gray-800"><tr>{['account', 'egress', 'balance', 'health', 'authorization', 'maintenance', 'actions'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-4 py-3 font-medium">{t(`nativeProviders.${key}`)}</th>)}</tr></thead>
-                        <tbody>{accounts.map(account => {
+                    <table className="w-full text-left text-sm"><thead className="bg-gray-50 dark:bg-gray-800"><tr>{['account', 'egress', 'balance', 'health', 'authorization', 'maintenance', 'actions'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-3 py-2.5 font-medium">{t(`nativeProviders.${key}`)}</th>)}</tr></thead>
+                        <tbody>{visibleAccounts.map(account => {
                             const errors = [account.auth_error, account.quota_error, account.models_error, account.last_error].filter((value): value is string => !!value);
                             const status = nativeAccountStatus(account, now);
+                            const name = account.nickname || account.uid;
                             return <tr key={account.id} className="border-t border-gray-100 align-top dark:border-gray-700">
-                                <td className="min-w-40 px-4 py-4"><div className="font-medium">{account.nickname || account.uid}</div><details className="mt-2 text-xs"><summary className="cursor-pointer text-blue-600">{t('nativeProviders.details', { count: account.models.length })}</summary><div className="mt-2 max-w-sm space-y-2 break-all text-gray-500"><div>{account.uid}</div><p>{t('nativeProviders.modelsUpdated', { time: date(account.models_updated_at) })}</p>{account.models.map(model => <div key={model.id}><code>{model.id}</code>{model.name && <span> · {model.name}</span>}</div>)}{errors.map((error, index) => <p key={index} className="text-amber-700 dark:text-amber-400">{error}</p>)}</div></details></td>
-                                <td className="px-4 py-4"><WorkBuddyEgressCell accountId={account.id} view={egress} disabled={busy} onChange={setEgress} api={egressApi} /></td>
-                                <td className="min-w-36 px-4 py-4"><WindowBars quota={account.quota} t={t} /><div className="mt-1 text-xs text-gray-500">{account.quota ? date(account.quota.updated_at) : t('nativeProviders.notQueried')}</div>{account.quota_error && <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">{t('nativeProviders.staleBalance')}</p>}</td>
-                                <td className="min-w-28 px-4 py-4">{account.auth_error && <div role="alert" className="mb-2 max-w-56 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"><p className="font-medium">{t('nativeProviders.chatgpt.authError')}</p><p className="mt-1 break-all opacity-80">{account.auth_error}</p></div>}<span className={`rounded-full px-2 py-1 text-xs ${status === 'ready' ? 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>{t(`nativeProviders.status_${status}`)}</span><div className="mt-2 text-xs tabular-nums text-gray-500">{t('nativeProviders.requests', { success: account.successes, failed: account.failures })}</div>{account.cooldown_until > now && <div className="mt-1 text-xs text-amber-700">{t('nativeProviders.cooldownSeconds', { seconds: Math.ceil(account.cooldown_until - now) })}</div>}</td>
-                                <td className="min-w-36 px-4 py-4"><div>{date(account.expires_at)}</div><p className="mt-1 text-xs text-gray-500">{t(account.can_refresh ? 'nativeProviders.refreshable' : 'nativeProviders.noRefresh')}</p></td>
-                                <td className="min-w-40 space-y-2 px-4 py-4"><label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" disabled={busy} checked={account.enabled} onChange={e => void change(account, { enabled: e.target.checked })} />{t('nativeProviders.enableAccount')}</label><label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" disabled={busy} checked={account.auto_refresh} onChange={e => void change(account, { auto_refresh: e.target.checked })} />{t('nativeProviders.autoRefresh')}</label><p className="text-xs text-gray-500">{account.next_sync_at > 0 ? t('nativeProviders.nextSync', { time: date(account.next_sync_at) }) : t('nativeProviders.syncIdle')}</p></td>
-                                <td className="px-4 py-4"><div className="flex flex-nowrap items-center gap-2"><button className={action} disabled={busy} onClick={() => void change(account, {})}><RefreshCw size={13} />{t('nativeProviders.sync')}</button><button className={action} disabled={busy || !account.can_refresh} onClick={() => void change(account, { refresh: true })}><KeyRound size={13} />{t('nativeProviders.renew')}</button><button className={action} disabled={busy} onClick={() => reimport(account)}><Upload size={13} />{t('nativeProviders.chatgpt.reimport')}</button><button className={`${action} text-red-600`} disabled={busy} onClick={() => setDeleting(account)}><Trash2 size={13} />{t('nativeProviders.delete')}</button></div></td>
+                                <td className="max-w-56 px-3 py-2.5"><div className="truncate font-medium" title={name}>{name}</div><details className="mt-1 text-xs"><summary className="cursor-pointer text-blue-600">{t('nativeProviders.details', { count: account.models.length })}</summary><div className="mt-2 max-w-sm space-y-2 break-all text-gray-500"><div>{account.uid}</div><p>{t('nativeProviders.modelsUpdated', { time: date(account.models_updated_at) })}</p>{account.models.map(model => <div key={model.id}><code>{model.id}</code>{model.name && <span> · {model.name}</span>}</div>)}{errors.map((error, index) => <p key={index} className="text-amber-700 dark:text-amber-400">{error}</p>)}</div></details></td>
+                                <td className="px-3 py-2.5"><WorkBuddyEgressCell accountId={account.id} view={egress} disabled={busy} onChange={setEgress} api={egressApi} /></td>
+                                <td className="min-w-72 px-3 py-2.5"><WindowBars quota={account.quota} t={t} /><div className="mt-1 whitespace-nowrap text-xs text-gray-500">{account.quota ? date(account.quota.updated_at) : t('nativeProviders.notQueried')}</div>{account.quota_error && <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">{t('nativeProviders.staleBalance')}</p>}</td>
+                                <td className="px-3 py-2.5">{account.auth_error && <div role="alert" className="mb-2 max-w-56 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"><p className="font-medium">{t('nativeProviders.chatgpt.authError')}</p><p className="mt-1 break-all opacity-80">{account.auth_error}</p></div>}<span className={`whitespace-nowrap rounded-full px-2 py-1 text-xs ${status === 'ready' ? 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>{t(`nativeProviders.status_${status}`)}</span><div className="mt-1.5 whitespace-nowrap text-xs tabular-nums text-gray-500">{t('nativeProviders.requests', { success: account.successes, failed: account.failures })}</div>{account.cooldown_until > now && <div className="mt-1 whitespace-nowrap text-xs text-amber-700">{t('nativeProviders.cooldownSeconds', { seconds: Math.ceil(account.cooldown_until - now) })}</div>}</td>
+                                <td className="px-3 py-2.5"><div className="whitespace-nowrap">{date(account.expires_at)}</div><p className="mt-1 whitespace-nowrap text-xs text-gray-500">{t(account.can_refresh ? 'nativeProviders.refreshable' : 'nativeProviders.noRefresh')}</p></td>
+                                <td className="space-y-1 px-3 py-2.5"><label className="flex items-center gap-2 whitespace-nowrap"><input type="checkbox" className="accent-blue-600" disabled={busy} checked={account.enabled} onChange={e => void change(account, { enabled: e.target.checked })} />{t('nativeProviders.enableAccount')}</label><label className="flex items-center gap-2 whitespace-nowrap"><input type="checkbox" className="accent-blue-600" disabled={busy} checked={account.auto_refresh} onChange={e => void change(account, { auto_refresh: e.target.checked })} />{t('nativeProviders.autoRefresh')}</label><p className="whitespace-nowrap text-xs text-gray-500" title={account.next_sync_at > 0 ? date(account.next_sync_at) : t('nativeProviders.syncIdle')}>{account.next_sync_at > 0 ? t('nativeProviders.nextSync', { time: shortDate(account.next_sync_at) }) : t('nativeProviders.syncIdleShort')}</p></td>
+                                <td className="px-3 py-2.5"><div className="flex flex-nowrap items-center gap-2"><button className={action} disabled={busy} onClick={() => void change(account, {})}><RefreshCw size={13} />{t('nativeProviders.sync')}</button><button className={action} disabled={busy || !account.can_refresh} onClick={() => void change(account, { refresh: true })}><KeyRound size={13} />{t('nativeProviders.renew')}</button><button className={action} disabled={busy} onClick={() => reimport(account)}><Upload size={13} />{t('nativeProviders.chatgpt.reimport')}</button><button className={`${action} text-red-600`} disabled={busy} onClick={() => setDeleting(account)}><Trash2 size={13} />{t('nativeProviders.delete')}</button></div></td>
                             </tr>;
                         })}</tbody>
                     </table>
                 </div>}
+            {!loading && <Pagination currentPage={currentPage} totalPages={totalPages} onPageChange={setPage} totalItems={accounts.length} itemsPerPage={PAGE_SIZE} />}
             <p className="text-xs leading-relaxed text-gray-500">{t('nativeProviders.routingHint')} <Link className="text-blue-600 underline" to="/api-proxy">{t('nativeProviders.routingLink')}</Link></p>
             <ModalDialog isOpen={!!deleting} title={t('nativeProviders.deleteTitle')} message={t('nativeProviders.deleteHint', { name: deleting?.nickname || deleting?.uid })} type="confirm" isDestructive isLoading={busy} onConfirm={() => void run(async () => { if (!deleting) return; await request('delete_native_account', { request: { provider, id: deleting.id } }); if (alive.current) setDeleting(null); })} onCancel={() => setDeleting(null)} />
         </div>
