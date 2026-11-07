@@ -2,14 +2,14 @@ use super::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
-pub(super) struct Sandbox {
+pub(crate) struct Sandbox {
     _guard: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
     overrides: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 impl Sandbox {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let guard = crate::modules::account::SHARED_TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());

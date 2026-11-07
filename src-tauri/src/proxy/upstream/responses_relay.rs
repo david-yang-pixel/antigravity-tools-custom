@@ -19,7 +19,7 @@ pub(crate) struct ResponsesRelay {
 
 /// Names the alias wherever the upstream named its model: `response.model` and a
 /// top-level `model`.
-fn rename(value: &mut Value, alias: &str) {
+pub(crate) fn rename(value: &mut Value, alias: &str) {
     if let Some(response) = value.get_mut("response").and_then(Value::as_object_mut) {
         if response.contains_key("model") {
             response.insert("model".into(), json!(alias));

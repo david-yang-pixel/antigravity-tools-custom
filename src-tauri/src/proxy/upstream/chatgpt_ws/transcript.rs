@@ -51,7 +51,7 @@ fn kind(item: &Value) -> &str {
 }
 
 /// Hidden reasoning and compaction state minted by one account cannot be decrypted by another.
-fn encrypted_state(item: &Value) -> bool {
+pub(super) fn encrypted_state(item: &Value) -> bool {
     matches!(
         kind(item),
         "reasoning" | "compaction" | "compaction_summary"

@@ -135,7 +135,7 @@ fn remember_plan(account: &Account, body: &str) {
 
 /// Classifies a non-2xx answer from at most 1 MiB of its body, returned with the
 /// upstream's own error object when the body carries one.
-pub(super) async fn rejection(
+pub(in crate::proxy::upstream) async fn rejection(
     account: &Account,
     response: reqwest::Response,
 ) -> (Failure, Option<Value>) {

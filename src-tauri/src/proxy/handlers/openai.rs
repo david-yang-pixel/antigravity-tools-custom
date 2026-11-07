@@ -6276,6 +6276,10 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
         last_response_pending_tool_call_ids: Vec::new(),
         tool_call_cache: std::collections::HashMap::new(),
     };
+    // The `generate:false` prewarm answered locally, kept whole for a ChatGPT hand-off.
+    let mut local_prewarm: Option<Value> = None;
+    // Whether a generating turn has been served by the Antigravity path.
+    let mut antigravity_turns = false;
 
     while let Some(msg_result) = socket.recv().await {
         let msg = match msg_result {
@@ -6332,12 +6336,49 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             .await;
         }
 
-        if should_handle_prewarm_locally(&payload, &session_state) {
-            if let Err((status, message)) =
+        // A connection whose first generating turn names a ChatGPT publication is relayed to
+        // the ChatGPT upstream for the rest of its lifetime.
+        let chatgpt = websocket_frame_model(&payload, &session_state)
+            .and_then(|model| {
+                crate::proxy::middleware::model_registry::resolve_public_model(&model).ok()
+            })
+            .filter(|published| {
+                published.source_id == crate::modules::native_providers::Provider::ChatGpt.source()
+            });
+        let prewarm = should_handle_prewarm_locally(&payload, &session_state);
+        if let Some(published) = chatgpt.as_ref() {
+            if antigravity_turns {
+                let event = json!({"type":"error","error":{
+                    "type":"invalid_request_error", "code":"model_source_mismatch",
+                    "message":"This WebSocket session already serves another source; open a new WebSocket connection for this model"
+                }});
+                let _ = socket.send(Message::Text(event.to_string())).await;
+                continue;
+            }
+            let generating = payload.get("type").and_then(Value::as_str) == Some("response.create");
+            if generating && !prewarm {
+                let first = crate::proxy::upstream::chatgpt_ws::after_prewarm(
+                    local_prewarm
+                        .as_ref()
+                        .map(|frame| (frame, session_state.last_response_id.as_str())),
+                    payload,
+                );
+                crate::proxy::upstream::chatgpt_ws::run(socket, first, published.clone(), state)
+                    .await;
+                return;
+            }
+        }
+
+        if prewarm {
+            let admitted = if chatgpt.is_some() {
+                Ok(())
+            } else {
                 crate::proxy::middleware::model_registry::antigravity_model(
                     payload.get("model").and_then(Value::as_str).unwrap_or(""),
                 )
-            {
+                .map(|_| ())
+            };
+            if let Err((status, message)) = admitted {
                 let event = json!({"type":"error","error":{
                     "type":"invalid_request_error", "code":status.as_u16().to_string(), "message":message
                 }});
@@ -6345,6 +6386,7 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
                 continue;
             }
             let (created, completed) = handle_prewarm_locally(&payload, &mut session_state);
+            local_prewarm = Some(payload);
             let _ = socket.send(Message::Text(created.to_string())).await;
             let _ = socket.send(Message::Text(completed.to_string())).await;
             if debug_logger::is_enabled(&debug_cfg) {
@@ -6394,6 +6436,7 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             let _ = socket.send(Message::Text(event.to_string())).await;
             continue;
         }
+        antigravity_turns = true;
         let namespaces = crate::proxy::mappers::openai::namespace::NamespaceMap::from_tools(
             normalized.get("tools"),
         );
@@ -6551,6 +6594,22 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             .map(|(_, call_id, _, _)| call_id.clone())
             .collect();
     }
+}
+
+/// The public model a frame names, or the one it inherits from the session's last request.
+fn websocket_frame_model(payload: &Value, state: &WebsocketSessionState) -> Option<String> {
+    payload
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            state
+                .last_request
+                .as_ref()
+                .and_then(|request| request.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
 }
 
 fn should_handle_prewarm_locally(payload: &Value, state: &WebsocketSessionState) -> bool {

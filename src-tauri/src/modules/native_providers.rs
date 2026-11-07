@@ -343,4 +343,4 @@ pub fn epoch(value: &Value) -> Option<i64> {
 
 #[cfg(test)]
 #[path = "native_providers/tests.rs"]
-mod tests;
+pub(crate) mod tests;

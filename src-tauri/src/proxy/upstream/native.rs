@@ -3,7 +3,7 @@
 //! protocols; ChatGPT speaks Responses, bridged to Chat/Messages clients and passed
 //! through to Responses clients.
 #[path = "native_chatgpt.rs"]
-mod chatgpt;
+pub(super) mod chatgpt;
 use super::{
     chat_codec as codec,
     chat_relay::{Events, Relay},
