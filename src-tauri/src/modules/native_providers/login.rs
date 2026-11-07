@@ -495,6 +495,13 @@ fn salvage_chatgpt(a: &Account, pasted: &str, error: String) -> String {
             s.credentials.id_token = a.credentials.id_token.clone();
             s.credentials.chatgpt_account_id = a.credentials.chatgpt_account_id.clone();
             s.expires_at = a.expires_at;
+            // These are new credentials: like any new authorization they invalidate older
+            // operations in flight and revive an account its dead credential turned off,
+            // never one the administrator turned off.
+            s.revision = uuid::Uuid::new_v4().to_string();
+            s.enabled = s.enabled || s.credential_dead;
+            s.credential_dead = false;
+            s.auth_error = None;
             if !pasted.is_empty() {
                 store::add_fingerprints(
                     &mut s.credentials.imported_refresh_sha256,

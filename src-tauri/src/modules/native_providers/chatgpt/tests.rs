@@ -1246,7 +1246,8 @@ async fn chatgpt_wrong_row_reimport_persists_onto_the_matching_account() {
     );
     let tokens = import_token_response(true);
     let stored = store::get(Provider::ChatGpt, &owner.id).unwrap();
-    assert_eq!(stored.revision, owner.revision);
+    // Like any new authorization, the salvage invalidates older operations in flight.
+    assert_ne!(stored.revision, owner.revision);
     assert_eq!(stored.credentials.refresh_token, "rotated");
     assert_eq!(stored.credentials.access_token, tokens["access_token"]);
     assert_eq!(stored.credentials.id_token, tokens["id_token"]);
@@ -1263,6 +1264,52 @@ async fn chatgpt_wrong_row_reimport_persists_onto_the_matching_account() {
         .unwrap();
     assert!(again.contains("already saved"), "{again}");
     assert_eq!(token_requests(&server), 1);
+}
+
+#[tokio::test]
+async fn chatgpt_salvage_reenables_only_a_dead_credential_account() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let row = saved_chatgpt("other:u9");
+    let owner = saved_chatgpt("acc:u1");
+    // A dead refresh token disabled the token's own account.
+    store::update(Provider::ChatGpt, &owner.id, None, |a| {
+        a.enabled = false;
+        a.credential_dead = true;
+        a.auth_error = Some("invalid_grant".into());
+    })
+    .unwrap();
+    let _server = mock(200, &[], import_token_response(true), false).await;
+    login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!("new-rt"),
+        Some(&row.id),
+    )
+    .await
+    .err()
+    .unwrap();
+    let revived = store::get(Provider::ChatGpt, &owner.id).unwrap();
+    assert!(revived.enabled);
+    assert!(!revived.credential_dead);
+    assert_eq!(revived.auth_error, None);
+
+    // An account the administrator turned off stays off.
+    store::update(Provider::ChatGpt, &owner.id, None, |a| {
+        a.enabled = false;
+        a.credential_dead = false;
+    })
+    .unwrap();
+    login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!("newer-rt"),
+        Some(&row.id),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(!store::get(Provider::ChatGpt, &owner.id).unwrap().enabled);
 }
 
 #[tokio::test]
