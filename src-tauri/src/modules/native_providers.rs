@@ -124,7 +124,21 @@ impl Quota {
         }
     }
     pub fn exhausted(&self) -> bool {
-        !self.unlimited && now() - self.updated_at < 900 && self.remaining.is_some_and(|n| n <= 0.0)
+        if self.unlimited || !self.remaining.is_some_and(|n| n <= 0.0) {
+            return false;
+        }
+        // Percent windows reset at a known time (`expires_at`): a full window stays
+        // exhausted until then, however old the snapshot. Balance quotas have no such
+        // reset, so their snapshot is trusted only while fresh.
+        let at = now();
+        if self.unit == "%"
+            && self.packs.iter().any(|p| {
+                p.remaining.is_some_and(|n| n <= 0.0) && p.expires_at.is_some_and(|r| r > at)
+            })
+        {
+            return true;
+        }
+        at - self.updated_at < 900
     }
 }
 

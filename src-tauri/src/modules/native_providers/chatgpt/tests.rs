@@ -216,6 +216,31 @@ fn percent_quota_reflects_the_most_constrained_window() {
 }
 
 #[test]
+fn full_percent_window_stays_exhausted_until_its_reset() {
+    let now = crate::modules::native_providers::now();
+    // A snapshot taken an hour ago: past the 15-minute freshness window.
+    let at = now - 3600;
+    let full = |reset_after: &str| {
+        quota::from_headers(
+            &windows(
+                &[
+                    ("used-percent", "100"),
+                    ("window-minutes", "300"),
+                    ("reset-after-seconds", reset_after),
+                ],
+                &[("used-percent", "40"), ("window-minutes", "10080")],
+            ),
+            at,
+        )
+        .unwrap()
+    };
+    // The 5h window resets an hour from now: still exhausted.
+    assert!(full("7200").exhausted());
+    // The 5h window already reset: the stale snapshot no longer blocks the account.
+    assert!(!full("600").exhausted());
+}
+
+#[test]
 fn exhausted_until_from_body_or_full_window() {
     let at = 1000;
     let none = HeaderMap::new();
