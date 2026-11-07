@@ -1617,8 +1617,9 @@
       "authError": "認証情報が OpenAI に拒否され、アカウントは自動的に無効化されました。この行から再インポートしてください。"
     },
     "quota": {
-      "window5h": "5 時間ウィンドウ",
-      "window7d": "7 日ウィンドウ",
+      "windowMinutes": "{{count}} 分ウィンドウ",
+      "windowHours": "{{count}} 時間ウィンドウ",
+      "windowDays": "{{count}} 日ウィンドウ",
       "reset": "{{time}} にリセット",
       "used": "{{percent}}% 使用"
     }

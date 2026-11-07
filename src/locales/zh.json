@@ -86,8 +86,9 @@
       "authError": "凭证已被 OpenAI 拒绝，账号已自动停用。请在此行重新导入。"
     },
     "quota": {
-      "window5h": "5 小时窗口",
-      "window7d": "7 天窗口",
+      "windowMinutes": "{{count}} 分钟窗口",
+      "windowHours": "{{count}} 小时窗口",
+      "windowDays": "{{count}} 天窗口",
       "reset": "{{time}} 重置",
       "used": "已用 {{percent}}%"
     }

@@ -185,6 +185,30 @@ fn quota_windows_map_smaller_to_5h() {
 }
 
 #[test]
+fn quota_windows_are_named_by_their_reported_length() {
+    let at = 1000;
+    // A free account's long window is a month, not a week: the name follows the
+    // upstream's window-minutes, not the window's rank.
+    let monthly = quota::from_headers(
+        &windows(
+            &[("used-percent", "3"), ("window-minutes", "300")],
+            &[("used-percent", "1"), ("window-minutes", "43200")],
+        ),
+        at,
+    )
+    .unwrap();
+    assert_eq!(names(&monthly), ["5h", "30d"]);
+    for (minutes, name) in [("1440", "1d"), ("90", "90m"), ("10080", "7d"), ("60", "1h")] {
+        let q = quota::from_headers(
+            &windows(&[("used-percent", "1"), ("window-minutes", minutes)], &[]),
+            at,
+        )
+        .unwrap();
+        assert_eq!(names(&q), [name], "{minutes} minutes");
+    }
+}
+
+#[test]
 fn percent_quota_reflects_the_most_constrained_window() {
     let at = crate::modules::native_providers::now();
     let q = quota::from_headers(

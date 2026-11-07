@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { request } from '../../utils/request';
 import { isTauri } from '../../utils/env';
+import { quotaWindow } from '../../utils/quotaWindow';
 import ModalDialog from '../common/ModalDialog';
 import { showToast } from '../common/ToastContainer';
 import WorkBuddyEgressPanel, { WorkBuddyEgressCell, egressArgs, nativeEgress, type EgressView } from './WorkBuddyEgress';
@@ -19,12 +20,16 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 const percent = (value: number) => Math.min(100, Math.max(0, Math.round(value)));
 const labels: Record<NativeProvider, string> = { qoder: 'Qoder', chatgpt: 'ChatGPT' };
 
-// ChatGPT quota: one percentage bar per rate-limit window (5h / 7d) with its reset time.
+const windowKeys = { minute: 'nativeProviders.quota.windowMinutes', hour: 'nativeProviders.quota.windowHours', day: 'nativeProviders.quota.windowDays' } as const;
+
+// ChatGPT quota: one percentage bar per rate-limit window, named by its reported length
+// (e.g. 5 hours, 7 days, or 30 days on free accounts), with its reset time.
 function WindowBars({ quota, t }: { quota: NativeAccount['quota']; t: TFunction }) {
     if (!quota?.packs.length) return <div className="font-medium">—</div>;
     return <div className="space-y-2">{quota.packs.map(pack => {
         const used = percent(pack.used ?? 0);
-        const label = pack.name === '5h' ? t('nativeProviders.quota.window5h') : pack.name === '7d' ? t('nativeProviders.quota.window7d') : pack.name;
+        const window = quotaWindow(pack.name);
+        const label = window ? t(windowKeys[window.unit], { count: window.count }) : pack.name;
         return <div key={pack.name}>
             <div className="flex justify-between gap-2 text-xs"><span>{label}</span><span className="tabular-nums text-gray-500">{t('nativeProviders.quota.used', { percent: used })}</span></div>
             <div role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={used} className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"><div className={`h-full ${used >= 90 ? 'bg-red-500' : used >= 70 ? 'bg-amber-500' : 'bg-green-500'}`} style={{ width: `${used}%` }} /></div>
