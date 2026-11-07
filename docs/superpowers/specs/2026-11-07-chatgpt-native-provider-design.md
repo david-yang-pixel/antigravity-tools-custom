@@ -128,8 +128,8 @@ GET /v1/responses (WS, master key only) ─► handle_websocket_session
   - 403 HTML or Cloudflare markers (`cf-mitigated: challenge`, "Just a moment", `error code: 1010`)
     → no account penalty, 502 to the client; other 403 → auth cooldown;
   - context-length, policy and other 4xx validation errors → passed to the client unchanged;
-  - upstream answers are **not replayed on another account** (existing native policy); only
-    preparation failures and one connection failure fail over.
+  - each classification also says whether the request may move to another account (see
+    "Failover policy" in §4).
 - `client.rs` — `send(account, model, body, deadline)` POSTs to
   `…/codex/responses` (or `…/compact`) with `Authorization`, `chatgpt-account-id`, identity
   headers, `accept: text/event-stream` (compact: `application/json`), `session_id` and
@@ -181,7 +181,25 @@ Protocol-generic converters so a future Responses-mode custom upstream can reuse
 - `/responses/compact`: for ChatGPT only, the same failover path with a unary JSON exchange;
   other native sources keep the current 400.
 - `open()` becomes generic over the per-wire normalizer/output check; failover staging
-  (`Reached`, one connection failover, same-account auth retry) is unchanged.
+  (`Reached`, same-account auth retry) is kept.
+- **Failover policy** is per provider (`Provider::failover()`):
+  - Qoder keeps today's conservative policy byte-for-byte: an upstream answer stays on the
+    account that received it; only preparation failures and one connection failure fail over.
+  - ChatGPT replays on another account when the upstream answered **before any client-visible
+    output** with: 429 (quota or transient), 402, 403 (non-Cloudflare), 401 after the
+    same-account refresh retry failed, 405, 529, any 5xx, a 400 capacity/transient message
+    (`server_is_overloaded`, `slow_down`, "selected model is at capacity", "An error occurred
+    while processing your request"), a 400 model-not-found, an account/workspace deactivation
+    code, or a pre-output stream `error`/`response.failed` event of those kinds. Connection
+    failures fail over as well.
+  - Each failed account gets its classified cooldown first (quota → until reset; transient
+    429 → `Retry-After` or 5 s; 5xx/529/capacity → short cooldown without counting as an
+    account fault), so the scheduler does not pick it again for this request or the next ones.
+  - Bounds: at most 3 accounts per request (`MAX_CHATGPT_ACCOUNTS = 3`), every attempt
+    within the request deadline; when all attempts fail, the last upstream error is returned.
+  - Never replayed: context-length, content-policy and other 4xx validation errors, and any
+    failure after output has reached the client (passed through as a stream error).
+  - Cloudflare/HTML 403 fails over without penalizing the account (route problem, not account).
 - Probe (`native::probe`) sends a minimal Responses request for ChatGPT and checks for a
   `response.output_text.delta` or a completed response.
 - Response headers `x-upstream-provider`, `x-account-email`, `x-mapped-model` as today, so the
@@ -207,7 +225,13 @@ sessions are master-key only, so no per-turn user billing is introduced.
   (`previous_response_id` kept, `background` removed, model rewritten to the leased native id).
   Upstream → client: events relayed with `response.model` rewritten to the public alias.
 - Upstream quota headers from the handshake and `usage_limit_reached` errors update the account
-  exactly like HTTP. Upstream close/reconnect: up to 3 reconnects with 200 ms–2 s backoff while
+  exactly like HTTP. A failed handshake, or a turn that fails before its first output event with
+  a failover-eligible error (§4 policy), moves the session to another account (at most 3
+  accounts per turn). Upstream response state is per account, so a turn that carries
+  `previous_response_id` is not silently replayed without its context: after switching
+  accounts the relay answers that turn with an `error` event of code
+  `previous_response_not_found`, and the client resends full history, which the new account
+  serves. Turns without `previous_response_id` are replayed on the new account directly. Upstream close/reconnect: up to 3 reconnects with 200 ms–2 s backoff while
   no turn is in flight; a mid-turn drop sends an `error` event and the client retries.
   `previous_response_not_found` is passed to the client (Codex then resends full history).
 - Each completed turn records success/failure on the lease and the account runtime counters
@@ -240,6 +264,9 @@ Mock upstream (local axum server) — no live chatgpt.com calls in tests:
 - `responses_wire`: Chat→Responses request; Responses SSE → Chat chunks (text, reasoning, tool
   calls, finish reasons, usage); aggregate (completed, empty output rebuild, failed).
 - Quota header window mapping, 429 classification and cooldown, Cloudflare 403 no-penalty.
+- Failover: 429/5xx/capacity before output moves to the next account with the first account
+  cooled down; at most 3 accounts; validation errors and post-output failures never replay;
+  Qoder's existing failover tests unchanged.
 - `native::route` end-to-end against the mock for Chat, Messages, Responses streaming and
   non-streaming, and compact; existing `Provider::ALL` loop tests cover ChatGPT.
 - WebSocket relay against a mock `wss` upstream: model rewrite, `previous_response_id` kept,
