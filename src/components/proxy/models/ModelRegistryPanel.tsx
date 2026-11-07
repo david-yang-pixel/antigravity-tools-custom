@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { AlertTriangle, CheckCircle2, CircleHelp, Download, Loader2, RefreshCw, Search } from 'lucide-react';
 import { request } from '../../../utils/request';
 import type { CandidateModel, DiscoverUpstreamModelsRequest, ModelRegistryView, ModelVerificationReport, ModelVerificationResult, PublishedModel, SaveModelRegistryRequest, UpstreamDiscoveryReport, VerificationPrompt, VerifyModelCandidatesRequest } from '../../../types/modelRegistry';
-import { candidateFor, capabilityLabels, capabilityScope, extraTargetOptions, filterPublications, formatCheckedAt, mergePublications, nativeTargets, needsUnverifiedConfirmation, newPublicationId, pooledSource, publicationError, registryError, saveRequest, verificationLabels } from './registryLogic';
+import { candidateFor, capabilityLabels, capabilityScope, extraTargetOptions, filterPublications, formatCheckedAt, mergePublications, nativeTargets, needsUnverifiedConfirmation, newPublicationId, pooledSource, primaryTargetOptions, publicationError, registryError, saveRequest, verificationLabels, withPrimaryTarget } from './registryLogic';
 import RegistryDialog from './RegistryDialog';
 import UpstreamModels, { hasRealm, type UpstreamPick } from './UpstreamModels';
 import './modelRegistry.css';
@@ -220,7 +220,16 @@ export default function ModelRegistryPanel({ advancedContent, initialTab = 'publ
             <fieldset disabled={!!busy} className="min-w-0 space-y-4">
                 {action.kind === 'publish' && <><p className="registry-muted">公开 ID 是客户端名称，明确绑定单个来源及其原生目标，记录 ID 保持稳定。更改迁移项公开 ID 会失去旧绑定的免验证资格。 / A public ID binds one source and its native target(s); record identity stays stable. Renaming a legacy ID removes its verification exemption.</p>
                     {action.drafts.map((p, index) => <div key={p.id} className="space-y-2 border-b border-gray-200 dark:border-base-300 pb-4">
-                        <p className="text-xs break-words"><strong>{sourceName(p.source_id)}</strong> → <code>{p.native_model}</code></p>
+                        {(() => {
+                            const options = primaryTargetOptions(view, p);
+                            return <label className="block text-xs font-medium">上游模型 / Upstream target · <strong>{sourceName(p.source_id)}</strong>
+                                <select className="registry-input mt-1 font-mono" value={p.native_model} onChange={e => setAction({ ...action, drafts: action.drafts.map((d, i) => i === index ? withPrimaryTarget(d, e.target.value) : d) })}>
+                                    {!options.some(c => c.native_model === p.native_model) && <option value={p.native_model}>{p.native_model}</option>}
+                                    {options.map(c => <option key={c.id} value={c.native_model}>{c.native_model} · {verificationLabels[c.verification_status]}</option>)}
+                                </select>
+                                <span className="registry-muted mt-1 block font-normal">更换上游目标视为新绑定：公开 ID 不变，新目标需重新验证或确认风险。 / Changing the target is a new binding: the public ID stays, the new target needs verification or explicit consent.</span>
+                            </label>;
+                        })()}
                         <label className="block text-xs font-medium">公开 ID / Alias<input className="registry-input mt-1 font-mono" value={p.public_id} onChange={e => setAction({ ...action, drafts: action.drafts.map((d, i) => i === index ? { ...d, public_id: e.target.value } : d) })} /></label>
                         <label className="block text-xs font-medium">显示名称 / Display name<input className="registry-input mt-1" value={p.display_name} onChange={e => setAction({ ...action, drafts: action.drafts.map((d, i) => i === index ? { ...d, display_name: e.target.value } : d) })} /></label>
                         <Verification candidate={candidateFor(view, p)} />

@@ -21,6 +21,20 @@ export function extraTargetOptions(view: ModelRegistryView, draft: PublishedMode
         .sort((a, b) => a.native_model.localeCompare(b.native_model));
 }
 
+/** Same-source candidates a publication may take as its primary target; the current one stays listed. */
+export function primaryTargetOptions(view: ModelRegistryView, draft: PublishedModel): CandidateModel[] {
+    return view.candidates.filter(c => c.source_id === draft.source_id
+        && (c.native_model === draft.native_model || (!c.ignored && c.verification_status !== 'unavailable')))
+        .sort((a, b) => a.native_model.localeCompare(b.native_model));
+}
+/** Rebinds the primary target. Promoting a checked extra swaps it with the old primary, so the routed set is kept. */
+export function withPrimaryTarget(draft: PublishedModel, native: string): PublishedModel {
+    if (native === draft.native_model) return draft;
+    const { extra_native_models: extras = [], ...rest } = draft;
+    const next = extras.includes(native) ? extras.map(id => id === native ? draft.native_model : id) : extras;
+    return next.length ? { ...rest, native_model: native, extra_native_models: next } : { ...rest, native_model: native };
+}
+
 export function newPublicationId(): string {
     // randomUUID is absent on non-secure remote Web origins. IDs are identities,
     // not secrets; retain the generated value in the draft across retries.
