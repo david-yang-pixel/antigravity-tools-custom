@@ -166,3 +166,38 @@ pub async fn test_native_account_egress(request: SessionRequest) -> Result<egres
     )
     .await
 }
+
+#[derive(Deserialize)]
+pub struct ClientVersionCheck {
+    #[serde(default)]
+    pub refresh: bool,
+}
+#[derive(Deserialize)]
+pub struct ClientVersionSave {
+    /// A version to advertise, or null to return to the built-in default.
+    pub version: Option<String>,
+}
+/// Advertised Codex CLI client version and the latest public Codex release.
+#[tauri::command]
+pub async fn check_chatgpt_client_version(
+    request: ClientVersionCheck,
+) -> Result<native::chatgpt::release::VersionView, String> {
+    Ok(native::chatgpt::release::status(true, request.refresh).await)
+}
+/// Saves the advertised Codex client version. Each new request uses it at once, and every
+/// account's model catalog is refetched on the next maintenance pass.
+#[tauri::command]
+pub async fn save_chatgpt_client_version(
+    request: ClientVersionSave,
+) -> Result<native::chatgpt::release::VersionView, String> {
+    let version = request.version;
+    tokio::task::spawn_blocking(move || {
+        if native::chatgpt::release::save(version.as_deref())? {
+            native::accounts::expire_catalogs(Provider::ChatGpt)?;
+        }
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|_| "Codex client version task failed")??;
+    Ok(native::chatgpt::release::status(false, false).await)
+}

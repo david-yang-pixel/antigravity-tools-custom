@@ -1623,6 +1623,26 @@
       "windowDays": "{{count}} 日ウィンドウ",
       "reset": "{{time}} にリセット",
       "used": "{{percent}}% 使用"
+    },
+    "clientVersion": {
+      "title": "Codex CLI バージョン",
+      "source_default": "内蔵デフォルト",
+      "source_saved": "手動で更新済み",
+      "source_env": "環境変数で固定",
+      "latest": "公式最新 {{version}}",
+      "checking": "確認中",
+      "failed": "確認に失敗",
+      "available": "新しいバージョンあり",
+      "current": "最新です",
+      "unknown": "未確認",
+      "check": "更新を確認",
+      "update": "{{version}} に更新",
+      "reset": "デフォルト {{version}} に戻す",
+      "saved": "Codex クライアントのバージョンを {{version}} に切り替えました",
+      "hint": "ChatGPT へのリクエストで名乗る Codex CLI のバージョンで、上流が提供するモデル一覧を左右します（新モデルには通常新しいバージョンが必要）。更新は即時反映され、各アカウントのモデル一覧は次回のバックグラウンド保守で更新されます。「残高とモデルを同期」ですぐ更新することもできます。名乗るバージョンを変えるだけで、何もダウンロード・インストールしません。",
+      "envLocked": "バージョンは環境変数 ABV_CHATGPT_CLIENT_VERSION で固定されているため、ここでは変更できません。デプロイ設定を変更して再起動してください。",
+      "checkedAt": "最終確認成功：{{time}}",
+      "failureHint": "公式リリース情報（npm / GitHub）を取得できません。ネットワークまたは API プロキシの上流プロキシ設定を確認して再試行してください。"
     }
   }
 }

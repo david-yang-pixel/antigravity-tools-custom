@@ -8,6 +8,7 @@ import { quotaWindow } from '../../utils/quotaWindow';
 import ModalDialog from '../common/ModalDialog';
 import Pagination from '../common/Pagination';
 import { showToast } from '../common/ToastContainer';
+import ChatGptClientVersion from './ChatGptClientVersion';
 import WorkBuddyEgressPanel, { WorkBuddyEgressCell, egressArgs, nativeEgress, type EgressView } from './WorkBuddyEgress';
 import { nativeAccountStatus, type BatchItem, type NativeAccount, type NativeProvider, type NativeSettings } from '../../types/nativeProviders';
 
@@ -125,6 +126,7 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
                 </div>
             </div>
             <WorkBuddyEgressPanel view={egress} onChange={setEgress} api={egressApi} description={t('nativeProviders.egressDescription', { provider: label })} />
+            {provider === 'chatgpt' && <ChatGptClientVersion onSaved={() => void load()} />}
             {error && <div role="alert" className="flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"><span className="break-all">{error}</span><button aria-label={t('nativeProviders.dismiss')} onClick={() => setError('')}><X size={16} /></button></div>}
             {settings && !settings.enabled && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">{t('nativeProviders.sourceDisabled')} <Link className="underline" to="/api-proxy?section=sources">{t('nativeProviders.sourceSettingsLink')}</Link></p>}
             {importing && <div className="space-y-4 rounded-xl border border-blue-200 p-4 dark:border-blue-900">

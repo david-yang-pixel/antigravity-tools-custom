@@ -63,6 +63,26 @@
       "windowDays": "{{count}} 天窗口",
       "reset": "{{time}} 重置",
       "used": "已用 {{percent}}%"
+    },
+    "clientVersion": {
+      "title": "Codex CLI 版本",
+      "source_default": "内置默认",
+      "source_saved": "已手动更新",
+      "source_env": "环境变量锁定",
+      "latest": "官方最新 {{version}}",
+      "checking": "正在检测",
+      "failed": "检测失败",
+      "available": "有新版本",
+      "current": "已是最新",
+      "unknown": "尚未检测",
+      "check": "检查更新",
+      "update": "更新到 {{version}}",
+      "reset": "恢复默认 {{version}}",
+      "saved": "Codex 客户端版本已切换为 {{version}}",
+      "hint": "请求 ChatGPT 时声明的 Codex CLI 版本，决定上游开放的模型目录（新模型通常需要新版本）。更新立即生效，各账号的模型目录会在下次后台维护时刷新，也可点“同步余额与模型”立即刷新。只修改声明版本，不会下载或安装任何程序。",
+      "envLocked": "版本由环境变量 ABV_CHATGPT_CLIENT_VERSION 锁定，页面无法修改；请调整部署配置后重启。",
+      "checkedAt": "上次成功检测：{{time}}",
+      "failureHint": "暂时无法查询官方版本（npm / GitHub），请检查网络或 API 反代中的上游代理后重试。"
     }
   },
   "topup": {

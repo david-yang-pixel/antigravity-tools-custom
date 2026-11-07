@@ -7,25 +7,65 @@ pub const DEFAULT_CLIENT_VERSION: &str = "0.167.0";
 const MIN_CLIENT_VERSION: (u64, u64, u64) = (0, 144, 0);
 const ORIGINATOR: &str = "codex_cli_rs";
 
-fn parse(version: &str) -> Option<(u64, u64, u64)> {
+/// Strict `x.y.z`: a pre-release or build suffix is never a stable Codex release.
+pub fn parse(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.trim().split('.').map(|p| p.parse::<u64>().ok());
     let v = (parts.next()??, parts.next()??, parts.next()??);
     parts.next().is_none().then_some(v)
 }
 
+/// `version` trimmed, if it parses and is not below the upstream floor.
+pub fn valid(version: &str) -> Option<String> {
+    parse(version)
+        .is_some_and(|v| v >= MIN_CLIENT_VERSION)
+        .then(|| version.trim().to_string())
+}
+
+pub fn min_version() -> String {
+    let (major, minor, patch) = MIN_CLIENT_VERSION;
+    format!("{major}.{minor}.{patch}")
+}
+
+/// Whether `candidate` is a higher version than `current`; `None` if either is unparsable.
+pub fn newer(candidate: &str, current: &str) -> Option<bool> {
+    Some(parse(candidate)? > parse(current)?)
+}
+
+#[cfg(test)]
 fn pick(configured: Option<&str>) -> String {
     configured
-        .filter(|v| parse(v).is_some_and(|v| v >= MIN_CLIENT_VERSION))
-        .map(|v| v.trim().to_string())
+        .and_then(valid)
         .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.into())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VersionSource {
+    /// `ABV_CHATGPT_CLIENT_VERSION`: headless deployments pin it; the UI cannot change it.
+    Env,
+    /// Saved from the accounts page.
+    Saved,
+    Default,
+}
+
+/// The advertised version and where it came from: a valid environment override, then the
+/// saved choice, then the built-in default. Invalid or too-old values fall through.
+pub fn resolve() -> (String, VersionSource) {
+    if let Some(v) = std::env::var(Provider::ChatGpt.env("CLIENT_VERSION"))
+        .ok()
+        .as_deref()
+        .and_then(valid)
+    {
+        return (v, VersionSource::Env);
+    }
+    if let Some(v) = super::release::saved() {
+        return (v, VersionSource::Saved);
+    }
+    (DEFAULT_CLIENT_VERSION.into(), VersionSource::Default)
+}
+
 pub fn client_version() -> String {
-    pick(
-        std::env::var(Provider::ChatGpt.env("CLIENT_VERSION"))
-            .ok()
-            .as_deref(),
-    )
+    resolve().0
 }
 
 pub fn user_agent(version: &str) -> String {

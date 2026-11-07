@@ -1623,6 +1623,26 @@
       "windowDays": "{{count}}일 구간",
       "reset": "{{time}}에 초기화",
       "used": "{{percent}}% 사용"
+    },
+    "clientVersion": {
+      "title": "Codex CLI 버전",
+      "source_default": "기본 내장값",
+      "source_saved": "수동 업데이트됨",
+      "source_env": "환경 변수로 고정",
+      "latest": "공식 최신 {{version}}",
+      "checking": "확인 중",
+      "failed": "확인 실패",
+      "available": "새 버전 있음",
+      "current": "최신 버전",
+      "unknown": "아직 확인 안 함",
+      "check": "업데이트 확인",
+      "update": "{{version}}(으)로 업데이트",
+      "reset": "기본값 {{version}}(으)로 복원",
+      "saved": "Codex 클라이언트 버전을 {{version}}(으)로 전환했습니다",
+      "hint": "ChatGPT 요청 시 알리는 Codex CLI 버전으로, 업스트림이 제공하는 모델 목록을 결정합니다(새 모델은 보통 새 버전이 필요). 업데이트는 즉시 적용되며, 각 계정의 모델 목록은 다음 백그라운드 유지 관리 때 갱신됩니다. \"잔액 및 모델 동기화\"로 바로 갱신할 수도 있습니다. 알리는 버전만 바뀌며 아무것도 다운로드하거나 설치하지 않습니다.",
+      "envLocked": "버전이 환경 변수 ABV_CHATGPT_CLIENT_VERSION으로 고정되어 여기서 변경할 수 없습니다. 배포 설정을 수정한 뒤 다시 시작하세요.",
+      "checkedAt": "마지막 성공 확인: {{time}}",
+      "failureHint": "공식 릴리스 정보(npm / GitHub)를 가져올 수 없습니다. 네트워크 또는 API 프록시의 업스트림 프록시 설정을 확인한 뒤 다시 시도하세요."
     }
   }
 }

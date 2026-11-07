@@ -20,6 +20,8 @@ pub mod models;
 pub mod payload;
 #[path = "chatgpt/quota.rs"]
 pub mod quota;
+#[path = "chatgpt/release.rs"]
+pub mod release;
 
 #[cfg(test)]
 #[path = "chatgpt/tests.rs"]

@@ -1623,6 +1623,26 @@
       "windowDays": "{{count}}-day window",
       "reset": "Resets {{time}}",
       "used": "{{percent}}% used"
+    },
+    "clientVersion": {
+      "title": "Versión de Codex CLI",
+      "source_default": "Predeterminada",
+      "source_saved": "Actualizada manualmente",
+      "source_env": "Fijada por entorno",
+      "latest": "Última oficial {{version}}",
+      "checking": "Comprobando",
+      "failed": "Error al comprobar",
+      "available": "Actualización disponible",
+      "current": "Al día",
+      "unknown": "Sin comprobar",
+      "check": "Buscar actualizaciones",
+      "update": "Actualizar a {{version}}",
+      "reset": "Restaurar predeterminada {{version}}",
+      "saved": "Versión del cliente Codex cambiada a {{version}}",
+      "hint": "La versión de Codex CLI anunciada a ChatGPT decide qué modelos ofrece el servidor (los modelos nuevos suelen requerir una versión más reciente). El cambio se aplica al instante; el catálogo de modelos de cada cuenta se actualiza en su próximo mantenimiento en segundo plano, o de inmediato con «Sincronizar saldo y modelos». Solo cambia la versión anunciada: no se descarga ni instala nada.",
+      "envLocked": "La versión está fijada por la variable de entorno ABV_CHATGPT_CLIENT_VERSION y no puede cambiarse aquí; modifica la configuración del despliegue y reinicia.",
+      "checkedAt": "Última comprobación correcta: {{time}}",
+      "failureHint": "No se puede consultar la versión oficial (npm / GitHub) ahora. Revisa la red o el proxy upstream en Proxy de API y vuelve a intentarlo."
     }
   }
 }

@@ -1,7 +1,7 @@
 use super::{
     auth, client, endpoints, errors, headers, identity, models,
     payload::{self, Mode},
-    quota,
+    quota, release,
 };
 use crate::modules::native_providers::{
     http::{Failure, Penalty},
@@ -69,6 +69,7 @@ fn claims_without_account_id_is_import_error() {
 
 #[test]
 fn client_version_respects_floor() {
+    let _sandbox = Sandbox::new();
     for (configured, expected) in [
         (Some("0.150.1"), "0.150.1"),
         (Some("0.144.0"), "0.144.0"),
@@ -89,6 +90,67 @@ fn client_version_respects_floor() {
     std::env::set_var("ABV_CHATGPT_CLIENT_VERSION", "0.100.0");
     assert_eq!(headers::client_version(), "0.167.0");
     std::env::remove_var("ABV_CHATGPT_CLIENT_VERSION");
+}
+
+#[test]
+fn saved_client_version_sits_between_env_and_default() {
+    let _sandbox = Sandbox::new();
+    assert_eq!(
+        headers::resolve(),
+        ("0.167.0".into(), headers::VersionSource::Default)
+    );
+    assert!(release::save(Some("0.100.0")).is_err());
+    assert!(release::save(Some("0.170.0-alpha.1")).is_err());
+    assert!(release::save(Some(" 0.170.0 ")).unwrap());
+    assert_eq!(
+        headers::resolve(),
+        ("0.170.0".into(), headers::VersionSource::Saved)
+    );
+    assert!(!release::save(Some("0.170.0")).unwrap());
+    // A valid env override wins and locks the saved choice; an invalid one falls through.
+    std::env::set_var("ABV_CHATGPT_CLIENT_VERSION", "0.150.1");
+    assert_eq!(
+        headers::resolve(),
+        ("0.150.1".into(), headers::VersionSource::Env)
+    );
+    assert!(release::save(None).is_err());
+    std::env::set_var("ABV_CHATGPT_CLIENT_VERSION", "garbage");
+    assert_eq!(headers::client_version(), "0.170.0");
+    std::env::remove_var("ABV_CHATGPT_CLIENT_VERSION");
+    assert!(release::save(None).unwrap());
+    assert_eq!(headers::client_version(), "0.167.0");
+}
+
+#[test]
+fn saved_client_version_expires_catalogs() {
+    let _sandbox = Sandbox::new();
+    let mut a = Account::new(Provider::ChatGpt, Realm::Global);
+    a.uid = "u".into();
+    a.credentials.access_token = "t".into();
+    a.models_updated_at = 100;
+    a.next_sync_at = i64::MAX;
+    let a = store::upsert(a, None).unwrap();
+    crate::modules::native_providers::accounts::expire_catalogs(Provider::ChatGpt).unwrap();
+    let stored = store::get(Provider::ChatGpt, &a.id).unwrap();
+    assert_eq!((stored.models_updated_at, stored.next_sync_at), (0, 0));
+}
+
+#[test]
+fn latest_codex_release_is_stable_only() {
+    assert_eq!(
+        release::parse_npm(br#"{"name":"@openai/codex","version":"0.170.0"}"#).unwrap(),
+        "0.170.0"
+    );
+    assert!(release::parse_npm(br#"{"version":"0.171.0-alpha.2"}"#).is_err());
+    assert!(release::parse_npm(b"not json").is_err());
+    assert_eq!(
+        release::parse_github(br#"{"tag_name":"rust-v0.170.0","prerelease":false}"#).unwrap(),
+        "0.170.0"
+    );
+    assert!(release::parse_github(br#"{"tag_name":"rust-v0.171.0","prerelease":true}"#).is_err());
+    assert_eq!(headers::newer("0.170.0", "0.167.0"), Some(true));
+    assert_eq!(headers::newer("0.167.0", "0.167.0"), Some(false));
+    assert_eq!(headers::newer("x", "0.167.0"), None);
 }
 
 #[test]

@@ -124,6 +124,14 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
         stored.auth_error = None;
     })?)
 }
+/// Makes every account's catalog due on the next maintenance pass, e.g. after the
+/// advertised client version changed (it decides which models upstream offers).
+pub fn expire_catalogs(provider: Provider) -> Result<(), String> {
+    store::update_all(provider, |a| {
+        a.models_updated_at = 0;
+        a.next_sync_at = 0;
+    })
+}
 pub async fn sync(provider: Provider, id: &str, force: bool) -> Result<AccountView, String> {
     sync_metadata(provider, id, force, true).await
 }

@@ -1604,6 +1604,26 @@
       "windowDays": "{{count}}-day window",
       "reset": "Resets {{time}}",
       "used": "{{percent}}% used"
+    },
+    "clientVersion": {
+      "title": "Codex CLI sürümü",
+      "source_default": "Yerleşik varsayılan",
+      "source_saved": "Elle güncellendi",
+      "source_env": "Ortam değişkeniyle sabit",
+      "latest": "Resmi en son {{version}}",
+      "checking": "Denetleniyor",
+      "failed": "Denetim başarısız",
+      "available": "Güncelleme var",
+      "current": "Güncel",
+      "unknown": "Henüz denetlenmedi",
+      "check": "Güncellemeleri denetle",
+      "update": "{{version}} sürümüne güncelle",
+      "reset": "Varsayılana dön {{version}}",
+      "saved": "Codex istemci sürümü {{version}} olarak değiştirildi",
+      "hint": "ChatGPT'ye bildirilen Codex CLI sürümü, sunucunun sunduğu model kataloğunu belirler (yeni modeller genellikle daha yeni bir sürüm ister). Değişiklik hemen uygulanır; her hesabın model kataloğu bir sonraki arka plan bakımında ya da “Bakiye ve modelleri eşitle” ile hemen yenilenir. Yalnızca bildirilen sürüm değişir: hiçbir şey indirilmez veya kurulmaz.",
+      "envLocked": "Sürüm ABV_CHATGPT_CLIENT_VERSION ortam değişkeniyle sabitlendiği için burada değiştirilemez; dağıtım yapılandırmasını düzenleyip yeniden başlatın.",
+      "checkedAt": "Son başarılı denetim: {{time}}",
+      "failureHint": "Resmi sürüm bilgisine (npm / GitHub) şu an ulaşılamıyor. Ağı veya API Proxy altındaki üst proxy ayarını kontrol edip yeniden deneyin."
     }
   }
 }
