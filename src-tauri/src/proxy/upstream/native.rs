@@ -1,9 +1,14 @@
-//! Native account dispatch (Qoder). Admission, billing and monitor middleware
-//! have already run. One shared Chat codec/relay serves all three client protocols.
+//! Native account dispatch (Qoder, ChatGPT). Admission, billing and monitor middleware
+//! have already run. Chat-wire providers share one Chat codec/relay for all three client
+//! protocols; ChatGPT speaks Responses, bridged to Chat/Messages clients and passed
+//! through to Responses clients.
+#[path = "native_chatgpt.rs"]
+mod chatgpt;
 use super::{
     chat_codec as codec,
     chat_relay::{Events, Relay},
     error_response, published_request,
+    responses_relay::ResponsesRelay,
 };
 use crate::modules::native_providers::{
     self as native, accounts,
@@ -25,6 +30,52 @@ use std::{collections::HashSet, time::Duration};
 
 type NativeEvents = BoxStream<'static, Result<String, Failure>>;
 
+/// How one exchange's upstream answer is normalized and when it counts as output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireMode {
+    /// Chat chunks from a Chat-wire provider.
+    Chat,
+    /// Responses events converted to Chat chunks.
+    ResponsesToChat,
+    /// Responses events relayed as they are.
+    Passthrough,
+    /// One JSON answer (compaction).
+    Unary,
+}
+impl WireMode {
+    fn carries_output(self) -> fn(&str) -> bool {
+        match self {
+            Self::Chat | Self::ResponsesToChat => carries_output,
+            Self::Passthrough => chatgpt::carries_event,
+            Self::Unary => |_| true,
+        }
+    }
+}
+/// Everything an attempt sends besides the body.
+#[derive(Clone, Copy)]
+struct Call<'a> {
+    mode: WireMode,
+    /// Client headers; providers forward only their own allow-list.
+    forwarded: &'a HeaderMap,
+    /// Tenant scope and conversation key of provider-side session ids.
+    scope: &'a str,
+    conversation: &'a str,
+}
+/// The upstream body, wire mode and conversation keys of one client request.
+struct Prepared {
+    body: Value,
+    mode: WireMode,
+    /// Scheduler affinity key.
+    session: String,
+    /// Key of provider-side session ids (ChatGPT: `prompt_cache_key`, else `session`).
+    conversation: String,
+}
+/// Accounts one ChatGPT request may try when answers are classified as failover.
+const MAX_CHATGPT_ACCOUNTS: usize = 3;
+/// Leases one Qoder request may take (unchanged).
+const MAX_QODER_ATTEMPTS: usize = 5;
+const COMPACT_PATH: &str = "/responses/compact";
+
 pub async fn route(
     State(state): State<crate::proxy::server::AppState>,
     request: Request,
@@ -42,12 +93,14 @@ pub async fn route(
     let Some(provider) = Provider::from_source(&published.source_id) else {
         return next.run(request).await;
     };
-    let Some(protocol) = codec::Protocol::for_path(request.uri().path()) else {
+    let protocol = codec::Protocol::for_path(request.uri().path());
+    let compact = request.uri().path() == COMPACT_PATH && provider == Provider::ChatGpt;
+    if protocol.is_none() && !compact {
         return failed(Failure::new(
             400,
             "This source supports Chat Completions, HTTP Responses and Messages",
         ));
-    };
+    }
     let (parts, body) = request.into_parts();
     let limit = std::env::var("ABV_MAX_BODY_SIZE")
         .ok()
@@ -63,40 +116,64 @@ pub async fn route(
     };
     let streaming = payload["stream"] == true;
     let namespaced = codec::namespaced_tools(&payload);
-    let payload = match codec::request_for(protocol, payload, dialect(provider)) {
-        Ok(p) => super::openai_compat::prepare(p, &published.native_model),
-        Err(e) => return failed(Failure::new(400, e)),
-    };
-    if let Err(e) = representable(provider, &payload) {
-        return failed(e);
-    }
-    let capture = parts
-        .extensions
-        .get::<crate::proxy::monitor::UpstreamRequestBodyHolder>()
-        .cloned();
-    if let Some(capture) = &capture {
-        capture.set_value(&payload);
-    }
     let scope = parts
         .extensions
         .get::<crate::proxy::middleware::auth::UserTokenIdentity>()
         .map(|identity| identity.token_id.as_str())
         .unwrap_or("administrator");
-    let session = SessionManager::account_session_key(scope, &payload);
+    let prepared = match provider {
+        Provider::Qoder => {
+            let protocol = protocol.expect("checked above");
+            let payload = match codec::request_for(protocol, payload, dialect(provider)) {
+                Ok(p) => super::openai_compat::prepare(p, &published.native_model),
+                Err(e) => return failed(Failure::new(400, e)),
+            };
+            if let Err(e) = representable(provider, &payload) {
+                return failed(e);
+            }
+            let session = SessionManager::account_session_key(scope, &payload);
+            Prepared {
+                body: payload,
+                mode: WireMode::Chat,
+                conversation: session.clone(),
+                session,
+            }
+        }
+        Provider::ChatGpt => {
+            match chatgpt::prepare(protocol, payload, &published.native_model, scope) {
+                Ok(prepared) => prepared,
+                Err(e) => return failed(e),
+            }
+        }
+    };
+    let capture = parts
+        .extensions
+        .get::<crate::proxy::monitor::UpstreamRequestBodyHolder>()
+        .cloned();
+    if let Some(capture) = &capture {
+        capture.set_value(&prepared.body);
+    }
     let policy = AccountSchedulingPolicy::live(&state.token_manager, None).await;
     let targets: Vec<String> = published
         .native_models()
         .into_iter()
         .map(str::to_owned)
         .collect();
-    let (events, account, native_model) = match open(
+    let call = Call {
+        mode: prepared.mode,
+        forwarded: &parts.headers,
+        scope,
+        conversation: &prepared.conversation,
+    };
+    let (events, account, native_model, upstream) = match open(
         provider,
         &targets,
-        payload,
+        prepared.body,
         Duration::from_secs(state.request_timeout.clamp(1, 3600)),
-        &session,
+        &prepared.session,
         &policy,
         capture.as_ref(),
+        call,
     )
     .await
     {
@@ -116,24 +193,52 @@ pub async fn route(
             headers.insert(key, value);
         }
     }
-    Relay {
-        protocol,
-        alias: published.public_id,
-        namespaced,
-        headers,
-        error_code: "native_upstream_failed",
+    if let Some(turn) = upstream.get("x-codex-turn-state") {
+        headers.insert("x-codex-turn-state", turn.clone());
     }
-    .run(events, streaming)
-    .await
+    let error_code = "native_upstream_failed";
+    match (prepared.mode, protocol) {
+        (WireMode::Chat | WireMode::ResponsesToChat, Some(protocol)) => {
+            Relay {
+                protocol,
+                alias: published.public_id,
+                namespaced,
+                headers,
+                error_code,
+            }
+            .run(events, streaming)
+            .await
+        }
+        (WireMode::Unary, _) => {
+            ResponsesRelay {
+                alias: published.public_id,
+                headers,
+                error_code,
+            }
+            .unary(events)
+            .await
+        }
+        _ => {
+            ResponsesRelay {
+                alias: published.public_id,
+                headers,
+                error_code,
+            }
+            .run(events, streaming)
+            .await
+        }
+    }
 }
 /// Request features each provider's wire payload actually carries. Qoder rebuilds its
 /// own request without a structured-output field, so `response_format` / Responses
 /// `text.format` must be rejected up front instead of silently running unconstrained.
 fn dialect(provider: Provider) -> codec::Dialect {
     match provider {
-        Provider::Qoder | Provider::ChatGpt => codec::Dialect {
+        Provider::Qoder => codec::Dialect {
             structured_output: false,
         },
+        // The Responses wire carries `text.format`.
+        Provider::ChatGpt => codec::Dialect::OPENAI_COMPATIBLE,
     }
 }
 /// Request constraints a provider's wire payload cannot carry are request errors (400)
@@ -144,7 +249,8 @@ fn dialect(provider: Provider) -> codec::Dialect {
 fn representable(provider: Provider, chat: &Value) -> Result<(), Failure> {
     match provider {
         Provider::Qoder => {}
-        Provider::ChatGpt => return Err(Failure::new(501, "ChatGPT support is incomplete")),
+        // The Responses wire carries every tool_choice and parallel_tool_calls.
+        Provider::ChatGpt => return Ok(()),
     }
     let choice = chat.get("tool_choice");
     if choice.is_some_and(|choice| choice != "auto" && choice != "none") {
@@ -179,20 +285,59 @@ async fn send(
     model: &str,
     payload: Value,
     timeout: Duration,
+    call: Call<'_>,
 ) -> Result<reqwest::Response, DispatchFailure> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
     match account.provider {
         Provider::Qoder => {
             let client = tokio::time::timeout_at(deadline, native::http::client_for(account))
                 .await
                 .map_err(|_| Failure::new(504, "Qoder egress resolution timed out"))??;
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining = remaining();
             if remaining.is_zero() {
                 return Err(Failure::new(504, "Qoder request timed out before dispatch").into());
             }
             native::qoder::chat(&client, account, model, payload, remaining).await
         }
-        Provider::ChatGpt => Err(Failure::new(501, "ChatGPT support is incomplete").into()),
+        Provider::ChatGpt => {
+            let client = tokio::time::timeout_at(deadline, native::http::plain_client_for(account))
+                .await
+                .map_err(|_| Failure::new(504, "ChatGPT egress resolution timed out"))??;
+            let remaining = remaining();
+            if remaining.is_zero() {
+                return Err(Failure::new(504, "ChatGPT request timed out before dispatch").into());
+            }
+            let endpoint = if call.mode == WireMode::Unary {
+                native::chatgpt::client::Endpoint::Compact
+            } else {
+                native::chatgpt::client::Endpoint::Responses
+            };
+            let session = native::chatgpt::client::session_id(
+                call.scope,
+                &account.credentials.chatgpt_account_id,
+                call.conversation,
+            );
+            native::chatgpt::client::send(
+                &client,
+                account,
+                payload,
+                endpoint,
+                &session,
+                call.forwarded,
+                remaining,
+            )
+            .await
+        }
+    }
+}
+/// The normalizer for one exchange's wire mode.
+fn events_for(provider: Provider, mode: WireMode, response: reqwest::Response) -> NativeEvents {
+    match mode {
+        WireMode::Chat => normalize(provider, response),
+        WireMode::ResponsesToChat => chatgpt::chat_chunks(response),
+        WireMode::Passthrough => chatgpt::raw_events(response),
+        WireMode::Unary => chatgpt::unary(response),
     }
 }
 fn normalize(provider: Provider, response: reqwest::Response) -> NativeEvents {
@@ -243,7 +388,10 @@ fn carries_output(chunk: &str) -> bool {
 
 /// Buffers leading non-output chunks and returns them with the first output chunk. A
 /// stream error or an end of stream before any output is returned as a typed failure.
-async fn until_output(events: &mut NativeEvents) -> Result<Vec<String>, Failure> {
+async fn until_output(
+    events: &mut NativeEvents,
+    carries_output: fn(&str) -> bool,
+) -> Result<Vec<String>, Failure> {
     let mut prelude = Vec::new();
     while let Some(event) = events.next().await {
         let chunk = event?;
@@ -274,9 +422,10 @@ enum Reached {
     /// The upstream answered (an HTTP error, or a stream error before output).
     Upstream,
 }
-/// Extra accounts tried after connection failures. An upstream answer, including 401,
-/// 403, 429 and a stream error, stays on the account that received it: replaying the
-/// same request elsewhere spreads one rejection across the pool.
+/// Extra accounts tried after connection failures. An unclassified upstream answer,
+/// including 401, 403, 429 and a stream error, stays on the account that received it:
+/// replaying the same request elsewhere spreads one rejection across the pool. Only a
+/// provider classification (`Failure::failover`, ChatGPT) moves an answer elsewhere.
 const MAX_CONNECTION_FAILOVERS: usize = 1;
 fn allow_failover(reached: Reached, connection_failovers: &mut usize) -> bool {
     match reached {
@@ -310,6 +459,14 @@ fn attempt_payload(payload: &Value, model: &str) -> Value {
     attempt["model"] = json!(model);
     attempt
 }
+/// Charges a failed attempt: ChatGPT by its classification, Qoder by status as before.
+fn charge(lease: &mut accounts::Lease, error: &Failure) {
+    match lease.account.provider {
+        Provider::Qoder => lease.failure(error.status),
+        Provider::ChatGpt => lease.settle(error),
+    }
+}
+#[allow(clippy::too_many_arguments)]
 async fn open(
     provider: Provider,
     targets: &[String],
@@ -318,7 +475,8 @@ async fn open(
     session: &str,
     policy: &AccountSchedulingPolicy,
     capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
-) -> Result<(Events, Account, String), Failure> {
+    call: Call<'_>,
+) -> Result<(Events, Account, String, HeaderMap), Failure> {
     // `dispatch` captured the body stamped with the primary ID.
     let mut captured = targets.first().cloned().unwrap_or_default();
     let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
@@ -328,7 +486,11 @@ async fn open(
     let mut failover_policy = policy.clone();
     failover_policy.sticky.max_wait_seconds = 0;
     let mut connection_failovers = 0;
-    for _ in 0..5 {
+    let attempts = match provider {
+        Provider::Qoder => MAX_QODER_ATTEMPTS,
+        Provider::ChatGpt => MAX_CHATGPT_ACCOUNTS,
+    };
+    for _ in 0..attempts {
         let admission = if excluded.is_empty() {
             policy
         } else {
@@ -350,7 +512,7 @@ async fn open(
             {
                 Ok(Ok(a)) => a,
                 Ok(Err(e)) => {
-                    lease.failure(e.status);
+                    charge(&mut lease, &e);
                     last = Some(e);
                     continue;
                 }
@@ -368,7 +530,7 @@ async fn open(
         let model = lease.model.clone();
         let attempt = attempt_payload(&payload, &model);
         super::recapture(capture, &mut captured, &model, &attempt);
-        let mut response = send(&lease.account, &model, attempt.clone(), remaining).await;
+        let mut response = send(&lease.account, &model, attempt.clone(), remaining, call).await;
         let upstream_answered = response
             .as_ref()
             .is_ok_and(|r| matches!(r.status().as_u16(), 401 | 403));
@@ -381,11 +543,16 @@ async fn open(
                     if remaining.is_zero() {
                         return Err(Failure::new(504, "Native upstream request timed out"));
                     }
-                    response = send(&lease.account, &model, attempt.clone(), remaining).await;
+                    response = send(&lease.account, &model, attempt.clone(), remaining, call).await;
                 }
                 Ok(Err(error)) => {
                     // The upstream already answered 401/403 for this account.
-                    lease.failure(error.status);
+                    charge(&mut lease, &error);
+                    // ChatGPT classifies every 401/403 as another account's request.
+                    if provider == Provider::ChatGpt {
+                        last = Some(error);
+                        continue;
+                    }
                     return Err(error);
                 }
                 Err(_) => {
@@ -407,18 +574,39 @@ async fn open(
             result => {
                 let (error, reached) = match result {
                     Ok(r) => (
-                        Failure::new(
-                            r.status().as_u16(),
-                            format!("{} returned HTTP {}", provider.name(), r.status().as_u16()),
-                        ),
+                        match provider {
+                            Provider::Qoder => Failure::new(
+                                r.status().as_u16(),
+                                format!(
+                                    "{} returned HTTP {}",
+                                    provider.name(),
+                                    r.status().as_u16()
+                                ),
+                            ),
+                            Provider::ChatGpt => chatgpt::rejection(&lease.account, r).await,
+                        },
                         Reached::Upstream,
                     ),
                     Err(e) => dispatch_failure(e, upstream_answered),
                 };
+                if provider == Provider::ChatGpt {
+                    lease.settle(&error);
+                }
+                if error.failover {
+                    tracing::warn!(
+                        "{} account answered HTTP {} before output; trying another account",
+                        provider.name(),
+                        error.status
+                    );
+                    last = Some(error);
+                    continue;
+                }
                 if matches!(error.status, 400 | 413 | 422) {
                     return Err(error);
                 }
-                lease.failure_after(error.status, retry_after);
+                if provider == Provider::Qoder {
+                    lease.failure_after(error.status, retry_after);
+                }
                 if !allow_failover(reached, &mut connection_failovers) {
                     return Err(error);
                 }
@@ -431,15 +619,24 @@ async fn open(
                 continue;
             }
         };
-        let mut events = normalize(provider, response);
+        let upstream = response.headers().clone();
+        let mut events = events_for(provider, call.mode, response);
         // Nothing reaches the client until generation starts, so a failure before then
         // is still returned as a typed error instead of a broken stream.
-        let prelude = match until_output(&mut events).await {
+        let prelude = match until_output(&mut events, call.mode.carries_output()).await {
             Ok(prelude) => prelude,
             Err(e) => {
-                // The upstream answered; another account would receive the same request.
-                lease.failure(e.status);
-                return Err(e);
+                charge(&mut lease, &e);
+                // Unclassified: another account would receive the same request.
+                if !e.failover {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    "{} stream failed before output; trying another account",
+                    provider.name()
+                );
+                last = Some(e);
+                continue;
             }
         };
         let account = lease.account.clone();
@@ -448,11 +645,11 @@ async fn open(
             while let Some(event) = events.next().await {
                 match event {
                     Ok(data) => { if data == "[DONE]" { lease.success(); } yield Ok(data); },
-                    Err(e) => { lease.failure(e.status); yield Err(e.to_string()); return; },
+                    Err(e) => { charge(&mut lease, &e); yield Err(e.to_string()); return; },
                 }
             }
         };
-        return Ok((guarded.boxed(), account, model));
+        return Ok((guarded.boxed(), account, model, upstream));
     }
     Err(last
         .unwrap_or_else(|| Failure::new(429, "All eligible accounts are temporarily unavailable")))
@@ -477,43 +674,68 @@ pub async fn probe(
     let a = accounts::fresh(provider, &lease.account.id, false)
         .await
         .map_err(|e| e.to_string())?;
-    let payload = json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}],"stream":true,"max_tokens":64});
-    let response = match send(&a, model, payload, Duration::from_secs(25)).await {
+    let (payload, mode) = match provider {
+        Provider::Qoder => (
+            json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}],"stream":true,"max_tokens":64}),
+            WireMode::Chat,
+        ),
+        Provider::ChatGpt => (
+            chatgpt::probe_body(model, system, user).map_err(|e| e.to_string())?,
+            WireMode::Passthrough,
+        ),
+    };
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let forwarded = HeaderMap::new();
+    let call = Call {
+        mode,
+        forwarded: &forwarded,
+        scope: "probe",
+        conversation: &conversation,
+    };
+    let response = match send(&a, model, payload, Duration::from_secs(25), call).await {
         Ok(response) => response,
         Err(error) => {
             let error = Failure::from(error);
-            lease.failure(error.status);
+            charge(&mut lease, &error);
             return Err(error.to_string());
         }
     };
     if !response.status().is_success() {
-        lease.failure(response.status().as_u16());
+        match provider {
+            Provider::Qoder => lease.failure(response.status().as_u16()),
+            Provider::ChatGpt => lease.settle(&chatgpt::rejection(&a, response).await),
+        }
         return Ok((
             "failed".into(),
             "上游调用失败；已有验证证据保留。".into(),
             Some(a.id),
         ));
     }
-    let mut events = normalize(provider, response);
+    let mut events = events_for(provider, mode, response);
     let mut text = false;
     let mut complete = false;
     while let Some(event) = events.next().await {
         let event = match event {
             Ok(event) => event,
             Err(error) => {
-                lease.failure(error.status);
+                charge(&mut lease, &error);
                 return Err(error.to_string());
             }
         };
         if event == "[DONE]" {
-            complete = true;
+            complete |= mode == WireMode::Chat;
             break;
         }
-        if let Ok(v) = serde_json::from_str::<Value>(&event) {
-            text |= v
-                .pointer("/choices/0/delta/content")
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty());
+        match mode {
+            WireMode::Passthrough => chatgpt::probe_evidence(&event, &mut text, &mut complete),
+            _ => {
+                if let Ok(v) = serde_json::from_str::<Value>(&event) {
+                    text |= v
+                        .pointer("/choices/0/delta/content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty());
+                }
+            }
         }
     }
     if text && complete {
@@ -714,7 +936,14 @@ mod tests {
         // Both accounts fail route resolution before HTTP or the UMID helper.
         for _ in 0..2 {
             let a = Account::new(Provider::Qoder, native::Realm::Cn);
-            let error = send(&a, "model", json!({}), Duration::from_secs(1))
+            let forwarded = HeaderMap::new();
+            let call = Call {
+                mode: WireMode::Chat,
+                forwarded: &forwarded,
+                scope: "test",
+                conversation: "test",
+            };
+            let error = send(&a, "model", json!({}), Duration::from_secs(1), call)
                 .await
                 .unwrap_err();
             let (error, reached) = dispatch_failure(error, false);
@@ -744,13 +973,19 @@ mod tests {
             Provider::Qoder,
             response("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: {\"statusCodeValue\":503,\"body\":\"busy\"}\n\n"),
         );
-        assert_eq!(until_output(&mut events).await.unwrap_err().status, 503);
+        assert_eq!(
+            until_output(&mut events, carries_output)
+                .await
+                .unwrap_err()
+                .status,
+            503
+        );
         // Leading role-only and usage chunks are kept, in order, ahead of the first output.
         let mut events = normalize(
             Provider::Qoder,
             response("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"),
         );
-        let prelude = until_output(&mut events).await.unwrap();
+        let prelude = until_output(&mut events, carries_output).await.unwrap();
         assert_eq!(prelude.len(), 3);
         assert!(prelude[2].contains("\"hi\""));
         assert_eq!(events.next().await.unwrap().unwrap(), "[DONE]");
@@ -759,7 +994,13 @@ mod tests {
             Provider::Qoder,
             response("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"),
         );
-        assert_eq!(until_output(&mut events).await.unwrap_err().status, 502);
+        assert_eq!(
+            until_output(&mut events, carries_output)
+                .await
+                .unwrap_err()
+                .status,
+            502
+        );
         // A finish reason alone (e.g. after tool output) counts as output.
         assert!(carries_output(
             r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#

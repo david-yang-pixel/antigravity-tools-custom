@@ -30,7 +30,7 @@ pub enum Provider {
 }
 
 impl Provider {
-    pub const ALL: [Self; 1] = [Self::Qoder];
+    pub const ALL: [Self; 2] = [Self::Qoder, Self::ChatGpt];
     pub fn key(self) -> &'static str {
         match self {
             Self::Qoder => "qoder",

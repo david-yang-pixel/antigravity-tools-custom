@@ -59,6 +59,27 @@ impl Drop for Sandbox {
         }
     }
 }
+/// Points ChatGPT at a closed local port so a test that only expects failures can never
+/// reach the real service; restores the production endpoints on drop.
+pub(super) struct OfflineChatGpt;
+impl OfflineChatGpt {
+    pub(super) fn new() -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap();
+        chatgpt::endpoints::set_test(Some(chatgpt::endpoints::Endpoints {
+            auth: format!("http://127.0.0.1:{port}"),
+            backend: format!("http://127.0.0.1:{port}/backend-api"),
+        }));
+        Self
+    }
+}
+impl Drop for OfflineChatGpt {
+    fn drop(&mut self) {
+        chatgpt::endpoints::set_test(None);
+    }
+}
 fn account(provider: Provider, uid: &str) -> Account {
     let mut a = Account::new(provider, Realm::Cn);
     a.uid = uid.into();
@@ -851,6 +872,7 @@ async fn native_model_discovery_requires_explicit_publication_and_keeps_source_b
     use std::sync::Arc;
     use tower::ServiceExt;
     let _sandbox = Sandbox::new();
+    let _offline = OfflineChatGpt::new();
     let mapping = HashMap::new();
     for provider in Provider::ALL {
         store::upsert(account(provider, provider.key()), None).unwrap();
@@ -1669,3 +1691,6 @@ fn plain_clients_are_cached_per_account_and_route() {
     http::forget(&a.id);
     assert!(!http::plain_cached(&a.id));
 }
+
+#[path = "chatgpt_dispatch_tests.rs"]
+mod chatgpt_dispatch;
