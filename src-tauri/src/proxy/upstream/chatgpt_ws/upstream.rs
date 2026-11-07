@@ -55,11 +55,13 @@ fn url() -> Result<url::Url, Failure> {
     Ok(url)
 }
 
-/// Opens one socket for `account`. Quota headers of the handshake answer are recorded
+/// Opens one socket for `account`; `forwarded` (the client's handshake headers) contributes
+/// only `client::headers`' allow-list. Quota headers of the handshake answer are recorded
 /// whether or not it upgrades.
 pub(super) async fn connect(
     account: &Account,
     session: &str,
+    forwarded: &reqwest::header::HeaderMap,
     deadline: Instant,
 ) -> Result<Upstream, Refused> {
     let url = url().map_err(|e| Refused::Answered(e, None))?;
@@ -74,13 +76,8 @@ pub(super) async fn connect(
             None,
         )
     };
-    let mut headers = client::headers(
-        account,
-        session,
-        &reqwest::header::HeaderMap::new(),
-        client::Endpoint::Responses,
-    )
-    .map_err(prepared)?;
+    let mut headers = client::headers(account, session, forwarded, client::Endpoint::Responses)
+        .map_err(prepared)?;
     headers.remove(ACCEPT);
     headers.remove(CONTENT_TYPE);
     headers.insert("openai-beta", HeaderValue::from_static(BETA));

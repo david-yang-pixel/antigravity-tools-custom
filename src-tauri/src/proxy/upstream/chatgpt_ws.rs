@@ -19,7 +19,10 @@ use crate::proxy::{
     middleware::model_registry::resolve_public_model, server::AppState,
     sticky_config::AccountSchedulingPolicy,
 };
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::{
+    extract::ws::{CloseFrame, Message, WebSocket},
+    http::HeaderMap,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -39,6 +42,8 @@ const BACKOFF_MAX: Duration = Duration::from_secs(2);
 const SCOPE: &str = "administrator";
 /// Response ids remembered with the account holding their upstream state.
 const MAX_OWNERS: usize = 4096;
+/// Client frames held while a turn is in flight; later ones are refused.
+const MAX_QUEUED: usize = 16;
 
 /// Liveness and idle bounds of a relayed session.
 #[derive(Clone, Copy, Debug)]
@@ -203,6 +208,8 @@ struct Relay {
     transcript: Transcript,
     /// Frames the client sent while a turn was in flight.
     queued: VecDeque<Value>,
+    /// The client's handshake headers.
+    forwarded: HeaderMap,
     /// The bound socket refused a turn with a bare `error` event, which the upstream often
     /// follows with a `response.failed` for the same request.
     trailing_failure: bool,
@@ -210,7 +217,15 @@ struct Relay {
 
 /// Relays a Codex WebSocket whose first generating frame resolved to `published` (a
 /// ChatGPT publication) until either side closes.
-pub async fn run(socket: WebSocket, first: Value, published: PublishedModel, state: AppState) {
+/// `headers` are the client's handshake headers; only the Codex allow-list reaches the
+/// upstream.
+pub async fn run(
+    socket: WebSocket,
+    headers: HeaderMap,
+    first: Value,
+    published: PublishedModel,
+    state: AppState,
+) {
     let id = uuid::Uuid::new_v4();
     let session = format!("ws:{id}");
     let conversation = first
@@ -231,6 +246,7 @@ pub async fn run(socket: WebSocket, first: Value, published: PublishedModel, sta
         owners: HashMap::new(),
         transcript: Transcript::new(TRANSCRIPT_LIMIT),
         queued: VecDeque::new(),
+        forwarded: headers,
         trailing_failure: false,
     };
     let mut next = Some(first);
@@ -493,7 +509,7 @@ impl Relay {
                         continue 'accounts;
                     }
                     Outcome::Refused {
-                        failure,
+                        mut failure,
                         prelude,
                         event,
                     } => {
@@ -504,6 +520,11 @@ impl Relay {
                             tracing::info!("ChatGPT upstream lost the previous response; replaying the turn from the transcript");
                             (replayed, full) = (true, true);
                             continue;
+                        }
+                        if previous_not_found(&event) {
+                            // Another account cannot hold a reference this one lost.
+                            failure.failover = false;
+                            failure.penalty = Some(Penalty::Neutral);
                         }
                         if invalid_encrypted_content(&event) && !stripped {
                             tracing::info!("ChatGPT rejected encrypted reasoning; retrying the turn without it");
@@ -576,7 +597,7 @@ impl Relay {
         );
         let (mut refreshed, mut reconnects, mut backoff) = (false, 0, BACKOFF);
         loop {
-            match upstream::connect(&lease.account, &session, deadline).await {
+            match upstream::connect(&lease.account, &session, &self.forwarded, deadline).await {
                 Ok(upstream) => {
                     self.upstream = Some(upstream);
                     self.trailing_failure = false;
@@ -649,10 +670,14 @@ impl Relay {
             return Outcome::Stale;
         }
         let mut prelude: Vec<Value> = Vec::new();
+        // The turn's events, for rebuilding an empty terminal output.
+        let mut events: Vec<Value> = Vec::new();
         let mut output = false;
+        // Only upstream events count as progress: client traffic never extends a stall.
+        let mut last_upstream = Instant::now();
         loop {
             let wait = if output {
-                Instant::now() + self.timing.idle
+                last_upstream + self.timing.idle
             } else {
                 deadline
             };
@@ -665,7 +690,18 @@ impl Relay {
             };
             let mut event = match step {
                 Step::Client(FromClient::Frame(frame)) => {
-                    self.queued.push_back(frame);
+                    if self.queued.len() < MAX_QUEUED {
+                        self.queued.push_back(frame);
+                    } else if !self
+                        .reply(error_event(
+                            400,
+                            "too_many_queued_frames",
+                            "Too many frames sent while a turn is in flight; this frame was dropped",
+                        ))
+                        .await
+                    {
+                        return Outcome::ClientGone;
+                    }
                     continue;
                 }
                 Step::Client(FromClient::Invalid(message)) => {
@@ -697,7 +733,10 @@ impl Relay {
                         .finish(error_event(502, "upstream_disconnected", message))
                         .await;
                 }
-                Step::Upstream(Some(Incoming::Event(event))) => event,
+                Step::Upstream(Some(Incoming::Event(event))) => {
+                    last_upstream = Instant::now();
+                    event
+                }
             };
             let kind = event
                 .get("type")
@@ -732,8 +771,9 @@ impl Relay {
                     | "response.incomplete"
                     | "response.cancelled"
             );
+            events.push(event.clone());
             if terminal && kind != "response.cancelled" {
-                self.remember(&event, &lease.account.id);
+                self.remember(&events, &lease.account.id);
             }
             if output {
                 if !self.reply(event).await {
@@ -775,9 +815,12 @@ impl Relay {
         }
     }
 
-    /// Records a completed response in the transcript, owned by `account`.
-    fn remember(&mut self, event: &Value, account: &str) {
-        let response = &event["response"];
+    /// Records a completed response in the transcript, owned by `account`. An empty
+    /// terminal output is rebuilt from the turn's output items (else its deltas).
+    fn remember(&mut self, events: &[Value], account: &str) {
+        let Ok(response) = super::responses_wire::aggregate(events) else {
+            return;
+        };
         let Some(id) = response["id"].as_str().filter(|id| !id.is_empty()) else {
             return;
         };

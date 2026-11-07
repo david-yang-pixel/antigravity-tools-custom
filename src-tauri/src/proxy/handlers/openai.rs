@@ -6363,8 +6363,14 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
                         .map(|frame| (frame, session_state.last_response_id.as_str())),
                     payload,
                 );
-                crate::proxy::upstream::chatgpt_ws::run(socket, first, published.clone(), state)
-                    .await;
+                crate::proxy::upstream::chatgpt_ws::run(
+                    socket,
+                    headers,
+                    first,
+                    published.clone(),
+                    state,
+                )
+                .await;
                 return;
             }
         }

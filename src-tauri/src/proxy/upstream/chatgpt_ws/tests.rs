@@ -224,6 +224,8 @@ mod relay {
         Events(Vec<Value>),
         /// Events, then the upstream closes the socket.
         Close(Vec<Value>),
+        /// Events after a pause.
+        After(Duration, Vec<Value>),
     }
 
     /// `nth` counts earlier handshakes (or frames) of the calling account; `first` says
@@ -351,6 +353,10 @@ mod relay {
                     let (events, close) = match step {
                         Step::Events(events) => (events, false),
                         Step::Close(events) => (events, true),
+                        Step::After(pause, events) => {
+                            tokio::time::sleep(pause).await;
+                            (events, false)
+                        }
                     };
                     for event in events {
                         if socket.send(Message::Text(event.to_string())).await.is_err() {
@@ -458,6 +464,10 @@ mod relay {
         socket: reqwest_websocket::WebSocket,
     }
     async fn connect() -> Client {
+        connect_with(&[]).await
+    }
+    /// A client whose upgrade request carries `headers`.
+    async fn connect_with(headers: &[(&str, &str)]) -> Client {
         use reqwest_websocket::RequestBuilderExt;
         let monitor = Arc::new(crate::proxy::monitor::ProxyMonitor::disabled_for_test());
         let app = Router::new()
@@ -476,6 +486,17 @@ mod relay {
             .build()
             .unwrap()
             .get(format!("ws://{addr}/v1/responses"))
+            .headers(
+                headers
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                            v.parse().unwrap(),
+                        )
+                    })
+                    .collect(),
+            )
             .upgrade()
             .send()
             .await
@@ -1112,5 +1133,219 @@ mod relay {
         assert!(!events.iter().any(|e| e["type"] == "error"), "{events:?}");
         assert_eq!(completed(&events)["response"]["id"], "resp_2");
         assert_eq!(server.frames().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn ws_empty_terminal_output_is_rebuilt_from_output_items() {
+        let _sandbox = Sandbox::new();
+        setup(2);
+        let message = json!({"type":"message","id":"msg_1","role":"assistant","status":"completed",
+            "content":[{"type":"output_text","text":"a1"}]});
+        let call = json!({"type":"function_call","id":"fc_1","call_id":"c1","name":"ls","arguments":"{}","status":"completed"});
+        let first_turn = vec![
+            json!({"type":"response.created","response":{"id":"resp_A1","model":NATIVE,"status":"in_progress","output":[]}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"a1"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":message}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"c1","name":"ls","arguments":""}}),
+            json!({"type":"response.output_item.done","output_index":1,"item":call}),
+            json!({"type":"response.output_item.done","output_index":1,"item":call}),
+            json!({"type":"response.completed","response":{"id":"resp_A1","model":NATIVE,"status":"completed","output":[]}}),
+        ];
+        let server = upstream(
+            Box::new(|call| {
+                (call.first && call.nth == 1).then(|| {
+                    (
+                        429,
+                        json!({"error":{"type":"usage_limit_reached","message":"limit","resets_in_seconds":3600}}),
+                    )
+                })
+            }),
+            Box::new(move |call, _| {
+                if call.first {
+                    Step::Close(first_turn.clone())
+                } else {
+                    Step::Events(answer("resp_B1", "b1"))
+                }
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        client.turn(create(vec![user("u1")])).await;
+        let output = json!({"type":"function_call_output","call_id":"c1","output":"files"});
+        let events = client.turn(continue_from("resp_A1", vec![output])).await;
+        assert!(!events.iter().any(|e| e["type"] == "error"), "{events:?}");
+        let frames = server.frames();
+        assert_eq!(frames.len(), 2);
+        let moved = &frames[1].1;
+        assert!(moved.get("previous_response_id").is_none());
+        let kinds: Vec<&str> = moved["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["type"].as_str().unwrap_or("message"))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "message",
+                "message",
+                "function_call",
+                "function_call_output"
+            ],
+            "{moved}"
+        );
+        assert_eq!(moved["input"][1]["content"][0]["text"], "a1");
+        assert_eq!(moved["input"][2]["call_id"], "c1");
+    }
+
+    #[tokio::test]
+    async fn ws_mid_turn_stall_ends_despite_client_pings() {
+        let _sandbox = Sandbox::new();
+        let accounts = setup(1);
+        let mut partial = answer("resp_0", "a");
+        partial.pop();
+        let _server = upstream(
+            accept_all(),
+            Box::new(move |_, _| Step::Events(partial.clone())),
+        )
+        .await;
+        set_test_timing(Some(Timing {
+            ping_after: Duration::from_secs(20),
+            pong_timeout: Duration::from_secs(5),
+            idle: Duration::from_millis(400),
+        }));
+        let mut client = connect().await;
+        client.send(create(vec![user("u1")])).await;
+        let started = std::time::Instant::now();
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let error = loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "client pings kept a stalled turn alive"
+            );
+            tokio::select! {
+                message = client.socket.next() => {
+                    if let Some(Ok(reqwest_websocket::Message::Text(text))) = message {
+                        let event: Value = serde_json::from_str(&text).unwrap();
+                        if event["type"] == "error" {
+                            break event;
+                        }
+                    }
+                }
+                _ = tick.tick() => {
+                    client
+                        .socket
+                        .send(reqwest_websocket::Message::Ping(reqwest_websocket::Bytes::from_static(b"k")))
+                        .await
+                        .unwrap();
+                }
+            }
+        };
+        assert_eq!(error["error"]["code"], "upstream_timeout");
+        let released = std::time::Instant::now();
+        while crate::modules::native_providers::accounts::runtime(&accounts[0].id).in_flight != 0 {
+            assert!(
+                released.elapsed() < Duration::from_secs(2),
+                "the lease was not released"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_forwards_client_handshake_allow_list() {
+        let _sandbox = Sandbox::new();
+        setup(1);
+        let server = upstream(
+            accept_all(),
+            Box::new(|_, _| Step::Events(answer("resp_1", "a"))),
+        )
+        .await;
+        let mut client = connect_with(&[
+            ("x-codex-turn-state", "turn-abc"),
+            ("accept-language", "fr-FR"),
+            ("authorization", "Bearer client-key"),
+            ("cookie", "session=secret"),
+        ])
+        .await;
+        client.turn(create(vec![user("u1")])).await;
+        let handshakes = server.handshakes();
+        let headers = &handshakes[0].1;
+        assert_eq!(headers["x-codex-turn-state"], "turn-abc");
+        assert_eq!(headers["accept-language"], "fr-FR");
+        assert_eq!(headers["authorization"], "Bearer access-0");
+        assert!(headers.get("cookie").is_none());
+    }
+
+    #[tokio::test]
+    async fn ws_queued_frames_are_capped() {
+        let _sandbox = Sandbox::new();
+        setup(1);
+        let server = upstream(
+            accept_all(),
+            Box::new(|call, _| {
+                let events = answer(&format!("resp_{}", call.nth), "a");
+                if call.nth == 0 {
+                    Step::After(Duration::from_millis(1500), events)
+                } else {
+                    Step::Events(events)
+                }
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        client.send(create(vec![user("first")])).await;
+        for n in 0..18 {
+            client.send(create(vec![user(&format!("q{n}"))])).await;
+        }
+        let (mut completed_turns, mut refused) = (0, 0);
+        let started = std::time::Instant::now();
+        while completed_turns < 17 {
+            assert!(
+                started.elapsed() < Duration::from_secs(8),
+                "turns: {completed_turns}"
+            );
+            match client.next().await {
+                Some(reqwest_websocket::Message::Text(text)) => {
+                    let event: Value = serde_json::from_str(&text).unwrap();
+                    match event["type"].as_str() {
+                        Some("response.completed") => completed_turns += 1,
+                        Some("error") => {
+                            assert_eq!(event["error"]["code"], "too_many_queued_frames", "{event}");
+                            refused += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                Some(_) => {}
+                None => panic!("socket closed"),
+            }
+        }
+        assert_eq!(refused, 2);
+        assert_eq!(server.frames().len(), 17);
+    }
+
+    #[tokio::test]
+    async fn ws_unknown_reference_not_found_is_not_failed_over() {
+        let _sandbox = Sandbox::new();
+        setup(2);
+        let server = upstream(
+            accept_all(),
+            Box::new(|_, _| {
+                Step::Events(vec![json!({"type":"error","error":{
+                    "code":"previous_response_not_found",
+                    "message":"Previous response with id 'resp_elsewhere' not found."}})])
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        let events = client
+            .turn(continue_from("resp_elsewhere", vec![user("u2")]))
+            .await;
+        let last = events.last().unwrap();
+        assert_eq!(last["error"]["code"], "previous_response_not_found");
+        assert_eq!(server.frames().len(), 1, "one account is tried");
+        assert_eq!(server.handshakes().len(), 1);
     }
 }
