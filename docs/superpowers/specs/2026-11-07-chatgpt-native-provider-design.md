@@ -76,12 +76,14 @@ GET /v1/responses (WS, master key only) ─► handle_websocket_session
   `expires_at = now + expires_in`; replaces `refresh_token` only when the response carries a
   non-empty one. Errors containing `invalid_grant`, `invalid_refresh_token`, `token_expired`,
   `refresh_token_reused`, `refresh_token_invalidated`, `app_session_terminated`,
-  `access_denied` set `auth_error` and stop auto refresh (dead credential); `invalid_client`,
-  `unauthorized_client`, `invalid_scope` are reported as provider configuration errors without
-  marking the account dead. Request-path refresh when `expires_at - now < 180 s`; maintenance
-  refresh when `< 1800 s` (existing `fresh` / maintenance loop, provider-specific thresholds).
+  `access_denied` disable the account (`enabled = false`) and set `auth_error` (dead
+  credential; the administrator re-imports); `invalid_client`, `unauthorized_client`,
+  `invalid_scope` are reported as provider configuration errors (503) without disabling the
+  account. Refresh timing uses the shared thresholds (request path refreshes within 300 s of
+  expiry; the maintenance loop keeps tokens fresh).
 - `identity_headers.rs` — one canonical client identity on every chatgpt.com request:
-  `originator: codex_cli_rs`, `User-Agent: codex_cli_rs/<ver> (<os>; <arch>) xterm-256color`,
+  `originator: codex_cli_rs`, `User-Agent: codex_cli_rs/<ver> (Ubuntu 22.4.0; x86_64) xterm-256color`
+  (one fixed canonical platform string on every host OS),
   `version: <ver>`. `<ver>` = `ABV_CHATGPT_CLIENT_VERSION` if it parses as semver ≥ 0.144.0,
   else the built-in default `0.146.0`. Client-supplied identity headers are never forwarded.
 - `models.rs` — `GET https://chatgpt.com/backend-api/codex/models?client_version=<ver>` with
@@ -97,8 +99,8 @@ GET /v1/responses (WS, master key only) ─► handle_websocket_session
   Persisted at most once per 30 s per account.
 - `payload.rs` — Codex request rules applied to any Responses body before sending:
   - force `stream: true`, `store: false` (compact: delete both);
-  - `instructions` must exist; missing/blank → the default Codex base instructions shipped as a
-    text asset (`include_str!`), chosen as one current prompt (not per model family);
+  - `instructions` must exist; missing/blank → `DEFAULT_INSTRUCTIONS =
+    "You are a helpful assistant."` (own text; no third-party prompt is copied);
   - `role: "system"` input messages are moved into `instructions` (prepended, blank-line joined);
   - string `input` → one user message item;
   - `include` gains `reasoning.encrypted_content` when `reasoning` is present;
@@ -108,8 +110,9 @@ GET /v1/responses (WS, master key only) ─► handle_websocket_session
     delete `previous_response_id` on HTTP only;
   - `reasoning.effort: "minimal"` → `"none"`;
   - reasoning items: drop `id`, keep `encrypted_content`, default `summary: []`;
-  - drop item `id`s on replayed input items; normalize tool call ids to `fc_` prefix (hash ids
-    longer than 64 chars), applying the same mapping to the matching `function_call_output`;
+  - drop item `id`s on replayed input items (the upstream rejects foreign ids such as non-`fc_`
+    function-call ids); `call_id`s longer than 64 chars are replaced by
+    `call_` + the first 59 hex chars of their SHA-256, consistently for the call and its output;
   - remove `function_call_output` items with no matching call;
   - Chat-style function tools `{type:function,function:{...}}` flattened to top-level
     `name/description/parameters/strict`;
@@ -176,8 +179,8 @@ Protocol-generic converters so a future Responses-mode custom upstream can reuse
 - Responses wire, Responses clients (passthrough): body → `chatgpt::payload` → `open()` with a
   normalizer that yields raw Responses events and `responses_wire::carries_output`. Streaming:
   events are re-emitted as `event: <type>\ndata: <json>` with every `response.model` rewritten
-  to the public alias. Non-stream: `responses_wire::aggregate`. Namespaced tool names follow the
-  existing `codec::namespaced_tools` mapping.
+  to the public alias. Non-stream: `responses_wire::aggregate`. Tools are sent unchanged
+  (the upstream is the native Codex backend), so no namespace mapping is applied.
 - `/responses/compact`: for ChatGPT only, the same failover path with a unary JSON exchange;
   other native sources keep the current 400.
 - `open()` becomes generic over the per-wire normalizer/output check; failover staging
