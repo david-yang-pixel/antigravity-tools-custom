@@ -1179,6 +1179,56 @@ mod relay {
     }
 
     #[tokio::test]
+    async fn ws_trailing_failed_event_after_output_does_not_refuse_queued_frame() {
+        let _sandbox = Sandbox::new();
+        setup(1);
+        let server = upstream(
+            accept_all(),
+            Box::new(|call, _| match call.nth {
+                0 => {
+                    let mut events = answer("resp_1", "a1");
+                    events.truncate(3);
+                    events.push(
+                        json!({"type":"error","error":{"code":"server_error","message":"boom"}}),
+                    );
+                    events.push(
+                        json!({"type":"response.failed","response":{"id":"resp_1","status":"failed",
+                        "error":{"code":"server_error","message":"boom"}}}),
+                    );
+                    Step::After(Duration::from_millis(300), events)
+                }
+                _ => Step::Events(answer("resp_2", "a2")),
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        client.send(create(vec![user("u1")])).await;
+        // Queued while the first turn is in flight.
+        let events = client.turn(create(vec![user("u2")])).await;
+        assert_eq!(events.last().unwrap()["type"], "error", "{events:?}");
+        let mut second = Vec::new();
+        loop {
+            match client.next().await {
+                Some(reqwest_websocket::Message::Text(text)) => {
+                    let event: Value = serde_json::from_str(&text).unwrap();
+                    let end = matches!(
+                        event["type"].as_str(),
+                        Some("response.completed" | "response.failed" | "error")
+                    );
+                    second.push(event);
+                    if end {
+                        break;
+                    }
+                }
+                Some(_) => {}
+                None => panic!("relay closed the socket; events so far: {second:?}"),
+            }
+        }
+        assert_eq!(completed(&second)["response"]["id"], "resp_2", "{second:?}");
+        assert_eq!(server.frames().len(), 2);
+    }
+
+    #[tokio::test]
     async fn ws_empty_terminal_output_is_rebuilt_from_output_items() {
         let _sandbox = Sandbox::new();
         setup(2);

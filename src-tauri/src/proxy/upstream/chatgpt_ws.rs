@@ -761,6 +761,8 @@ impl Relay {
                         event,
                     };
                 }
+                // After output too, a bare `error` is often followed by its `response.failed`.
+                self.trailing_failure = kind == "error";
                 lease.settle(&failure);
                 return self.finish(event).await;
             }
