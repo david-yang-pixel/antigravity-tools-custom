@@ -222,3 +222,22 @@ test('newly added extra ids are gated like the primary', () => {
     assert.equal(logic.needsUnverifiedConfirmation(off, [{ ...withExtra, enabled: true }]), true);
     assert.equal(logic.needsUnverifiedConfirmation(held, [{ ...withExtra, native_model: 'a', extra_native_models: ['b'], public_id: 'other' }]), true);
 });
+
+test('the primary target can be rebound within its source and is gated as a new binding', () => {
+    const base = publication('p', wb.id, 'a', 'alias', { extra_native_models: ['b'] });
+    const registry = view({ candidates: [candidate('c1', wb.id, 'a', { verification_status: 'verified' }), candidate('c2', wb.id, 'b', { verification_status: 'verified' }), candidate('c3', wb.id, 'c'), candidate('c4', wb.id, 'd', { verification_status: 'unavailable' }), candidate('c5', wb.id, 'e', { ignored: true }), candidate('c6', ag.id, 'c')], published_models: [base] });
+    assert.deepEqual(logic.primaryTargetOptions(registry, base).map(c => c.native_model), ['a', 'b', 'c']);
+    // The current primary stays selectable even once ignored or unavailable.
+    assert.deepEqual(logic.primaryTargetOptions(registry, { ...base, native_model: 'd' }).map(c => c.native_model), ['a', 'b', 'c', 'd']);
+    // Promoting a checked extra swaps it with the old primary; the alias and the routed set are kept.
+    assert.deepEqual(logic.withPrimaryTarget(base, 'b'), { ...base, native_model: 'b', extra_native_models: ['a'] });
+    assert.deepEqual(logic.withPrimaryTarget(base, 'c'), { ...base, native_model: 'c', extra_native_models: ['b'] });
+    const single = publication('q', wb.id, 'a', 'solo');
+    assert.equal('extra_native_models' in logic.withPrimaryTarget(single, 'c'), false);
+    assert.equal(logic.withPrimaryTarget(base, 'a'), base);
+    // A rebound primary needs fresh evidence or consent; a legacy exemption never follows it.
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [logic.withPrimaryTarget(base, 'c')]), true);
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [logic.withPrimaryTarget(base, 'b')]), false);
+    const legacy = view({ ...registry, published_models: [{ ...single, legacy: true }] });
+    assert.equal(logic.mergePublications(legacy, [logic.withPrimaryTarget({ ...single, legacy: true }, 'b')])[0].legacy, false);
+});
