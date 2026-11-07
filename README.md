@@ -1,5 +1,5 @@
 # Antigravity Tools 🚀
-> Professional Account Management & Protocol Proxy System for AI Services (v4.9.6)
+> Professional Account Management & Protocol Proxy System for AI Services (v4.10.0)
 
 <div align="center">
   <img src="public/icon.png" width="100" height="100" alt="Antigravity Tools Logo">
@@ -11,7 +11,7 @@
       <img src="https://img.shields.io/github/v/release/lbjlaq/Antigravity-Manager?color=blue&style=flat-square" alt="GitHub release">
     </a>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-4.9.6-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-4.10.0-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -487,7 +487,7 @@ In clients that support OpenAI protocol (e.g., Cherry Studio), you can configure
 
 ## 📝 Changelog
 
-> Latest version **v4.9.6** (2026-10-06) — full republish of v4.9.5 (its release pipeline was cancelled by hosted runner starvation and produced no Release assets; codebase is identical): Eliminates thinking budget 32768 overwriting, enforces absolute highest priority for named model suffixes (`-low`, `-medium`, `-high`), restores default mode fallback, and decouples Claude adapter (PR #3611, Fixes #3610); lowers Cowork pruning budget to 8k deep archive reducing residual context to 40k~45k tokens (60%+ compaction ratio), merges dual compaction state machines, introduces dynamic headroom anti-thrashing, adds Claude desktop process lifecycle management with legacy patch alerts and seamless upgrade, and safeguards macOS binary signing with rollback (PR #3604, #3609, #3603); caps single-request 429 pool traversal to `min(pool_size, 2)` with tiered backoff and Layer 2 optimistic reset to eliminate false 503 circuit-breaker failures, unifies long-lived sticky session unbinding and cross-protocol success counter recovery, and normalizes unified Claude quota protection groups (PR #3608, #3606, #3602, Fixes #3506, #3517, #3509); supports `antigravity-ide` naming variants, blocks Keyring credential leakage, hardens kernel-level process detection, and isolates `state.vscdb` (PR #3608, #3600, Fixes #3598); sanitizes Gemini JSON Schema enums, propagates real-time SSE stream errors (504/503/429), injects node search paths for OpenCode, corrects agy CLI Keyring D-Bus path and aligns Web/Headless APIs (PR #3601, #3606, #3607, thanks to @cubelikeplayDaniel, @diannaaav); resolves GNOME Wayland rendering freezes with DMA-BUF injection and fixes transparent window logic under X11/Xwayland (Fixes #3605, Ref #3581, thanks to @jeikl).
+> Latest version **v4.10.0** (2026-11-07) — ChatGPT subscription accounts as a native upstream: refresh-token, full-credential, Codex `auth.json` and sub2api-export import with batch import, Chat/Messages bridging, Responses passthrough with upstream errors preserved, `/responses/compact`, a Responses WebSocket relay with transparent transcript replay on account switch, pre-output failover across up to 3 accounts, and quota windows named by their real length (PR #59, #60, #61, #62, #63); native Qoder accounts on a shared native-provider framework with per-account egress (PR #48–#52, #55); built-in WorkBuddy account management, model routing, billing and activity automation (PR #10–#57); a unified model registry with explicit publication and multi-native-ID bindings (PR #1, #28–#34, #56, #58); custom OpenAI-compatible upstreams and airport-node egress (PR #41, #42); and a usage portal with email accounts, balance billing and ZPay top-ups (PR #3–#40).
 
 👉 **[View Full Changelog → CHANGELOG_EN.md](CHANGELOG_EN.md)**
 
