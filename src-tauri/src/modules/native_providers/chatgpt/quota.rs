@@ -1,7 +1,12 @@
 //! Rate-limit windows reported in `x-codex-*` response headers.
 use crate::modules::native_providers::{epoch, Quota, QuotaPack};
+use crate::modules::native_providers::{now, store, Account};
 use reqwest::header::HeaderMap;
 use serde_json::Value;
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 
 struct Window {
     used: f64,
@@ -91,4 +96,31 @@ pub fn exhausted_until(h: &HeaderMap, body: &Value, at: i64) -> Option<i64> {
             .find(|(_, w)| w.used >= 100.0)
             .and_then(|(_, w)| Some(at + w.reset_after?))
     })
+}
+
+/// Seconds between persisted snapshots of one account.
+const WRITE_INTERVAL: i64 = 30;
+static LAST_WRITE: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(Default::default);
+
+/// Stores the quota windows an answer reported, at most once per 30 s per account unless a
+/// window just filled up. Only `quota` is written.
+pub fn record(a: &Account, h: &HeaderMap) {
+    let at = now();
+    let Some(quota) = from_headers(h, at) else {
+        return;
+    };
+    let full = quota
+        .packs
+        .iter()
+        .any(|p| p.used.is_some_and(|u| u >= 100.0));
+    {
+        let mut last = LAST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        if !full && last.get(&a.id).is_some_and(|t| at - t < WRITE_INTERVAL) {
+            return;
+        }
+        last.insert(a.id.clone(), at);
+    }
+    let _ = store::update(a.provider, &a.id, None, |account| {
+        account.quota = Some(quota)
+    });
 }

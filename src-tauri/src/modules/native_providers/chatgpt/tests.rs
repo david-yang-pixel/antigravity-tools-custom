@@ -1,10 +1,12 @@
 use super::{
-    errors, headers, identity,
+    auth, client, endpoints, errors, headers, identity, models,
     payload::{self, Mode},
     quota,
 };
 use crate::modules::native_providers::{
     http::{Failure, Penalty},
+    store,
+    tests::Sandbox,
     Account, Provider, Realm,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -550,4 +552,394 @@ fn websocket_incremental_turn_keeps_tool_outputs() {
     // Without a previous response the orphan is still dropped.
     let out = prep(json!({"input": input}), Mode::WebSocket);
     assert_eq!(out["input"].as_array().unwrap().len(), 1);
+}
+
+// ---- network client, against a local mock ----
+
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, HeaderMap, Vec<u8>)>>>;
+
+struct Mock {
+    seen: Seen,
+    _reset: ResetEndpoints,
+}
+struct ResetEndpoints;
+impl Drop for ResetEndpoints {
+    fn drop(&mut self) {
+        endpoints::set_test(None);
+    }
+}
+
+/// Serves `status`/`headers`/`body` for every path; `echo` answers with the request instead.
+async fn mock(status: u16, extra: &[(&str, &str)], body: Value, echo: bool) -> Mock {
+    use axum::{body::Bytes, http::Uri, response::IntoResponse, Router};
+    let seen: Seen = Default::default();
+    let log = seen.clone();
+    let extra: Vec<(String, String)> = extra
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let app = Router::new().fallback(move |uri: Uri, h: HeaderMap, b: Bytes| {
+        let (log, extra, body) = (log.clone(), extra.clone(), body.clone());
+        async move {
+            let target = uri
+                .path_and_query()
+                .map(|p| p.to_string())
+                .unwrap_or_default();
+            log.lock()
+                .unwrap()
+                .push((target.clone(), h.clone(), b.to_vec()));
+            let payload = if echo {
+                let map: serde_json::Map<String, Value> = h
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), json!(v.to_str().unwrap_or_default())))
+                    .collect();
+                json!({"path": target, "headers": map})
+            } else {
+                body
+            };
+            let mut response = (
+                axum::http::StatusCode::from_u16(status).unwrap(),
+                [("content-type", "application/json")],
+                payload.to_string(),
+            )
+                .into_response();
+            for (k, v) in extra {
+                response.headers_mut().insert(
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(&v).unwrap(),
+                );
+            }
+            response
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    endpoints::set_test(Some(endpoints::Endpoints {
+        auth: format!("http://{addr}"),
+        backend: format!("http://{addr}/backend-api"),
+    }));
+    Mock {
+        seen,
+        _reset: ResetEndpoints,
+    }
+}
+
+fn http() -> reqwest::Client {
+    reqwest::Client::builder().no_proxy().build().unwrap()
+}
+
+fn chatgpt_account() -> Account {
+    let mut a = Account::new(Provider::ChatGpt, Realm::Global);
+    a.credentials.access_token = jwt(json!({"https://api.openai.com/auth": {
+        "chatgpt_account_id": "acc-1", "chatgpt_user_id": "u1"}}));
+    a.credentials.refresh_token = "r1".into();
+    a.credentials.chatgpt_account_id = "acc-1".into();
+    a.uid = "acc-1:u1".into();
+    a
+}
+
+fn token_response() -> Value {
+    let auth = json!({"chatgpt_account_id": "acc-1", "chatgpt_user_id": "u1",
+        "chatgpt_plan_type": "plus"});
+    json!({
+        "access_token": jwt(json!({"exp": 4_000_000_000i64, "https://api.openai.com/auth": auth})),
+        "id_token": jwt(json!({"email": "me@example.com", "https://api.openai.com/auth": auth})),
+        "expires_in": 3600,
+        "refresh_token": "r2",
+    })
+}
+
+#[tokio::test]
+async fn refresh_rotates_and_parses_identity() {
+    let _sandbox = Sandbox::new();
+    let server = mock(200, &[], token_response(), false).await;
+    let mut a = chatgpt_account();
+    auth::refresh(&http(), &mut a).await.unwrap();
+    assert_eq!(a.credentials.refresh_token, "r2");
+    assert_eq!(a.uid, "acc-1:u1");
+    assert_eq!(a.credentials.user_type, "plus");
+    assert_eq!(a.nickname, "me@example.com");
+    let drift = (a.expires_at - (crate::modules::native_providers::now() + 3600)).abs();
+    assert!(drift <= 5, "expires_at drift {drift}");
+    let seen = server.seen.lock().unwrap();
+    let (path, h, body) = &seen[0];
+    assert_eq!(path, "/oauth/token");
+    assert!(h.contains_key("originator") && !h.contains_key("version"));
+    assert_eq!(h["content-type"], "application/x-www-form-urlencoded");
+    let form: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(body).into_owned().collect();
+    assert_eq!(form["grant_type"], "refresh_token");
+    assert_eq!(form["refresh_token"], "r1");
+    assert_eq!(form["client_id"], auth::CLIENT_ID);
+    assert_eq!(form["scope"], "openid profile email");
+}
+
+#[tokio::test]
+async fn refresh_without_refresh_token_keeps_old_one() {
+    let _sandbox = Sandbox::new();
+    let mut body = token_response();
+    body.as_object_mut().unwrap().remove("refresh_token");
+    let _server = mock(200, &[], body.clone(), false).await;
+    let mut a = chatgpt_account();
+    auth::refresh(&http(), &mut a).await.unwrap();
+    assert_eq!(a.credentials.refresh_token, "r1");
+    body["refresh_token"] = json!("");
+    let _server = mock(200, &[], body, false).await;
+    auth::refresh(&http(), &mut a).await.unwrap();
+    assert_eq!(a.credentials.refresh_token, "r1");
+    assert_eq!(a.credentials.access_token, token_response()["access_token"]);
+}
+
+#[tokio::test]
+async fn refresh_invalid_grant_disables() {
+    let _sandbox = Sandbox::new();
+    let _server = mock(
+        400,
+        &[],
+        json!({"error": "invalid_grant", "error_description": "Refresh token reused"}),
+        false,
+    )
+    .await;
+    let mut a = chatgpt_account();
+    let before = a.credentials.access_token.clone();
+    let err = auth::refresh(&http(), &mut a).await.unwrap_err();
+    assert_eq!(err.status, 401);
+    assert!(matches!(err.penalty, Some(Penalty::Disable { .. })));
+    assert!(!err.failover);
+    assert_eq!(a.credentials.access_token, before);
+    assert_eq!(a.credentials.refresh_token, "r1");
+}
+
+#[tokio::test]
+async fn refresh_invalid_client_is_config_error() {
+    let _sandbox = Sandbox::new();
+    let _server = mock(
+        401,
+        &[],
+        json!({"error": {"code": "invalid_client"}}),
+        false,
+    )
+    .await;
+    let mut a = chatgpt_account();
+    let err = auth::refresh(&http(), &mut a).await.unwrap_err();
+    assert_eq!(err.status, 503);
+    assert!(err.penalty.is_none());
+}
+
+#[tokio::test]
+async fn refresh_without_token_is_dead_credential() {
+    let _sandbox = Sandbox::new();
+    let mut a = chatgpt_account();
+    a.credentials.refresh_token.clear();
+    let err = auth::refresh(&http(), &mut a).await.unwrap_err();
+    assert!(matches!(err.penalty, Some(Penalty::Disable { .. })));
+}
+
+#[tokio::test]
+async fn models_skip_hidden_and_wildcard() {
+    let _sandbox = Sandbox::new();
+    let server = mock(
+        200,
+        &[],
+        json!({"models": [
+            {"slug": "gpt-a", "display_name": "GPT A", "context_window": 272000,
+             "max_context_window": 1000000, "input_modalities": ["text", "image"],
+             "supported_reasoning_levels": [{"effort": "low"}], "visibility": "list",
+             "supported_in_api": true},
+            {"slug": "gpt-b", "max_context_window": 5000, "input_modalities": ["text"],
+             "supported_reasoning_levels": []},
+            {"slug": "hidden", "visibility": "hide"},
+            {"slug": "gpt-*"},
+            {"slug": "not-api", "supported_in_api": false}]}),
+        false,
+    )
+    .await;
+    let list = models::fetch(&http(), &chatgpt_account()).await.unwrap();
+    let ids: Vec<_> = list.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-a", "gpt-b"]);
+    assert_eq!(list[0].name, "GPT A");
+    assert_eq!(list[0].context_window, 272000);
+    assert!(list[0].vision && list[0].reasoning);
+    assert_eq!(list[1].name, "gpt-b");
+    assert_eq!(list[1].context_window, 5000);
+    assert!(!list[1].vision && !list[1].reasoning);
+    let seen = server.seen.lock().unwrap();
+    let version = headers::client_version();
+    assert_eq!(
+        seen[0].0,
+        format!("/backend-api/codex/models?client_version={version}")
+    );
+    assert_eq!(seen[0].1["version"], version.as_str());
+    assert_eq!(seen[0].1["chatgpt-account-id"], "acc-1");
+}
+
+#[tokio::test]
+async fn models_failure_is_classified() {
+    let _sandbox = Sandbox::new();
+    let _server = mock(402, &[], json!({"detail": "payment required"}), false).await;
+    let err = models::fetch(&http(), &chatgpt_account())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.status, 402);
+    assert!(matches!(err.penalty, Some(Penalty::Disable { .. })));
+}
+
+#[tokio::test]
+async fn send_sets_headers_and_filters_forwarded() {
+    let _sandbox = Sandbox::new();
+    let server = mock(200, &[], Value::Null, true).await;
+    let a = chatgpt_account();
+    let forwarded = map(&[
+        ("authorization", "Bearer evil"),
+        ("cookie", "c=1"),
+        ("x-forwarded-for", "1.2.3.4"),
+        ("user-agent", "evil/1"),
+        ("originator", "evil"),
+        ("chatgpt-account-id", "other"),
+        ("x-codex-turn-state", "ts1"),
+        ("accept-language", "de"),
+    ]);
+    let session = client::session_id("scope", &a.id, "key");
+    let response = client::send(
+        &http(),
+        &a,
+        json!({"input": []}),
+        client::Endpoint::Responses,
+        &session,
+        &forwarded,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let echoed: Value = response.json().await.unwrap();
+    let h = &echoed["headers"];
+    assert_eq!(echoed["path"], "/backend-api/codex/responses");
+    assert_eq!(
+        h["authorization"],
+        format!("Bearer {}", a.credentials.access_token)
+    );
+    assert_eq!(h["chatgpt-account-id"], "acc-1");
+    assert_eq!(h["originator"], "codex_cli_rs");
+    assert!(h["user-agent"]
+        .as_str()
+        .unwrap()
+        .starts_with("codex_cli_rs/"));
+    assert_eq!(h["version"], headers::client_version().as_str());
+    assert_eq!(h["accept"], "text/event-stream");
+    assert_eq!(h["session_id"], session.as_str());
+    assert_eq!(h["conversation_id"], session.as_str());
+    assert_eq!(h["x-codex-beta-features"], "remote_compaction_v2");
+    assert_eq!(h["x-codex-turn-state"], "ts1");
+    assert_eq!(h["accept-language"], "de");
+    assert!(h.get("cookie").is_none() && h.get("x-forwarded-for").is_none());
+    assert_eq!(server.seen.lock().unwrap().len(), 1);
+
+    let compact = client::send(
+        &http(),
+        &a,
+        json!({}),
+        client::Endpoint::Compact,
+        &session,
+        &HeaderMap::new(),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let echoed: Value = compact.json().await.unwrap();
+    assert_eq!(echoed["path"], "/backend-api/codex/responses/compact");
+    assert_eq!(echoed["headers"]["accept"], "application/json");
+}
+
+#[test]
+fn session_id_is_a_stable_scoped_uuid() {
+    let a = client::session_id("s", "acc", "k");
+    assert_eq!(a, client::session_id("s", "acc", "k"));
+    assert_ne!(a, client::session_id("s", "acc2", "k"));
+    assert_ne!(a, client::session_id("s2", "acc", "k"));
+    assert!(uuid::Uuid::parse_str(&a).is_ok());
+}
+
+#[tokio::test]
+async fn send_records_quota_headers() {
+    let _sandbox = Sandbox::new();
+    let _server = mock(
+        200,
+        &[
+            ("x-codex-primary-used-percent", "10"),
+            ("x-codex-primary-window-minutes", "300"),
+            ("x-codex-secondary-used-percent", "40"),
+            ("x-codex-secondary-window-minutes", "10080"),
+        ],
+        json!({}),
+        false,
+    )
+    .await;
+    let a = store::upsert(chatgpt_account(), None).unwrap();
+    client::send(
+        &http(),
+        &a,
+        json!({}),
+        client::Endpoint::Responses,
+        "s",
+        &HeaderMap::new(),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let quota = store::get(Provider::ChatGpt, &a.id).unwrap().quota.unwrap();
+    let names: Vec<_> = quota.packs.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["5h", "7d"]);
+    assert_eq!(quota.packs[0].used, Some(10.0));
+}
+
+#[test]
+fn quota_record_is_throttled_unless_a_window_is_full() {
+    let _sandbox = Sandbox::new();
+    let a = store::upsert(chatgpt_account(), None).unwrap();
+    let used = |n: &str| map(&[("x-codex-primary-used-percent", n)]);
+    let stored = || {
+        store::get(Provider::ChatGpt, &a.id)
+            .unwrap()
+            .quota
+            .unwrap()
+            .packs[0]
+            .used
+            .unwrap()
+    };
+    quota::record(&a, &used("10"));
+    quota::record(&a, &used("20"));
+    assert_eq!(stored(), 10.0);
+    quota::record(&a, &used("100"));
+    assert_eq!(stored(), 100.0);
+}
+
+#[tokio::test]
+async fn url_rejects_foreign_hosts() {
+    let _sandbox = Sandbox::new();
+    for (base, path) in [
+        ("https://evil.com", "/x"),
+        ("http://chatgpt.com", "/x"),
+        ("https://chatgpt.com.evil.com", "/x"),
+        ("http://127.0.0.1:9", "/x"),
+    ] {
+        assert_eq!(
+            endpoints::url(base, path).unwrap_err().status,
+            400,
+            "{base}"
+        );
+    }
+    let ok = endpoints::url("https://chatgpt.com/backend-api", "/codex/models").unwrap();
+    assert_eq!(ok.as_str(), "https://chatgpt.com/backend-api/codex/models");
+    assert!(endpoints::url("https://auth.openai.com", "/oauth/token").is_ok());
+    let _server = mock(200, &[], json!({}), false).await;
+    assert!(endpoints::url(&endpoints::current().auth, "/oauth/token").is_ok());
+    assert_eq!(
+        endpoints::url("http://127.0.0.1:9", "/x").unwrap().port(),
+        Some(9)
+    );
+    assert!(endpoints::url("http://evil.com", "/x").is_err());
 }
