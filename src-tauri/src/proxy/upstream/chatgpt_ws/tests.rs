@@ -942,6 +942,36 @@ mod relay {
     }
 
     #[tokio::test]
+    async fn ws_forbidden_handshake_fails_over_without_refresh() {
+        let _sandbox = Sandbox::new();
+        let accounts = setup(2);
+        let server = upstream(
+            Box::new(|call| {
+                call.first
+                    .then(|| (403, json!({"error":{"message":"forbidden"}})))
+            }),
+            Box::new(|_, _| Step::Events(answer("resp_B1", "b1"))),
+        )
+        .await;
+        let mut client = connect().await;
+        let events = client.turn(create(vec![user("u1")])).await;
+        assert!(!events.iter().any(|e| e["type"] == "error"), "{events:?}");
+        let handshakes = server.handshakes();
+        assert_eq!(handshakes.len(), 2, "{handshakes:?}");
+        assert_ne!(handshakes[0].0, handshakes[1].0, "the turn moved accounts");
+        // A forced refresh would have hit the mock's missing token route and recorded an
+        // auth error; a 403 must not rotate the refresh token at all.
+        for a in &accounts {
+            let stored = store::get(Provider::ChatGpt, &a.id).unwrap();
+            assert_eq!(stored.auth_error, None, "{}", a.id);
+            assert_eq!(
+                stored.credentials.refresh_token,
+                a.credentials.refresh_token
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn ws_handshake_rejection_body_is_read_under_the_deadline() {
         use super::super::upstream::{connect, Refused};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

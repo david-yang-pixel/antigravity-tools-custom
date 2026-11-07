@@ -611,9 +611,9 @@ impl Relay {
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(BACKOFF_MAX);
                 }
-                Err(Refused::Answered(failure, _))
-                    if !refreshed && matches!(failure.status, 401 | 403) =>
-                {
+                // Only an unauthorized credential is worth a rotation: a 403 is classified
+                // and follows the failover policy, like the HTTP path.
+                Err(Refused::Answered(failure, _)) if !refreshed && failure.status == 401 => {
                     refreshed = true;
                     match tokio::time::timeout_at(
                         deadline,
