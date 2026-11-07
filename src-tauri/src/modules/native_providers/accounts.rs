@@ -217,6 +217,36 @@ impl Lease {
         };
         self.finish(Some((retry_after.unwrap_or(1).min(86400) as i64, message)));
     }
+    /// Settles the lease by the provider's own classification, falling back to the
+    /// status-derived breaker rules when the failure carries none.
+    pub fn settle(&mut self, failure: &Failure) {
+        use http::Penalty;
+        match &failure.penalty {
+            None => self.failure_after(failure.status, None),
+            Some(Penalty::Breaker { retry_after }) => {
+                self.failure_after(failure.status, *retry_after)
+            }
+            Some(Penalty::Until { at, message }) => {
+                if self.finished {
+                    return;
+                }
+                self.finish(Some((1, message)));
+                if let Ok(mut r) = RUNTIME.lock() {
+                    if let Some(r) = r.get_mut(&self.account.id) {
+                        r.cooldown_until = r.cooldown_until.max(*at);
+                    }
+                }
+            }
+            Some(Penalty::Neutral) => self.finished = true,
+            Some(Penalty::Disable { message }) => {
+                let _ = store::update(self.account.provider, &self.account.id, None, |a| {
+                    a.enabled = false;
+                    a.auth_error = Some(message.clone());
+                });
+                self.failure_after(failure.status, None);
+            }
+        }
+    }
     fn finish(&mut self, failure: Option<(i64, &str)>) {
         if self.finished {
             return;

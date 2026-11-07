@@ -1473,3 +1473,109 @@ fn publication_targets_lease_the_only_enabled_accounts_native_id() {
     assert_eq!(lease.account.id, global.id);
     assert_eq!(lease.model, "shared-model-sg");
 }
+
+async fn settle_lease(uid: &str, breaker_enabled: bool) -> (Account, accounts::Lease) {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let a = store::upsert(account(Provider::Qoder, uid), None).unwrap();
+    let manager = crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
+    manager
+        .update_circuit_breaker_config(crate::models::CircuitBreakerConfig {
+            enabled: breaker_enabled,
+            ..Default::default()
+        })
+        .await;
+    let policy = Policy::live(&manager, None).await;
+    let lease = accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &["shared-model"],
+        "",
+        &policy,
+        &HashSet::new(),
+    )
+    .unwrap()
+    .unwrap();
+    (a, lease)
+}
+
+#[tokio::test]
+async fn lease_settle_until_blocks_even_with_breaker_disabled() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-until", false).await;
+    lease.settle(&http::Failure::classified(
+        429,
+        "q",
+        http::Penalty::Until {
+            at: now() + 3600,
+            message: "Account quota exhausted",
+        },
+        true,
+    ));
+    drop(lease);
+    let r = accounts::runtime(&a.id);
+    assert!(r.cooldown_until >= now() + 3599);
+    assert_eq!(r.last_error.as_deref(), Some("Account quota exhausted"));
+}
+
+#[tokio::test]
+async fn lease_settle_neutral_leaves_counters_untouched() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-neutral", true).await;
+    lease.settle(&http::Failure::classified(
+        400,
+        "q",
+        http::Penalty::Neutral,
+        false,
+    ));
+    drop(lease);
+    let r = accounts::runtime(&a.id);
+    assert_eq!(r.failures, 0);
+    assert_eq!(r.cooldown_until, 0);
+}
+
+#[tokio::test]
+async fn lease_settle_disable_turns_account_off() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-disable", true).await;
+    lease.settle(&http::Failure::classified(
+        401,
+        "q",
+        http::Penalty::Disable {
+            message: "dead".into(),
+        },
+        true,
+    ));
+    drop(lease);
+    let stored = store::get(Provider::Qoder, &a.id).unwrap();
+    assert!(!stored.enabled);
+    assert_eq!(stored.auth_error.as_deref(), Some("dead"));
+    assert_eq!(accounts::runtime(&a.id).failures, 1);
+}
+
+#[tokio::test]
+async fn lease_settle_without_penalty_matches_failure_after() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-plain-a", true).await;
+    lease.settle(&http::Failure::new(429, "x"));
+    drop(lease);
+    store::remove(Provider::Qoder, &a.id).unwrap();
+    let (b, mut lease) = settle_lease("settle-plain-b", true).await;
+    lease.failure_after(429, None);
+    drop(lease);
+    let (ra, rb) = (accounts::runtime(&a.id), accounts::runtime(&b.id));
+    assert_eq!(ra.failures, rb.failures);
+    assert_eq!(ra.last_error, rb.last_error);
+    assert!((ra.cooldown_until - rb.cooldown_until).abs() <= 1);
+    assert_eq!(ra.failures, 1);
+}
+
+#[test]
+fn plain_clients_are_cached_per_account_and_route() {
+    use crate::modules::egress::Exit;
+    let a = account(Provider::Qoder, "plain-cache");
+    assert!(!http::plain_cached(&a.id));
+    http::plain_client_on(&a, &Exit::Direct).unwrap();
+    assert!(http::plain_cached(&a.id));
+    http::plain_client_on(&a, &Exit::Direct).unwrap();
+    http::forget(&a.id);
+    assert!(!http::plain_cached(&a.id));
+}
