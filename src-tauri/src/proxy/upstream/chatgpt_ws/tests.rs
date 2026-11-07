@@ -835,7 +835,7 @@ mod relay {
         )
         .await;
         set_test_timing(Some(Timing {
-            ping_after: Duration::from_millis(200),
+            ping_after: Duration::from_millis(500),
             pong_timeout: Duration::from_secs(5),
             idle: Duration::from_secs(300),
         }));
@@ -846,7 +846,7 @@ mod relay {
             !server.seen().iter().any(|s| matches!(s, Seen::Ping { .. })),
             "a busy socket is not pinged"
         );
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
         client.turn(continue_from("resp_1", vec![user("u3")])).await;
         let seen = server.seen();
         let ping = seen
@@ -1089,5 +1089,33 @@ mod relay {
             server.handshakes().into_iter().map(|(a, _)| a).collect();
         assert_eq!(server.handshakes().len(), 3);
         assert_eq!(accounts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn ws_trailing_failed_event_does_not_spoil_replay() {
+        let _sandbox = Sandbox::new();
+        setup(1);
+        let server = upstream(
+            accept_all(),
+            Box::new(|call, _| match call.nth {
+                0 => Step::Events(answer("resp_1", "a1")),
+                1 => Step::Events(vec![
+                    error_event(
+                        "previous_response_not_found",
+                        "Previous response with id 'resp_1' not found.",
+                    ),
+                    json!({"type":"response.failed","response":{"id":"resp_x","status":"failed",
+                        "error":{"code":"previous_response_not_found","message":"Previous response with id 'resp_1' not found."}}}),
+                ]),
+                _ => Step::Events(answer("resp_2", "a2")),
+            }),
+        )
+        .await;
+        let mut client = connect().await;
+        client.turn(create(vec![user("u1")])).await;
+        let events = client.turn(continue_from("resp_1", vec![user("u2")])).await;
+        assert!(!events.iter().any(|e| e["type"] == "error"), "{events:?}");
+        assert_eq!(completed(&events)["response"]["id"], "resp_2");
+        assert_eq!(server.frames().len(), 3);
     }
 }

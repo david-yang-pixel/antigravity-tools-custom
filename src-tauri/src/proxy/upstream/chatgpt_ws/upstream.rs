@@ -63,13 +63,24 @@ pub(super) async fn connect(
     deadline: Instant,
 ) -> Result<Upstream, Refused> {
     let url = url().map_err(|e| Refused::Answered(e, None))?;
+    // Nothing reached the upstream yet: an account-specific preparation failure (missing
+    // account id, unusable egress node) belongs to another account's turn.
+    let prepared = |e: Failure| {
+        Refused::Answered(
+            Failure {
+                failover: true,
+                ..e
+            },
+            None,
+        )
+    };
     let mut headers = client::headers(
         account,
         session,
         &reqwest::header::HeaderMap::new(),
         client::Endpoint::Responses,
     )
-    .map_err(|e| Refused::Answered(e, None))?;
+    .map_err(prepared)?;
     headers.remove(ACCEPT);
     headers.remove(CONTENT_TYPE);
     headers.insert("openai-beta", HeaderValue::from_static(BETA));
@@ -81,7 +92,7 @@ pub(super) async fn connect(
                 None,
             )
         })?
-        .map_err(|e| Refused::Answered(e, None))?;
+        .map_err(prepared)?;
     let handshake = http.get(url).headers(headers).upgrade().send();
     let response = match tokio::time::timeout_at(deadline, handshake).await {
         Ok(Ok(response)) => response,

@@ -203,6 +203,9 @@ struct Relay {
     transcript: Transcript,
     /// Frames the client sent while a turn was in flight.
     queued: VecDeque<Value>,
+    /// The bound socket refused a turn with a bare `error` event, which the upstream often
+    /// follows with a `response.failed` for the same request.
+    trailing_failure: bool,
 }
 
 /// Relays a Codex WebSocket whose first generating frame resolved to `published` (a
@@ -228,6 +231,7 @@ pub async fn run(socket: WebSocket, first: Value, published: PublishedModel, sta
         owners: HashMap::new(),
         transcript: Transcript::new(TRANSCRIPT_LIMIT),
         queued: VecDeque::new(),
+        trailing_failure: false,
     };
     let mut next = Some(first);
     loop {
@@ -248,12 +252,12 @@ pub async fn run(socket: WebSocket, first: Value, published: PublishedModel, sta
     tracing::info!("Codex responses websocket: ChatGPT relay closed");
 }
 
-/// Resolves when the bound socket closes; pending while none is bound.
-async fn closed(upstream: &mut Option<Upstream>) {
-    let Some(upstream) = upstream.as_mut() else {
-        return std::future::pending().await;
-    };
-    while let Incoming::Event(_) = upstream.next().await {}
+/// The bound socket's next message; pending while none is bound.
+async fn upstream_message(upstream: &mut Option<Upstream>) -> Incoming {
+    match upstream.as_mut() {
+        Some(upstream) => upstream.next().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl Relay {
@@ -268,14 +272,14 @@ impl Relay {
     async fn idle(&mut self) -> Option<Value> {
         enum Step {
             Client(FromClient),
-            UpstreamClosed,
+            Upstream(Incoming),
             Idle,
         }
         let deadline = Instant::now() + self.timing.idle;
         loop {
             let step = tokio::select! {
                 message = self.client.recv() => Step::Client(from_client(message)),
-                () = closed(&mut self.upstream) => Step::UpstreamClosed,
+                incoming = upstream_message(&mut self.upstream) => Step::Upstream(incoming),
                 () = tokio::time::sleep_until(deadline) => Step::Idle,
             };
             match step {
@@ -288,7 +292,9 @@ impl Relay {
                 Step::Client(FromClient::Skip) => {}
                 Step::Client(FromClient::Gone) => return None,
                 // Reconnected on the next turn.
-                Step::UpstreamClosed => self.upstream = None,
+                Step::Upstream(Incoming::Closed) => self.upstream = None,
+                // Leftovers of a finished request.
+                Step::Upstream(Incoming::Event(_)) => self.trailing_failure = false,
                 Step::Idle => {
                     let _ = self
                         .client
@@ -573,6 +579,7 @@ impl Relay {
             match upstream::connect(&lease.account, &session, deadline).await {
                 Ok(upstream) => {
                     self.upstream = Some(upstream);
+                    self.trailing_failure = false;
                     return Ok(());
                 }
                 Err(Refused::Transport(failure)) => {
@@ -697,10 +704,18 @@ impl Relay {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
+            if std::mem::take(&mut self.trailing_failure)
+                && kind == "response.failed"
+                && prelude.is_empty()
+            {
+                // The second half of the refusal this socket already reported.
+                continue;
+            }
             super::responses_relay::rename(&mut event, alias);
             if matches!(kind.as_str(), "error" | "response.failed") {
                 let failure = errors::classify_event(&event, now());
                 if !output {
+                    self.trailing_failure = kind == "error";
                     return Outcome::Refused {
                         failure,
                         prelude,
