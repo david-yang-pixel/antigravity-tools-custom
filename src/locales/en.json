@@ -2368,6 +2368,7 @@
       "unsupported": "Activity rewards are available for China accounts only.",
       "auto_rewards": "Auto-claim rewards",
       "auto_lottery": "Auto free draws",
+      "auto_travel": "Auto send Buddy travelling",
       "hint": "Only claim rewards the upstream confirms are eligible. When auto free draws are enabled, claiming also uses gifted draw chances without spending credits.",
       "paused_hint": "Automatic tasks are paused. Enable the account and auto-manage to resume.",
       "checked_at": "Last query",
@@ -2398,7 +2399,9 @@
       "item_unsupported": "Unsupported",
       "item_failed": "Failed",
       "item_unknown": "Result unconfirmed",
-      "item_skipped": "Skipped"
+      "item_skipped": "Skipped",
+      "item_departed": "Departed",
+      "travel_depart": "Buddy travel departure"
     },
     "egress": {
       "title": "Egress nodes (airport subscription)",
