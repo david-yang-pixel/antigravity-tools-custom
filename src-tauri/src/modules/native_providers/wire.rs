@@ -93,6 +93,7 @@ pub fn event(provider: Provider, data: &str) -> Result<Option<String>, Failure> 
     let v: Value = serde_json::from_str(&decoded)
         .map_err(|_| Failure::new(502, "Invalid provider stream event"))?;
     match provider {
+        Provider::ChatGpt => return Err(Failure::new(501, "ChatGPT support is incomplete")),
         Provider::Qoder => {
             if let Some(status) = number(&v, &["statusCodeValue"]) {
                 if status != 200.0 {

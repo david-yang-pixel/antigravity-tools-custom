@@ -353,6 +353,10 @@ async fn discover_native_account(
         .map_err(|e| e.to_string())?;
     let models = match provider {
         NativeProvider::Qoder => native::qoder::models(&client, &account).await,
+        NativeProvider::ChatGpt => Err(native::http::Failure::new(
+            501,
+            "ChatGPT support is incomplete",
+        )),
     }
     .map_err(|e| e.to_string())?;
     let ids = models.iter().map(|m| m.id.clone()).collect();

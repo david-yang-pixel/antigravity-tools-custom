@@ -21,6 +21,7 @@ pub async fn check_native_client_version(
 ) -> Result<native::qoder::releases::ClientVersionView, String> {
     match request.provider {
         Provider::Qoder => Ok(native::qoder::releases::check(request.refresh).await),
+        Provider::ChatGpt => Err("ChatGPT support is incomplete".into()),
     }
 }
 #[derive(Deserialize)]
@@ -161,6 +162,7 @@ pub async fn test_native_account_egress(request: SessionRequest) -> Result<egres
     let account = native::store::get(request.provider, &request.id)?;
     let url = match request.provider {
         Provider::Qoder => format!("{}/", native::qoder::gateway(account.realm)),
+        Provider::ChatGpt => return Err("ChatGPT support is incomplete".into()),
     };
     let direct_url = url.clone();
     egress::test_account(

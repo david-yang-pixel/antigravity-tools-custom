@@ -131,7 +131,7 @@ pub async fn route(
 /// `text.format` must be rejected up front instead of silently running unconstrained.
 fn dialect(provider: Provider) -> codec::Dialect {
     match provider {
-        Provider::Qoder => codec::Dialect {
+        Provider::Qoder | Provider::ChatGpt => codec::Dialect {
             structured_output: false,
         },
     }
@@ -144,6 +144,7 @@ fn dialect(provider: Provider) -> codec::Dialect {
 fn representable(provider: Provider, chat: &Value) -> Result<(), Failure> {
     match provider {
         Provider::Qoder => {}
+        Provider::ChatGpt => return Err(Failure::new(501, "ChatGPT support is incomplete")),
     }
     let choice = chat.get("tool_choice");
     if choice.is_some_and(|choice| choice != "auto" && choice != "none") {
@@ -191,6 +192,7 @@ async fn send(
             }
             native::qoder::chat(&client, account, model, payload, remaining).await
         }
+        Provider::ChatGpt => Err(Failure::new(501, "ChatGPT support is incomplete").into()),
     }
 }
 fn normalize(provider: Provider, response: reqwest::Response) -> NativeEvents {

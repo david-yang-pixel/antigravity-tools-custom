@@ -96,6 +96,7 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
     let result = match http::client_for(&a).await {
         Ok(client) => match provider {
             Provider::Qoder => qoder::refresh(&client, &mut a).await,
+            Provider::ChatGpt => Err(Failure::new(501, "ChatGPT support is incomplete")),
         },
         Err(error) => Err(error),
     };
@@ -132,6 +133,10 @@ async fn fetch_metadata(
                 }
             },
             qoder::quota(client, a)
+        ),
+        Provider::ChatGpt => (
+            None,
+            Err(Failure::new(501, "ChatGPT support is incomplete")),
         ),
     }
 }

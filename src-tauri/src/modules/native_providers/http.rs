@@ -239,6 +239,7 @@ pub fn official_url(provider: Provider, raw: &str) -> Result<url::Url, Failure> 
         url::Url::parse(raw).map_err(|_| Failure::new(400, "Invalid provider service URL"))?;
     let domains: &[&str] = match provider {
         Provider::Qoder => &["qoder.com", "qoder.com.cn", "qoder.sh"],
+        Provider::ChatGpt => return Err(Failure::new(501, "ChatGPT support is incomplete")),
     };
     let allowed = url.host_str().is_some_and(|host| {
         domains

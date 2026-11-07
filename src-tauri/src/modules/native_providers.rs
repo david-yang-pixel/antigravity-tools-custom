@@ -3,6 +3,8 @@
 //! are shared.
 #[path = "native_providers/accounts.rs"]
 pub mod accounts;
+#[path = "native_providers/chatgpt.rs"]
+pub mod chatgpt;
 #[path = "native_providers/http.rs"]
 pub mod http;
 #[path = "native_providers/login.rs"]
@@ -24,6 +26,7 @@ const MAX_ACCOUNT_CONCURRENCY: usize = 8;
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Qoder,
+    ChatGpt,
 }
 
 impl Provider {
@@ -31,16 +34,19 @@ impl Provider {
     pub fn key(self) -> &'static str {
         match self {
             Self::Qoder => "qoder",
+            Self::ChatGpt => "chatgpt",
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Qoder => "Qoder",
+            Self::ChatGpt => "ChatGPT",
         }
     }
     pub fn source(self) -> &'static str {
         match self {
             Self::Qoder => "qoder:default",
+            Self::ChatGpt => "chatgpt:default",
         }
     }
     pub fn from_source(source: &str) -> Option<Self> {
@@ -142,6 +148,10 @@ pub struct Credentials {
     pub organization_tags: Option<Value>,
     #[serde(default)]
     pub data_policy_agreed: Option<bool>,
+    #[serde(default)]
+    pub id_token: String,
+    #[serde(default)]
+    pub chatgpt_account_id: String,
 }
 
 /// This value is persisted only inside an authenticated, encrypted vault. Never serialize
@@ -180,10 +190,13 @@ impl Account {
             enabled: true,
             auto_refresh: true,
             expires_at: 0,
-            credentials: Credentials {
-                machine_id: uuid::Uuid::new_v4().to_string(),
-                device_id: uuid::Uuid::new_v4().to_string(),
-                ..Default::default()
+            credentials: match provider {
+                Provider::Qoder => Credentials {
+                    machine_id: uuid::Uuid::new_v4().to_string(),
+                    device_id: uuid::Uuid::new_v4().to_string(),
+                    ..Default::default()
+                },
+                Provider::ChatGpt => Credentials::default(),
             },
             models: Vec::new(),
             verified_models: BTreeMap::new(),
