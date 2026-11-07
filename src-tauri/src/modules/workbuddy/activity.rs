@@ -1,5 +1,7 @@
 //! Opt-in domestic reward collection, independent of downstream billing.
-//! Protocol references: workbuddy2api v2.6.3 growth_reward.go/travel.go/task_common.py.
+//! Protocol references: workbuddy2api v2.6.3 growth_reward.go/travel.go/task_common.py;
+//! travel/lottery endpoints re-checked against workbuddy2api-hub wb_tasks.py and the
+//! official 5.6.2 client (empty-body travel claim).
 mod api;
 #[cfg(test)]
 mod tests;
@@ -129,7 +131,10 @@ fn item(kind: &str, id: &str, status: &str) -> Item {
 }
 fn eligible(account: &Account) -> bool {
     let m = &account.management;
-    account.realm == Realm::Cn && account.enabled && m.managed && (m.auto_rewards || m.auto_lottery)
+    account.realm == Realm::Cn
+        && account.enabled
+        && m.managed
+        && (m.auto_rewards || m.auto_lottery || m.auto_travel)
 }
 fn next_delay(account: &Account) -> i64 {
     super::identity::activity_interval_secs(&account.id, account.management.activity.idle_streak)
@@ -333,7 +338,7 @@ impl Runner {
             api::request(&self.account, Method::GET, api::TASKS, None, false),
             api::request(&self.account, Method::GET, api::STREAK, None, false),
             api::request(&self.account, Method::GET, api::TRAVEL, None, false),
-            api::request(&self.account, Method::GET, api::CHANCES, None, false),
+            lottery_chances(&self.account),
         );
         self.state.items.clear();
         let account = self.account.clone();
@@ -343,6 +348,10 @@ impl Runner {
         self.read_result("lottery", chances, lottery_item);
         self.state.checked_at = accounts::now();
         self.save()
+    }
+    /// The travel switch governs manual and automatic runs alike, like free draws.
+    fn travel_allowed(&self) -> Result<bool, String> {
+        Ok(current(&self.account, self.action)?.management.auto_travel)
     }
     fn allowed(&self, lottery: bool) -> Result<bool, String> {
         let a = current(&self.account, self.action)?;
@@ -371,6 +380,8 @@ impl Runner {
             }
             self.claim(entry).await?;
         }
+        // After an arrival reward was claimed above, the Buddy is home and can leave again.
+        self.depart().await?;
         // Re-query chances after milestone claims, which can award new free draws.
         if self.allowed(true)? {
             for _ in 0..5 {
@@ -388,12 +399,10 @@ impl Runner {
                     }
                     continue;
                 }
-                let chances =
-                    match api::request(&self.account, Method::GET, api::CHANCES, None, false).await
-                    {
-                        Ok(v) => lottery_item(&v),
-                        Err(e) => Err(e.detail),
-                    };
+                let chances = match lottery_chances(&self.account).await {
+                    Ok(v) => lottery_item(&v),
+                    Err(e) => Err(e.detail),
+                };
                 let entries = match chances {
                     Ok(entries) => entries,
                     Err(e) => {
@@ -427,6 +436,94 @@ impl Runner {
         }
         Ok(())
     }
+    /// Journal a write before its network I/O, so a crash leaves an unconfirmed record.
+    fn begin(&mut self, entry: &Item) -> Result<(), String> {
+        self.state.history.insert(
+            0,
+            Record {
+                at: accounts::now(),
+                id: entry.id.clone(),
+                kind: entry.kind.clone(),
+                name: entry.name.clone(),
+                status: "unknown".into(),
+                credits: None,
+                detail: Some("Request started; result unconfirmed".into()),
+            },
+        );
+        self.state.history.truncate(50);
+        self.save()
+    }
+    /// Sends a Buddy that is home and has not travelled today to the first listed
+    /// destination. Only the account's own departure action; no task or event is faked.
+    async fn depart(&mut self) -> Result<(), String> {
+        if !self.travel_allowed()? {
+            return Ok(());
+        }
+        let status = match api::request(&self.account, Method::GET, api::TRAVEL, None, false).await
+        {
+            Ok(value) => value,
+            Err(e) => {
+                if e.status != "unsupported" {
+                    self.failures.push(e.detail);
+                }
+                return Ok(());
+            }
+        };
+        if status["state"].as_str() != Some("idle")
+            || status["daily_limit_reached"].as_bool() == Some(true)
+        {
+            return Ok(());
+        }
+        let location =
+            match api::request(&self.account, Method::GET, api::TRAVEL_CONFIG, None, false).await {
+                Ok(config) => config["locations"]
+                    .as_array()
+                    .and_then(|locations| locations.first())
+                    .and_then(|location| location["id"].as_i64()),
+                Err(e) => {
+                    self.failures.push(e.detail);
+                    return Ok(());
+                }
+            };
+        let Some(location) = location else {
+            self.failures
+                .push("Travel destinations are missing or invalid".into());
+            return Ok(());
+        };
+        if !self.travel_allowed()? {
+            return Ok(());
+        }
+        let mut entry = item("travel", "depart", "available");
+        entry.name = "Buddy travel departure".into();
+        self.begin(&entry)?;
+        let result = api::request(
+            &self.account,
+            Method::POST,
+            api::TRAVEL_DEPART,
+            Some(json!({ "location_id": location })),
+            false,
+        )
+        .await;
+        let record = &mut self.state.history[0];
+        match result {
+            Ok(value) => {
+                record.status = "departed".into();
+                record.detail = Some(api::safe_name(
+                    &self.account,
+                    value["location"]["name"].as_str(),
+                    "Departed",
+                ));
+            }
+            Err(e) => {
+                record.status = e.status.into();
+                record.detail = Some(e.detail.clone());
+                if matches!(e.status, "unknown" | "failed") {
+                    self.failures.push(e.detail);
+                }
+            }
+        }
+        self.save()
+    }
     fn replace_item(&mut self, entry: Item) {
         self.state
             .items
@@ -456,25 +553,39 @@ impl Runner {
                 self.state.history.remove(index);
             }
         }
-        self.state.history.insert(
-            0,
-            Record {
-                at: accounts::now(),
-                id: entry.id.clone(),
-                kind: entry.kind.clone(),
-                name: entry.name.clone(),
-                status: "unknown".into(),
-                credits: None,
-                detail: Some("Request started; result unconfirmed".into()),
-            },
-        );
-        self.state.history.truncate(50);
-        self.save()?;
+        self.begin(&entry)?;
         let result = match entry.kind.as_str() {
             "task" => api::claim_task(&self.account, &entry.id).await,
-            "streak" => api::request(&self.account, Method::POST, "/activity/growth/redeem", Some(json!({"tier":entry.id,"client_token":token})), false).await,
-            "travel" => api::request(&self.account, Method::POST, "/activity/growth/buddy/travel/claim", Some(json!({"record_id":entry.id.parse::<i64>().map_err(|_| "Invalid travel record")?})), false).await,
-            "lottery" => api::request(&self.account, Method::POST, "/activity/growth/lottery/draw", Some(json!({"client_token":token})), false).await,
+            "streak" => {
+                api::request(
+                    &self.account,
+                    Method::POST,
+                    "/activity/growth/redeem",
+                    Some(json!({"tier":entry.id,"client_token":token})),
+                    false,
+                )
+                .await
+            }
+            "travel" => {
+                api::request(
+                    &self.account,
+                    Method::POST,
+                    api::TRAVEL_CLAIM,
+                    Some(json!({})),
+                    false,
+                )
+                .await
+            }
+            "lottery" => {
+                api::request(
+                    &self.account,
+                    Method::POST,
+                    "/activity/growth/lottery/draw",
+                    Some(json!({"client_token":token})),
+                    false,
+                )
+                .await
+            }
             _ => return Err("Unknown reward type".into()),
         };
         let record = &mut self.state.history[0];
@@ -569,15 +680,19 @@ fn tasks(value: &Value, account: &Account) -> Result<Vec<Item>, String> {
             let mut entry = item("task", id, status);
             entry.name = api::safe_name(
                 account,
-                v["task_name"]
+                v["title"]
                     .as_str()
-                    .or_else(|| v["name"].as_str())
-                    .or_else(|| v["title"].as_str()),
+                    .or_else(|| v["task_name"].as_str())
+                    .or_else(|| v["name"].as_str()),
                 id,
             );
-            entry.credits = api::amount(&v["reward"]["credit"]);
+            entry.credits =
+                api::amount(&v["reward_credit"]).or_else(|| api::amount(&v["reward"]["credit"]));
             Ok(entry)
         })
+        // Unfinished tasks need actions in the official client; the gateway cannot
+        // progress them, so they are not shown. Finished ones reappear as claimable.
+        .filter(|entry| !matches!(entry, Ok(e) if e.status == "pending"))
         .collect()
 }
 fn tiers(value: &Value) -> Result<Vec<Item>, String> {
@@ -615,7 +730,8 @@ fn travel_item(value: &Value) -> Result<Vec<Item>, String> {
     let state = value["state"].as_str().ok_or("Travel state is missing")?;
     let record = value["record_id"].as_i64().filter(|id| *id > 0);
     let status = match state {
-        "arrived" if record.is_some() => "available",
+        // The official client claims with an empty body; no record id is required.
+        "arrived" => "available",
         "idle" | "traveling" => "pending",
         "claimed" => "claimed",
         _ => "unknown",
@@ -631,8 +747,9 @@ fn travel_item(value: &Value) -> Result<Vec<Item>, String> {
     Ok(vec![entry])
 }
 fn lottery_item(value: &Value) -> Result<Vec<Item>, String> {
-    let balance = value["balance"]
+    let balance = value["chances"]
         .as_u64()
+        .or_else(|| value["balance"].as_u64())
         .filter(|n| *n <= 100_000)
         .ok_or("Free lottery balance is missing or invalid")?;
     let mut entry = item(
@@ -642,4 +759,13 @@ fn lottery_item(value: &Value) -> Result<Vec<Item>, String> {
     );
     entry.detail = Some(format!("Free chances: {balance}"));
     Ok(vec![entry])
+}
+/// Prefer the current summary endpoint; fall back to the older one only when it is absent.
+async fn lottery_chances(account: &Account) -> Result<Value, api::Error> {
+    match api::request(account, Method::GET, api::LOTTERY_SUMMARY, None, false).await {
+        Err(e) if e.status == "unsupported" => {
+            api::request(account, Method::GET, api::CHANCES, None, false).await
+        }
+        other => other,
+    }
 }

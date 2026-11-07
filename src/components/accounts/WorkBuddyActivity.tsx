@@ -10,7 +10,7 @@ export interface ActivityItem {
 }
 export interface ActivityRecord {
     at: number; kind: ActivityKind; id: string; name: string;
-    status: 'claimed' | 'skipped' | 'failed' | 'unknown';
+    status: 'claimed' | 'departed' | 'skipped' | 'failed' | 'unknown';
     credits: number | null; detail: string | null;
 }
 export interface ActivityState {
@@ -20,7 +20,7 @@ export interface ActivityState {
 }
 
 const button = 'inline-flex items-center justify-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-900 dark:hover:bg-gray-800';
-const statusColor = (status: string) => status === 'claimed' || status === 'success'
+const statusColor = (status: string) => status === 'claimed' || status === 'departed' || status === 'success'
     ? 'text-green-700 dark:text-green-400'
     : ['failed', 'partial', 'unknown'].includes(status) ? 'text-amber-700 dark:text-amber-400'
         : status === 'available' || status === 'running' ? 'text-blue-600 dark:text-blue-400' : 'text-gray-500 dark:text-gray-400';
@@ -35,13 +35,15 @@ export default function WorkBuddyActivity({ account, now, busy, onChange }: {
     const actionDisabled = busy || running || !account.enabled;
     // Allow stopping automatic collection while a background run is in progress.
     const autoDisabled = busy || !account.enabled || !m.managed;
-    const autoEnabled = !!m.auto_rewards || !!m.auto_lottery;
+    const autoEnabled = !!m.auto_rewards || !!m.auto_lottery || !!m.auto_travel;
     const date = (at?: number) => at && at > 0 ? new Date(at * 1000).toLocaleString() : t('workbuddy.activity.time_unknown');
     const credits = (amount: number | null) => amount === null || amount === undefined
         ? t('workbuddy.activity.amount_unknown') : t('workbuddy.activity.credits', { amount: amount.toLocaleString(undefined, { maximumFractionDigits: 2 }) });
     const items = activity?.items ?? [];
     const history = [...(activity?.history ?? [])].sort((a, b) => b.at - a.at).slice(0, 50);
     const titleId = `workbuddy-activity-${account.id}`;
+    // The departure is the gateway's own action, not an upstream reward; name it locally.
+    const recordName = (record: ActivityRecord) => record.kind === 'travel' && record.id === 'depart' ? t('workbuddy.activity.travel_depart') : record.name || record.id;
 
     return <section aria-labelledby={titleId} className="mt-4 border-t border-gray-200 pt-3 text-xs dark:border-gray-700">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -55,6 +57,7 @@ export default function WorkBuddyActivity({ account, now, busy, onChange }: {
             <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
                 <label className="inline-flex items-center gap-1.5"><input type="checkbox" className="accent-blue-600" checked={!!m.auto_rewards} disabled={autoDisabled} onChange={e => onChange({ auto_rewards: e.target.checked })} />{t('workbuddy.activity.auto_rewards')}</label>
                 <label className="inline-flex items-center gap-1.5"><input type="checkbox" className="accent-blue-600" checked={!!m.auto_lottery} disabled={autoDisabled} onChange={e => onChange({ auto_lottery: e.target.checked })} />{t('workbuddy.activity.auto_lottery')}</label>
+                <label className="inline-flex items-center gap-1.5"><input type="checkbox" className="accent-blue-600" checked={!!m.auto_travel} disabled={autoDisabled} onChange={e => onChange({ auto_travel: e.target.checked })} />{t('workbuddy.activity.auto_travel')}</label>
                 <span role="status" className={statusColor(activity?.status || 'idle')}>{t(`workbuddy.activity.status_${activity?.status || 'idle'}`)}</span>
             </div>
             <p className="mt-2 leading-relaxed text-gray-500 dark:text-gray-400">{t('workbuddy.activity.hint')}</p>
@@ -75,7 +78,7 @@ export default function WorkBuddyActivity({ account, now, busy, onChange }: {
                 <summary className="w-fit cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{t('workbuddy.activity.history', { count: history.length })}</summary>
                 {history.length > 0 ? <ol aria-label={t('workbuddy.activity.history_label')} tabIndex={0} className="mt-2 max-h-64 divide-y divide-gray-200 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:divide-gray-700">
                     {history.map((record, index) => <li key={`${record.at}:${record.kind}:${record.id}:${index}`} className="flex flex-wrap items-start justify-between gap-x-5 gap-y-1 py-2 pr-2">
-                        <div className="min-w-0 flex-1"><div className="break-all font-medium">{record.name || record.id}</div><div className="mt-1 text-gray-500 dark:text-gray-400">{date(record.at)} · {t(`workbuddy.activity.kind_${record.kind}`)}</div>{record.detail && <p className="mt-1 break-words text-gray-500 dark:text-gray-400">{record.detail}</p>}</div>
+                        <div className="min-w-0 flex-1"><div className="break-all font-medium">{recordName(record)}</div><div className="mt-1 text-gray-500 dark:text-gray-400">{date(record.at)} · {t(`workbuddy.activity.kind_${record.kind}`)}</div>{record.detail && <p className="mt-1 break-words text-gray-500 dark:text-gray-400">{record.detail}</p>}</div>
                         <div className="text-right"><div className={statusColor(record.status)}>{t(`workbuddy.activity.item_${record.status}`)}</div><div className="mt-1 tabular-nums text-gray-500 dark:text-gray-400">{credits(record.credits)}</div></div>
                     </li>)}
                 </ol> : <p className="mt-2 text-gray-500 dark:text-gray-400">{t('workbuddy.activity.no_history')}</p>}

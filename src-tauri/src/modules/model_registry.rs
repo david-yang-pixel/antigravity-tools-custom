@@ -13,6 +13,8 @@ use std::{
 use crate::modules::{account, custom_upstream, native_providers, workbuddy};
 use crate::utils::fs::{file_stamp, write_atomic, FileStamp};
 
+/// Upper bound of additional native IDs one publication may pool besides its primary target.
+pub const MAX_EXTRA_NATIVE_MODELS: usize = 16;
 pub const ANTIGRAVITY_SOURCE: &str = "antigravity:default";
 pub const WORKBUDDY_SOURCE: &str = "workbuddy:default";
 pub const MAX_PUBLISHED_MODELS: usize = 5_000;
@@ -42,6 +44,8 @@ pub struct ModelSource {
     pub display_name: String,
     pub enabled: bool,
     pub account_count: usize,
+    /// `pools_native_models(id)`: publications on this source may bind extra native IDs.
+    pub pools_native_models: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -66,8 +70,25 @@ pub struct PublishedModel {
     pub display_name: String,
     pub source_id: String,
     pub native_model: String,
+    /// Further native IDs of the same source pooled behind this publication; the dispatcher
+    /// treats `[native_model] + extra_native_models` as one ordered target list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_native_models: Vec<String>,
     pub enabled: bool,
     pub legacy: bool,
+}
+impl PublishedModel {
+    /// Primary native ID first, then the extra IDs in stored order.
+    pub fn native_models(&self) -> Vec<&str> {
+        std::iter::once(self.native_model.as_str())
+            .chain(self.extra_native_models.iter().map(String::as_str))
+            .collect()
+    }
+}
+/// Whether the source's dispatcher pools accounts per native model, so a publication may bind
+/// several native IDs. Antigravity and custom upstreams keep exactly one target.
+pub fn pools_native_models(source_id: &str) -> bool {
+    source_id == WORKBUDDY_SOURCE || native_providers::Provider::from_source(source_id).is_some()
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -313,6 +334,54 @@ fn validate_result(result: &ModelVerificationResult) -> Result<(), String> {
     }
     Ok(())
 }
+/// Checks a publication's extra native IDs against the candidates `known` (by candidate
+/// ID). Each failure names its cause, since headless administrators only see this text.
+/// A publication without extras always passes, whatever its source.
+fn validate_extra_native_models(
+    model: &PublishedModel,
+    known: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if model.extra_native_models.is_empty() {
+        return Ok(());
+    }
+    let publication = if valid_id(&model.public_id, MAX_ID_BYTES) {
+        format!("Publication {}", model.public_id)
+    } else {
+        "A publication".to_string()
+    };
+    let source = &model.source_id;
+    if !pools_native_models(source) {
+        return Err(format!(
+            "{publication}: source {source} binds exactly one native ID; extra native IDs need a source that pools accounts per native ID"
+        ));
+    }
+    let count = model.extra_native_models.len();
+    if count > MAX_EXTRA_NATIVE_MODELS {
+        return Err(format!(
+            "{publication} binds {count} extra native IDs; at most {MAX_EXTRA_NATIVE_MODELS} are allowed"
+        ));
+    }
+    let mut targets = HashSet::from([model.native_model.as_str()]);
+    for extra in &model.extra_native_models {
+        validate_native(source, extra)?;
+        if extra == &model.native_model {
+            return Err(format!(
+                "{publication}: extra native ID {extra} repeats the primary native ID"
+            ));
+        }
+        if !targets.insert(extra.as_str()) {
+            return Err(format!(
+                "{publication}: extra native ID {extra} is listed more than once"
+            ));
+        }
+        if !known(&candidate_id(source, extra)) {
+            return Err(format!(
+                "{publication}: extra native ID {extra} is not a discovered model of source {source}; discover it first, and bind only IDs of the publication's own source"
+            ));
+        }
+    }
+    Ok(())
+}
 fn validate_store(store: &StoredRegistry) -> Result<(), String> {
     if store.schema_version != SCHEMA_VERSION {
         return Err("Unsupported model registry schema version".into());
@@ -352,6 +421,7 @@ fn validate_store(store: &StoredRegistry) -> Result<(), String> {
         {
             return Err("Invalid or duplicate publication/source/target".into());
         }
+        validate_extra_native_models(model, |id| candidates.contains(id))?;
     }
     let mut ignored = HashSet::new();
     for id in &store.ignored_candidate_ids {
@@ -501,6 +571,7 @@ fn discover() -> Result<Discovery, String> {
                 display_name: "Antigravity".into(),
                 enabled: ag.iter().any(|a| !a.disabled && !a.proxy_disabled),
                 account_count: ag.len(),
+                pools_native_models: pools_native_models(ANTIGRAVITY_SOURCE),
             },
             ModelSource {
                 id: WORKBUDDY_SOURCE.into(),
@@ -508,6 +579,7 @@ fn discover() -> Result<Discovery, String> {
                 display_name: "WorkBuddy".into(),
                 enabled: settings.enabled,
                 account_count: wb.len(),
+                pools_native_models: pools_native_models(WORKBUDDY_SOURCE),
             },
         ],
         settings,
@@ -642,6 +714,7 @@ fn discover() -> Result<Discovery, String> {
             display_name: upstream.display_name().to_string(),
             enabled: upstream.enabled,
             account_count: 1,
+            pools_native_models: pools_native_models(&source),
         });
         discovery
             .all_accounts
@@ -693,6 +766,7 @@ fn discover() -> Result<Discovery, String> {
                     display_name: native_provider.name().into(),
                     enabled: false,
                     account_count: 0,
+                    pools_native_models: pools_native_models(source),
                 });
                 discovery.skipped.push(format!(
                     "{} source is unavailable: repair its account vault or settings in Accounts.",
@@ -707,6 +781,7 @@ fn discover() -> Result<Discovery, String> {
             display_name: native_provider.name().into(),
             enabled: settings.enabled,
             account_count: accounts.len(),
+            pools_native_models: pools_native_models(source),
         });
         for account in accounts {
             discovery
@@ -942,6 +1017,7 @@ fn initialize(
                 public_id,
                 source_id,
                 native_model,
+                extra_native_models: Vec::new(),
                 enabled: true,
                 legacy: true,
             })
@@ -1283,9 +1359,6 @@ pub fn save(
     for model in &mut publications {
         model.public_id = normalized_public_id(&model.public_id).to_string();
         validate_native(&model.source_id, &model.native_model)?;
-        let candidate = candidate_views
-            .get(&candidate_id(&model.source_id, &model.native_model))
-            .ok_or("Unknown source/native candidate; discover it before publishing")?;
         let old = existing.get(model.id.as_str()).copied();
         let same_binding = old.is_some_and(|old| {
             old.public_id == model.public_id
@@ -1299,13 +1372,34 @@ pub fn save(
                     .into(),
             );
         }
-        let newly_exposed = !same_binding || old.is_some_and(|old| !old.enabled && model.enabled);
-        if newly_exposed && !grandfathered {
+        let reenabled = old.is_some_and(|old| !old.enabled && model.enabled);
+        let gate = |native: &str| -> Result<(), String> {
+            let candidate = candidate_views
+                .get(&candidate_id(&model.source_id, native))
+                .ok_or("Unknown source/native candidate; discover it before publishing")?;
             if candidate.verification_status == "unavailable" {
                 return Err("Definitively unavailable candidates cannot be newly published".into());
             }
             if candidate.verification_status != "verified" && !request.allow_unverified {
                 return Err("Publishing an unverified model requires explicit allow_unverified confirmation".into());
+            }
+            Ok(())
+        };
+        if !candidate_views.contains_key(&candidate_id(&model.source_id, &model.native_model)) {
+            return Err("Unknown source/native candidate; discover it before publishing".into());
+        }
+        validate_extra_native_models(model, |id| candidate_views.contains_key(id))?;
+        if (!same_binding || reenabled) && !grandfathered {
+            gate(&model.native_model)?;
+        }
+        // The legacy exemption covers the primary target only: every extra ID bound by this
+        // save (or all of them on a new binding / re-enable) is gated like a fresh target.
+        for extra in &model.extra_native_models {
+            let unchanged = same_binding
+                && !reenabled
+                && old.is_some_and(|old| old.extra_native_models.contains(extra));
+            if !unchanged {
+                gate(extra)?;
             }
         }
     }

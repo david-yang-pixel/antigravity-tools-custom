@@ -10,6 +10,7 @@ import { showToast } from '../common/ToastContainer';
 
 import WorkBuddyAccountRow, { type WorkBuddyAccount as Account, type AccountChanges } from './WorkBuddyAccountRow';
 import WorkBuddyEgressPanel, { WorkBuddyEgressCell, type EgressView } from './WorkBuddyEgress';
+import WorkBuddyClientVersion from './WorkBuddyClientVersion';
 
 interface Login { id: string; auth_url: string; expires_at: number }
 const PAGE_SIZE = 10;
@@ -133,6 +134,7 @@ export default function WorkBuddyAccounts() {
                 <button className={`${button} !border-blue-600 !bg-blue-600 text-white hover:!bg-blue-700`} disabled={!!busy || !!login} onClick={() => { setMode('login'); setReauth(null); setError(''); }}><Plus size={16} />{t('workbuddy.accounts.add')}</button>
             </div>
         </div>
+        <WorkBuddyClientVersion accounts={accounts} />
         <WorkBuddyEgressPanel view={egress} onChange={setEgress} />
         {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">{error}</div>}
         {mode && <div className="rounded-2xl border border-blue-200 bg-white p-5 dark:border-blue-900 dark:bg-gray-900">

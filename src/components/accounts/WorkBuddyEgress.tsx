@@ -13,6 +13,22 @@ export interface EgressView {
 }
 interface Probe { node: string; delay_ms: number | null; error: string | null }
 export const DIRECT = 'DIRECT';
+/** Commands of one account pool's egress; `params` goes into every request. */
+export interface EgressApi { get: string; save: string; refresh: string; testNodes: string; setAccount: string; testAccount: string; params: Record<string, unknown> }
+export const WORKBUDDY_EGRESS: EgressApi = {
+    get: 'get_workbuddy_egress', save: 'save_workbuddy_egress', refresh: 'refresh_workbuddy_egress', testNodes: 'test_workbuddy_egress_nodes',
+    setAccount: 'set_workbuddy_account_egress', testAccount: 'test_workbuddy_account_egress', params: {},
+};
+export function nativeEgress(provider: string): EgressApi {
+    return {
+        get: 'get_native_egress', save: 'save_native_egress', refresh: 'refresh_native_egress', testNodes: 'test_native_egress_nodes',
+        setAccount: 'set_native_account_egress', testAccount: 'test_native_account_egress', params: { provider },
+    };
+}
+export function egressArgs(api: EgressApi, extra?: Record<string, unknown>) {
+    const body = { ...api.params, ...extra };
+    return Object.keys(body).length ? { request: body } : undefined;
+}
 const input = 'w-full min-w-0 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-xs outline-none focus:border-blue-500 disabled:opacity-50';
 const button = 'inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed';
 
@@ -22,8 +38,11 @@ export function nodeLabel(node: EgressNode, t: (key: string, options?: Record<st
     return node.name;
 }
 
-/** Subscription, filters and auto-assignment for per-account airport egress. */
-export default function WorkBuddyEgressPanel({ view, onChange }: { view: EgressView | null; onChange: (view: EgressView) => void }) {
+/** Subscription, filters and auto-assignment for per-account airport egress. The subscription,
+ * filters and auto-assignment are shared by every pool; the switch belongs to `api`'s pool. */
+export default function WorkBuddyEgressPanel({ view, onChange, api = WORKBUDDY_EGRESS, description }: {
+    view: EgressView | null; onChange: (view: EgressView) => void; api?: EgressApi; description?: string;
+}) {
     const { t } = useTranslation();
     const [open, setOpen] = useState(false);
     const [link, setLink] = useState('');
@@ -42,7 +61,7 @@ export default function WorkBuddyEgressPanel({ view, onChange }: { view: EgressV
         finally { setBusy(''); }
     }
     async function save(changes: Record<string, unknown>) {
-        if (await run('save', 'save_workbuddy_egress', { request: changes })) { setLink(''); showToast(t('workbuddy.egress.saved'), 'success'); }
+        if (await run('save', api.save, egressArgs(api, changes))) { setLink(''); showToast(t('workbuddy.egress.saved'), 'success'); }
     }
     const status = !view.enabled ? 'off' : view.error ? 'error' : view.running ? 'running' : 'stopped';
     return <div className="rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
@@ -64,7 +83,7 @@ export default function WorkBuddyEgressPanel({ view, onChange }: { view: EgressV
         </div>
         {(open || (view.enabled && view.error)) && <div className="space-y-3 border-t border-gray-100 px-4 py-4 text-xs dark:border-gray-800">
             {open && <>
-                <p className="leading-relaxed text-gray-500 dark:text-gray-400">{t('workbuddy.egress.description')}</p>
+                <p className="leading-relaxed text-gray-500 dark:text-gray-400">{description ?? t('workbuddy.egress.description')}</p>
                 <label className="block space-y-1"><span>{t('workbuddy.egress.subscription')}</span>
                     <input className={`${input} font-mono`} type="password" autoComplete="off" spellCheck={false} value={link} disabled={!!busy || locked('subscription_url')}
                         placeholder={view.subscription_configured ? t('workbuddy.egress.subscription_kept', { host: view.subscription_host || '' }) : 'https://…'}
@@ -84,8 +103,8 @@ export default function WorkBuddyEgressPanel({ view, onChange }: { view: EgressV
             {(error || (view.enabled && view.error)) && <p role="alert" className="break-words text-red-600">{error || view.error}</p>}
             {open && <div className="flex flex-wrap justify-end gap-2">
                 {view.subscription_configured && !locked('subscription_url') && <button type="button" className={`${button} mr-auto text-red-600`} disabled={!!busy} onClick={() => void save({ subscription_url: '', enabled: false })}>{t('workbuddy.egress.clear_link')}</button>}
-                <button type="button" className={button} disabled={!!busy || !view.enabled} onClick={() => void run('refresh', 'refresh_workbuddy_egress')}><RefreshCw size={13} className={busy === 'refresh' ? 'animate-spin' : ''} />{t('workbuddy.egress.refresh')}</button>
-                <button type="button" className={button} disabled={!!busy || !view.enabled} onClick={() => void run('test', 'test_workbuddy_egress_nodes')}><Gauge size={13} className={busy === 'test' ? 'animate-pulse' : ''} />{t('workbuddy.egress.test_nodes')}</button>
+                <button type="button" className={button} disabled={!!busy || !view.enabled} onClick={() => void run('refresh', api.refresh, egressArgs(api))}><RefreshCw size={13} className={busy === 'refresh' ? 'animate-spin' : ''} />{t('workbuddy.egress.refresh')}</button>
+                <button type="button" className={button} disabled={!!busy || !view.enabled} onClick={() => void run('test', api.testNodes, egressArgs(api))}><Gauge size={13} className={busy === 'test' ? 'animate-pulse' : ''} />{t('workbuddy.egress.test_nodes')}</button>
                 <button type="button" className="rounded-lg bg-blue-600 px-4 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50" disabled={!!busy}
                     onClick={() => void save({ include, exclude, ...(link.trim() ? { subscription_url: link.trim() } : {}) })}>{busy === 'save' ? t('common.saving') : t('common.save')}</button>
             </div>}
@@ -94,8 +113,8 @@ export default function WorkBuddyEgressPanel({ view, onChange }: { view: EgressV
 }
 
 /** One account's node: auto, direct or a fixed node, plus a latency probe on its real path. */
-export function WorkBuddyEgressCell({ accountId, view, disabled, onChange }: {
-    accountId: string; view: EgressView | null; disabled: boolean; onChange: (view: EgressView) => void;
+export function WorkBuddyEgressCell({ accountId, view, disabled, onChange, api = WORKBUDDY_EGRESS }: {
+    accountId: string; view: EgressView | null; disabled: boolean; onChange: (view: EgressView) => void; api?: EgressApi;
 }) {
     const { t } = useTranslation();
     const [busy, setBusy] = useState(false);
@@ -106,13 +125,13 @@ export function WorkBuddyEgressCell({ accountId, view, disabled, onChange }: {
     const missing = !!bound && bound !== DIRECT && !view.nodes.some(n => n.name === bound);
     async function select(node: string) {
         setBusy(true); setError(''); setProbe(null);
-        try { onChange(await request<EgressView>('set_workbuddy_account_egress', { request: { id: accountId, node: node || null } })); }
+        try { onChange(await request<EgressView>(api.setAccount, egressArgs(api, { id: accountId, node: node || null }))); }
         catch (e) { setError(String(e)); }
         finally { setBusy(false); }
     }
     async function test() {
         setBusy(true); setError(''); setProbe(null);
-        try { setProbe(await request<Probe>('test_workbuddy_account_egress', { request: { id: accountId } })); }
+        try { setProbe(await request<Probe>(api.testAccount, egressArgs(api, { id: accountId }))); }
         catch (e) { setError(String(e)); }
         finally { setBusy(false); }
     }

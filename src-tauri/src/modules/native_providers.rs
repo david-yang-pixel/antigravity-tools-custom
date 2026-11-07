@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+const MAX_ACCOUNT_CONCURRENCY: usize = 8;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -136,6 +138,10 @@ pub struct Credentials {
     pub organization_id: String,
     #[serde(default)]
     pub organization_name: String,
+    #[serde(default)]
+    pub organization_tags: Option<Value>,
+    #[serde(default)]
+    pub data_policy_agreed: Option<bool>,
 }
 
 /// This value is persisted only inside an authenticated, encrypted vault. Never serialize
@@ -239,7 +245,12 @@ impl From<&Account> for AccountView {
             models_error: a.models_error.clone(),
             auth_error: a.auth_error.clone(),
             last_sync_at: a.last_sync_at,
-            next_sync_at: a.next_sync_at,
+            // Healthy idle accounts pause polls; zero-balance recovery stays scheduled.
+            next_sync_at: if accounts::sync_paused(a, now()) {
+                0
+            } else {
+                a.next_sync_at
+            },
             in_flight: runtime.in_flight,
             cooldown_until: runtime.cooldown_until,
             last_error: runtime.last_error,

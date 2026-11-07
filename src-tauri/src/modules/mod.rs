@@ -7,6 +7,7 @@ pub mod config;
 pub mod custom_upstream;
 pub mod db;
 pub mod device;
+pub mod egress;
 pub mod epay;
 #[allow(dead_code)]
 pub mod http_api;

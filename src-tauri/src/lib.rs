@@ -446,7 +446,7 @@ pub fn run() {
                     modules::scheduler::start_scheduler(None, proxy_state.clone());
                     modules::workbuddy::maintenance::start();
                     modules::native_providers::accounts::start();
-                    modules::workbuddy::egress::start();
+                    modules::egress::start();
                     info!("Smart scheduler (7-Day Weekly Reset Warmup) started in headless mode.");
                 }
                 Err(e) => {
@@ -610,7 +610,7 @@ pub fn run() {
             modules::scheduler::start_scheduler(Some(app.handle().clone()), scheduler_state.inner().clone());
             modules::workbuddy::maintenance::start();
             modules::native_providers::accounts::start();
-            modules::workbuddy::egress::start();
+            modules::egress::start();
             info!("Smart scheduler (7-Day Weekly Reset Warmup) initialized.");
 
             // [PHASE 1] 已整合至 Axum 端口 (8045)，不再单独启动 19527 端口
@@ -821,11 +821,13 @@ pub fn run() {
             commands::model_registry::discover_upstream_models,
             commands::model_registry::verify_model_candidates,
             commands::workbuddy::get_workbuddy_settings,
+            commands::workbuddy::check_workbuddy_client_version,
             commands::workbuddy::save_workbuddy_settings,
             commands::custom_upstream::get_custom_upstreams,
             commands::custom_upstream::save_custom_upstreams,
             commands::native_providers::list_native_accounts,
             commands::native_providers::get_native_provider_settings,
+            commands::native_providers::check_native_client_version,
             commands::native_providers::save_native_provider_settings,
             commands::native_providers::start_native_login,
             commands::native_providers::poll_native_login,
@@ -833,6 +835,12 @@ pub fn run() {
             commands::native_providers::import_native_account,
             commands::native_providers::update_native_account,
             commands::native_providers::delete_native_account,
+            commands::native_providers::get_native_egress,
+            commands::native_providers::save_native_egress,
+            commands::native_providers::refresh_native_egress,
+            commands::native_providers::test_native_egress_nodes,
+            commands::native_providers::set_native_account_egress,
+            commands::native_providers::test_native_account_egress,
             commands::workbuddy::start_workbuddy_model_verification,
             commands::workbuddy::get_workbuddy_model_verification,
             commands::workbuddy::list_workbuddy_accounts,

@@ -112,6 +112,7 @@ fn published() -> PublishedModel {
         display_name: "relay-model".into(),
         source_id: custom_upstream::source_id("relay"),
         native_model: "native-model".into(),
+        extra_native_models: Vec::new(),
         enabled: true,
         legacy: false,
     }

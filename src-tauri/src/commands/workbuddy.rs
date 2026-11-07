@@ -1,5 +1,50 @@
 use crate::modules::workbuddy::{self, SettingsUpdate, SettingsView};
 
+#[derive(serde::Deserialize)]
+pub struct ClientVersionRequest {
+    #[serde(default)]
+    pub target: workbuddy::releases::Target,
+    #[serde(default)]
+    pub refresh: bool,
+}
+#[derive(serde::Serialize)]
+pub struct ClientVersionView {
+    #[serde(flatten)]
+    pub release: workbuddy::releases::ReleaseStatus,
+    pub bundled_version: &'static str,
+    pub bundled_cli_version: &'static str,
+    pub legacy_transport: bool,
+}
+#[tauri::command]
+pub async fn check_workbuddy_client_version(
+    request: ClientVersionRequest,
+) -> Result<ClientVersionView, String> {
+    use std::sync::OnceLock;
+    static CHECKER: OnceLock<workbuddy::releases::ReleaseChecker> = OnceLock::new();
+    let proxy = crate::modules::config::load_app_config()?
+        .proxy
+        .upstream_proxy;
+    let proxy_url = if proxy.enabled {
+        proxy.url.trim().to_owned()
+    } else {
+        String::new()
+    };
+    Ok(ClientVersionView {
+        release: CHECKER
+            .get_or_init(|| {
+                workbuddy::releases::ReleaseChecker::new(
+                    workbuddy::identity::PRODUCT_RELEASE,
+                    workbuddy::releases::Target::default(),
+                )
+            })
+            .check(request.target, &proxy_url, request.refresh)
+            .await,
+        bundled_version: workbuddy::identity::PRODUCT_VERSION,
+        bundled_cli_version: workbuddy::identity::CLI_VERSION,
+        legacy_transport: workbuddy::transport::legacy_enabled(),
+    })
+}
+
 #[tauri::command]
 pub async fn get_workbuddy_settings() -> Result<SettingsView, String> {
     tokio::task::spawn_blocking(workbuddy::view)
@@ -46,9 +91,12 @@ pub struct AccountAction {
     pub keepalive: Option<bool>,
     pub auto_rewards: Option<bool>,
     pub auto_lottery: Option<bool>,
+    pub auto_travel: Option<bool>,
     pub activity: Option<workbuddy::activity::Action>,
     #[serde(default)]
     pub checkin: bool,
+    #[serde(default)]
+    pub resume_checkin: bool,
 }
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -73,23 +121,22 @@ pub async fn import_workbuddy_account(request: ImportRequest) -> Result<AccountV
 }
 #[tauri::command]
 pub async fn update_workbuddy_account(request: AccountAction) -> Result<AccountView, String> {
-    if request.managed.is_some()
-        || request.auto_checkin.is_some()
-        || request.keepalive.is_some()
-        || request.auto_rewards.is_some()
-        || request.auto_lottery.is_some()
-    {
-        return accounts::configure(
-            &request.id,
-            request.managed,
-            request.auto_checkin,
-            request.keepalive,
-            request.auto_rewards,
-            request.auto_lottery,
-        );
+    let preferences = accounts::Preferences {
+        managed: request.managed,
+        auto_checkin: request.auto_checkin,
+        keepalive: request.keepalive,
+        auto_rewards: request.auto_rewards,
+        auto_lottery: request.auto_lottery,
+        auto_travel: request.auto_travel,
+    };
+    if !preferences.is_empty() {
+        return accounts::configure(&request.id, preferences);
     }
     if let Some(action) = request.activity {
         return workbuddy::activity::start(&request.id, action);
+    }
+    if request.resume_checkin {
+        return workbuddy::maintenance::resume_checkin(&request.id).await;
     }
     if request.checkin {
         return workbuddy::maintenance::run(&request.id, false, true, false).await;

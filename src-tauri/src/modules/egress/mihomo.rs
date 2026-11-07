@@ -12,7 +12,6 @@ use std::{
 
 pub(super) const PROVIDER: &str = "sub";
 pub(super) const ALL_GROUP: &str = "wb-all";
-pub(super) const LOGIN_USER: &str = "login";
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTART_BACKOFF: Duration = Duration::from_secs(15);
@@ -22,7 +21,7 @@ struct Runtime {
     controller: String,
     secret: String,
     socks_port: u16,
-    /// Routing user -> SOCKS password; a user is an account id or `LOGIN_USER`.
+    /// Routing user -> SOCKS password; one per pool account plus one login user per pool.
     users: HashMap<String, String>,
     fingerprint: String,
     /// (user, node) pairs whose selector is confirmed on that node in this config.
@@ -46,6 +45,14 @@ pub struct Node {
     pub delay: Option<u64>,
     /// `Some(false)` when the last test failed.
     pub alive: Option<bool>,
+}
+impl Node {
+    /// Direct routing is an explicit administrator choice, never a subscription
+    /// candidate. The controller's name must not alias our stored DIRECT sentinel.
+    pub(super) fn is_subscription_proxy(&self) -> bool {
+        !self.name.trim().eq_ignore_ascii_case(super::DIRECT)
+            && !self.kind.trim().eq_ignore_ascii_case("Direct")
+    }
 }
 
 pub(super) fn group(user: &str) -> String {
@@ -136,7 +143,7 @@ pub(super) fn config(
             "proxy": "DIRECT",
         }},
         "listeners": [{
-            "name": "workbuddy-egress",
+            "name": "egress",
             "type": "socks",
             "listen": "127.0.0.1",
             "port": socks_port,
@@ -255,6 +262,7 @@ pub(super) fn parse_nodes(value: &Value) -> Vec<Node> {
                 alive: delay.map(|d| d > 0),
             })
         })
+        .filter(Node::is_subscription_proxy)
         .collect()
 }
 
@@ -347,7 +355,7 @@ async fn start(
             state.retry_at = None;
         }
         Err(error) => {
-            tracing::warn!("WorkBuddy egress: {error}");
+            tracing::warn!("Egress: {error}");
             state.last_error = Some(error.clone());
             state.retry_at = Some(tokio::time::Instant::now() + RESTART_BACKOFF);
         }
@@ -468,11 +476,7 @@ async fn ensure(state: &mut State, settings: &Settings, users: &[&str]) -> Resul
     Ok(api)
 }
 fn account_users() -> HashSet<String> {
-    let mut users: HashSet<String> = super::accounts::all()
-        .map(|accounts| accounts.into_iter().map(|a| a.id).collect())
-        .unwrap_or_default();
-    users.insert(LOGIN_USER.into());
-    users
+    super::all_users()
 }
 
 /// Route `user` through `node`, confirming the selector before any traffic uses it.
@@ -523,11 +527,11 @@ pub(super) async fn delay(
             &[("url", url), ("timeout", "8000")],
         )
         .await
-        .map_err(|_| "Node timed out or cannot reach WorkBuddy".to_string())?;
+        .map_err(|_| "Node timed out or cannot reach the upstream".to_string())?;
     value["delay"]
         .as_u64()
         .filter(|d| *d > 0)
-        .ok_or_else(|| "Node timed out or cannot reach WorkBuddy".into())
+        .ok_or_else(|| "Node timed out or cannot reach the upstream".into())
 }
 pub(super) async fn test_all(settings: &Settings) -> Result<(), String> {
     let mut state = STATE.lock().await;
@@ -598,7 +602,7 @@ mod tests {
     fn config_routes_each_user_to_its_selector_and_rejects_the_rest() {
         let users = HashMap::from([
             ("acct-b".to_string(), "pb".to_string()),
-            (LOGIN_USER.to_string(), "pl".to_string()),
+            ("login".to_string(), "pl".to_string()),
         ]);
         let value = config("https://sub.example/x?token=1", 9090, "s", 7891, &users);
         assert_eq!(value["external-controller"], "127.0.0.1:9090");
@@ -641,5 +645,17 @@ mod tests {
         assert_eq!((nodes[0].delay, nodes[0].alive), (None, None));
         assert_eq!((nodes[1].delay, nodes[1].alive), (None, Some(false)));
         assert_eq!((nodes[2].delay, nodes[2].alive), (Some(120), Some(true)));
+    }
+
+    #[test]
+    fn subscription_nodes_cannot_alias_explicit_direct_routing() {
+        let nodes = parse_nodes(&json!({"proxies": [
+            {"name":"DIRECT", "type":"Trojan", "history":[{"delay":1}]},
+            {"name":" direct ", "type":"Vmess"},
+            {"name":"fast-node", "type":"Direct", "history":[{"delay":1}]},
+            {"name":"direct-proxy", "type":"Trojan", "history":[{"delay":20}]}
+        ]}));
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "direct-proxy");
     }
 }

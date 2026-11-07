@@ -84,8 +84,13 @@ async fn dispatch(
         return next.run(request).await;
     }
     let path = request.uri().path().to_owned();
+    // Owned before public_id moves out; the primary ID comes first.
+    let targets: Vec<String> = published
+        .native_models()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     let alias = published.public_id;
-    let target = published.native_model;
     if !settings.enabled {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -137,12 +142,10 @@ async fn dispatch(
             )
         }
     };
-    if let Some(capture) = parts
+    let capture = parts
         .extensions
         .get::<crate::proxy::monitor::UpstreamRequestBodyHolder>()
-    {
-        capture.set_value(&payload);
-    }
+        .cloned();
     let scope = parts
         .extensions
         .get::<crate::proxy::middleware::auth::UserTokenIdentity>()
@@ -153,11 +156,12 @@ async fn dispatch(
         payload,
         streaming,
         &alias,
-        &target,
+        &targets,
         protocol,
         &namespaced,
         scope,
         policy,
+        capture.as_ref(),
     )
     .await
 }
@@ -237,36 +241,54 @@ async fn forward(
     payload: Value,
     streaming: bool,
     alias: &str,
-    target: &str,
+    targets: &[String],
     protocol: codec::Protocol,
     namespaced: &codec::Namespaced,
     scope: &str,
     policy: Policy,
+    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
 ) -> Response {
+    // Captured with the primary ID first, so a request that never leases still records a
+    // body; each lease re-captures only when it switches to another native ID.
+    let mut captured = String::new();
+    if let Some(primary) = targets.first() {
+        super::recapture(capture, &mut captured, primary, &payload);
+    }
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.clamp(1, 3600));
     let session = workbuddy::client::session_key(scope, &payload);
     // A model the upstream is rate-limiting across accounts is held here, before it can
-    // spend another account. The probe guard (if any) lives until this request ends.
-    let probe = match workbuddy::accounts::scheduling::admit_model(target, &policy) {
-        Ok(probe) => probe,
-        Err(limited) => return model_limited(target, &limited),
+    // spend another account. A probe guard (if any) is settled after every lease.
+    let all: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let wanted = targets.join(", ");
+    let admission = match workbuddy::accounts::scheduling::admit_models(&all, &policy) {
+        Ok(admission) => admission,
+        Err(limited) => return model_limited(&wanted, &limited),
     };
-    let admission = if probe.is_some() {
-        policy.for_probe()
-    } else {
-        policy.clone()
-    };
+    let lease_policy = admission.lease_policy(&policy);
+    let workbuddy::accounts::scheduling::Admission {
+        targets: admitted_targets,
+        mut probe,
+        held,
+    } = admission;
+    let mut admitted: Vec<&str> = admitted_targets.iter().map(String::as_str).collect();
     let mut lease =
-        match workbuddy::accounts::scheduling::acquire(target, &session, &admission, timeout).await
+        match workbuddy::accounts::scheduling::acquire(&admitted, &session, &lease_policy, timeout)
+            .await
         {
             Ok(lease) => lease,
             Err(message) => {
-                // Every account cooling for this model is a rate limit, not an outage.
+                // Every admitted target cooling is a rate limit, not an outage; targets
+                // admission already held count toward the shortest wait.
                 if let Some(limited) =
-                    workbuddy::accounts::scheduling::hold_cooling_model(target, &policy)
+                    workbuddy::accounts::scheduling::hold_cooling_models(&admitted, &policy)
                 {
-                    return model_limited(target, &limited);
+                    let shortest = held
+                        .into_iter()
+                        .chain(std::iter::once(limited))
+                        .min_by_key(|hold| hold.retry_after)
+                        .expect("at least one hold");
+                    return model_limited(&wanted, &shortest);
                 }
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -275,14 +297,14 @@ async fn forward(
                 );
             }
         };
-    let _probe = probe;
+    workbuddy::accounts::scheduling::settle_probe(&mut probe, &mut admitted, lease.model());
+    super::recapture(capture, &mut captured, lease.model(), &payload);
     let mut tried = Vec::new();
     let mut failovers = 0usize;
     loop {
         tried.push(lease.account.id.clone());
         let failure = match attempt(
-            lease, &payload, streaming, alias, target, protocol, namespaced, scope, &policy,
-            deadline,
+            lease, &payload, streaming, alias, protocol, namespaced, scope, &policy, deadline,
         )
         .await
         {
@@ -301,11 +323,13 @@ async fn forward(
         }
         failovers += 1;
         lease = match workbuddy::accounts::scheduling::try_acquire_excluding(
-            target, &session, &policy, &tried,
+            &admitted, &session, &policy, &tried,
         ) {
             Ok(Some(next)) => next,
             _ => return failure.response,
         };
+        workbuddy::accounts::scheduling::settle_probe(&mut probe, &mut admitted, lease.model());
+        super::recapture(capture, &mut captured, lease.model(), &payload);
         tracing::warn!(
             "WorkBuddy account failed before generation (HTTP {}); retrying on another account",
             failure.response.status().as_u16()
@@ -321,13 +345,15 @@ async fn attempt(
     payload: &Value,
     streaming: bool,
     alias: &str,
-    target: &str,
     protocol: codec::Protocol,
     namespaced: &codec::Namespaced,
     scope: &str,
     policy: &Policy,
     deadline: tokio::time::Instant,
 ) -> Result<Response, Failure> {
+    // The native ID this account was leased for; the alias and billing stay public.
+    let target = lease.model().to_owned();
+    let target = target.as_str();
     let account = match workbuddy::accounts::fresh_before(&lease.account.id, deadline).await {
         Ok(Ok(account)) if account.enabled => account,
         Ok(Ok(_)) => {
