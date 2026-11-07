@@ -378,7 +378,7 @@ pub(super) fn batch_entries(value: &Value) -> Option<Vec<BatchEntry>> {
                 .unwrap_or_else(|| format!("#{}", index + 1));
                 let platform = text(account, &["platform"]);
                 let skip = (!platform.is_empty() && platform != "openai")
-                    .then(|| format!("Skipped: a {platform} account, not ChatGPT"));
+                    .then(|| format!("Skipped: {platform} account, not ChatGPT"));
                 BatchEntry {
                     label,
                     value: account.clone(),
