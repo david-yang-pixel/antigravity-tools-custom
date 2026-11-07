@@ -185,6 +185,37 @@ fn quota_windows_map_smaller_to_5h() {
 }
 
 #[test]
+fn percent_quota_reflects_the_most_constrained_window() {
+    let at = crate::modules::native_providers::now();
+    let q = quota::from_headers(
+        &windows(
+            &[("used-percent", "100"), ("window-minutes", "300")],
+            &[("used-percent", "20"), ("window-minutes", "10080")],
+        ),
+        at,
+    )
+    .unwrap();
+    assert_eq!(
+        (q.total, q.remaining, q.used),
+        (Some(100.0), Some(0.0), Some(100.0))
+    );
+    assert!(q.exhausted());
+    let q = quota::from_headers(
+        &windows(
+            &[("used-percent", "30"), ("window-minutes", "300")],
+            &[("used-percent", "60"), ("window-minutes", "10080")],
+        ),
+        at,
+    )
+    .unwrap();
+    assert_eq!(
+        (q.total, q.remaining, q.used),
+        (Some(100.0), Some(40.0), Some(60.0))
+    );
+    assert!(!q.exhausted());
+}
+
+#[test]
 fn exhausted_until_from_body_or_full_window() {
     let at = 1000;
     let none = HeaderMap::new();

@@ -66,12 +66,17 @@ pub fn from_headers(h: &HeaderMap, at: i64) -> Option<Quota> {
             expires_at: w.reset_after.map(|s| at + s),
         })
         .collect();
-    if packs.is_empty() {
-        return None;
-    }
-    let mut quota = Quota::from_packs("%", packs);
-    quota.updated_at = at;
-    Some(quota)
+    // Percent windows do not add up: the account is as constrained as its fullest window.
+    let remaining = packs.iter().filter_map(|p| p.remaining).reduce(f64::min)?;
+    Some(Quota {
+        unit: "%".into(),
+        total: Some(100.0),
+        remaining: Some(remaining),
+        used: Some(100.0 - remaining),
+        unlimited: false,
+        updated_at: at,
+        packs,
+    })
 }
 
 /// Reset time of an exhausted account: the body's `resets_at`, else `resets_in_seconds`, else
