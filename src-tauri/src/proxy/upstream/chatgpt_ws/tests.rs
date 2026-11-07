@@ -942,6 +942,49 @@ mod relay {
     }
 
     #[tokio::test]
+    async fn ws_handshake_rejection_body_is_read_under_the_deadline() {
+        use super::super::upstream::{connect, Refused};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _sandbox = Sandbox::new();
+        let account = chatgpt_account(0);
+        // A 403 whose body never finishes.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            let head = "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: 1000\r\n\r\n{\"error\"";
+            socket.write_all(head.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        endpoints::set_test(Some(endpoints::Endpoints {
+            auth: format!("http://{addr}"),
+            backend: format!("http://{addr}/backend-api"),
+        }));
+        let _reset = Reset;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect(&account, "session", &HeaderMap::new(), deadline),
+        )
+        .await
+        .expect("the rejection body is read under the request deadline");
+        match result {
+            Err(Refused::Answered(failure, _)) => assert_eq!(failure.status, 403),
+            Err(Refused::Transport(failure)) => panic!("transport failure: {failure:?}"),
+            Ok(_) => panic!("a 403 handshake must not upgrade"),
+        }
+    }
+
+    #[tokio::test]
     async fn ws_antigravity_session_rejects_chatgpt_frame() {
         let _sandbox = Sandbox::new();
         setup(1);

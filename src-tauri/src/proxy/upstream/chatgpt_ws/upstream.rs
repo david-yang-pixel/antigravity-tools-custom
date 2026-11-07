@@ -1,7 +1,7 @@
 //! One upstream Codex WebSocket bound to one ChatGPT account: handshake, liveness ping and
 //! event reading.
 use crate::modules::native_providers::{
-    chatgpt::{client, endpoints, quota},
+    chatgpt::{client, endpoints, errors, quota},
     http::{plain_client_for, Failure},
     Account,
 };
@@ -106,9 +106,23 @@ pub(super) async fn connect(
     };
     quota::record(account, response.headers());
     if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-        let (failure, upstream) =
-            crate::proxy::upstream::native::chatgpt::rejection(account, response.into_inner())
-                .await;
+        let (status, headers) = (response.status().as_u16(), response.headers().clone());
+        let rejection =
+            crate::proxy::upstream::native::chatgpt::rejection(account, response.into_inner());
+        // A body that stalls past the deadline is classified by its status alone.
+        let (failure, upstream) = tokio::time::timeout_at(deadline, rejection)
+            .await
+            .unwrap_or_else(|_| {
+                (
+                    errors::classify(
+                        status,
+                        &headers,
+                        "",
+                        crate::modules::native_providers::now(),
+                    ),
+                    None,
+                )
+            });
         return Err(Refused::Answered(failure, upstream));
     }
     let socket = response
