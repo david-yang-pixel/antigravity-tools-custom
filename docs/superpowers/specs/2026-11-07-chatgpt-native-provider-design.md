@@ -227,13 +227,27 @@ sessions are master-key only, so no per-turn user billing is introduced.
 - Upstream quota headers from the handshake and `usage_limit_reached` errors update the account
   exactly like HTTP. A failed handshake, or a turn that fails before its first output event with
   a failover-eligible error (§4 policy), moves the session to another account (at most 3
-  accounts per turn). Upstream response state is per account, so a turn that carries
-  `previous_response_id` is not silently replayed without its context: after switching
-  accounts the relay answers that turn with an `error` event of code
-  `previous_response_not_found`, and the client resends full history, which the new account
-  serves. Turns without `previous_response_id` are replayed on the new account directly. Upstream close/reconnect: up to 3 reconnects with 200 ms–2 s backoff while
+  accounts per turn). The switch is transparent to the client:
+  - The relay keeps a per-connection transcript: the full `input` it has sent so far plus each
+    completed turn's `response.output` items, and maps each upstream `response.id` to its
+    position in that transcript. Memory is bounded (oldest connection state dropped above
+    32 MiB per connection; a turn that then needs replay fails with an `error` event).
+  - Upstream response state is per account, so a turn with `previous_response_id` cannot be
+    replayed as-is on another account. The relay rebuilds a full request instead: transcript up
+    to the referenced response + the turn's new `input`, with `previous_response_id` removed.
+  - Encrypted reasoning (`reasoning.encrypted_content`, `compaction` items) minted by the old
+    account cannot be decrypted by the new one; those items are stripped from the rebuilt
+    input. Text, tool calls and tool outputs are kept, so the conversation continues without
+    the earlier hidden reasoning.
+  - The rebuilt request is sent on the new account; later turns continue incrementally there
+    (`previous_response_id` of the new account's responses), and the client never sees the
+    switch. Turns without `previous_response_id` are replayed directly.
+  - If the client references a `previous_response_id` the relay never saw (e.g. from another
+    connection), the turn is forwarded unchanged and any upstream
+    `previous_response_not_found` is passed to the client. Upstream close/reconnect: up to 3 reconnects with 200 ms–2 s backoff while
   no turn is in flight; a mid-turn drop sends an `error` event and the client retries.
-  `previous_response_not_found` is passed to the client (Codex then resends full history).
+  An upstream `previous_response_not_found` on the same account (upstream state expired) is
+  recovered the same way: one transparent replay from the transcript.
 - Each completed turn records success/failure on the lease and the account runtime counters
   (`successes`, `failures`, `last_error`). Master-key WebSocket turns are not written to the
   monitor log, matching the existing Antigravity WebSocket path.
@@ -270,7 +284,10 @@ Mock upstream (local axum server) — no live chatgpt.com calls in tests:
 - `native::route` end-to-end against the mock for Chat, Messages, Responses streaming and
   non-streaming, and compact; existing `Provider::ALL` loop tests cover ChatGPT.
 - WebSocket relay against a mock `wss` upstream: model rewrite, `previous_response_id` kept,
-  quota headers, mid-turn drop.
+  quota headers, mid-turn drop; account switch rebuilds the full input from the transcript
+  without `previous_response_id` and without encrypted reasoning; unknown
+  `previous_response_id` forwarded unchanged; same-account `previous_response_not_found`
+  recovered once; transcript memory bound.
 - Frontend: `registryLogic.test.mjs` protocol list; `npm run build`.
 
 ## Risks and rollback
