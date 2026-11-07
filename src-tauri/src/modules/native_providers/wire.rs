@@ -79,39 +79,55 @@ pub fn qoder_request(a: &Account, model: &str, mut chat: Value) -> Result<Value,
 /// A chunk is normalized before it reaches the shared client-protocol output codec.
 /// None denotes an auxiliary event; `[DONE]` is the sole clean end marker.
 pub fn event(provider: Provider, data: &str) -> Result<Option<String>, Failure> {
+    match provider {
+        Provider::Qoder => {}
+        // ChatGPT streams the Responses wire, which never passes through this decoder.
+        Provider::ChatGpt => {
+            return Err(Failure::new(
+                500,
+                "ChatGPT streams are not decoded by the Chat wire",
+            ))
+        }
+    }
     if data.trim() == "[DONE]" {
         return Ok(Some("[DONE]".into()));
     }
     if data.trim().is_empty() {
         return Ok(None);
     }
-    let v: Value = serde_json::from_str(data)
+    let decoded = qoder_client::signing::decrypt(data)
+        .map_err(|_| Failure::new(502, "Cannot decrypt Qoder stream event"))?;
+    if decoded.trim() == "[DONE]" {
+        return Ok(Some("[DONE]".into()));
+    }
+    let v: Value = serde_json::from_str(&decoded)
         .map_err(|_| Failure::new(502, "Invalid provider stream event"))?;
-    match provider {
-        Provider::Qoder => {
-            if let Some(status) = number(&v, &["statusCodeValue"]) {
-                if status != 200.0 {
-                    return Err(Failure::new(
-                        status as u16,
-                        "Qoder rejected the inference request",
-                    ));
-                }
-            }
-            if let Some(body) = v.get("body").and_then(Value::as_str) {
-                if body == "[DONE]" {
-                    return Ok(Some(body.into()));
-                }
-                let inner: Value = serde_json::from_str(body)
-                    .map_err(|_| Failure::new(502, "Invalid Qoder stream envelope"))?;
-                if inner.get("error").is_some() {
-                    return Err(Failure::new(502, "Qoder returned an inference error"));
-                }
-                return Ok(Some(inner.to_string()));
-            }
-            if v.get("choices").is_some() || v.get("usage").is_some() {
-                return Ok(Some(v.to_string()));
-            }
-            Ok(None)
+    if let Some(status) = number(&v, &["statusCodeValue"]) {
+        if status != 200.0 {
+            return Err(Failure::new(
+                status as u16,
+                "Qoder rejected the inference request",
+            ));
         }
     }
+    if let Some(body) = v.get("body").and_then(Value::as_str) {
+        if body == "[DONE]" {
+            return Ok(Some(body.into()));
+        }
+        let decoded = qoder_client::signing::decrypt(body)
+            .map_err(|_| Failure::new(502, "Cannot decrypt Qoder stream envelope"))?;
+        if decoded.trim() == "[DONE]" {
+            return Ok(Some("[DONE]".into()));
+        }
+        let inner: Value = serde_json::from_str(&decoded)
+            .map_err(|_| Failure::new(502, "Invalid Qoder stream envelope"))?;
+        if inner.get("error").is_some() {
+            return Err(Failure::new(502, "Qoder returned an inference error"));
+        }
+        return Ok(Some(inner.to_string()));
+    }
+    if v.get("choices").is_some() || v.get("usage").is_some() {
+        return Ok(Some(v.to_string()));
+    }
+    Ok(None)
 }

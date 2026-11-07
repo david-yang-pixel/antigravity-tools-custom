@@ -17,6 +17,9 @@ struct Upstream {
     reject_reads: bool,
     reject_draw: bool,
     disable_on_claim: Option<String>,
+    no_summary: bool,
+    no_buddy: bool,
+    departed: bool,
 }
 struct Mock {
     data: Arc<Mutex<Upstream>>,
@@ -48,18 +51,34 @@ impl Mock {
                     api::TASKS => json!({"tasks":[
                         {"task_code":"ready","task_name":"Completed task","accept_status":if s.claimed.contains("task") {"claimed"} else {"completed"},"progress":{"current":1,"target":1}},
                         {"task_code":"locked","accept_status":"locked","progress":{"current":99,"target":1}},
-                        {"task_code":"todo","accept_status":"in_progress","progress":{"current":0,"target":1}}
+                        {"task_code":"todo","accept_status":"in_progress","progress":{"current":0,"target":1}},
+                        {"task_code":"titled","title":"Titled task","accept_status":"claimed","reward_credit":30}
                     ]}),
                     api::STREAK => json!({"streak":{"days":7},"redemption_status":{"tier_7d_status":if s.claimed.contains("streak") {"claimed"} else {"available"},"tier_14d_status":"locked","tiers":[{"tier":"7d","credit":7}]}}),
-                    api::TRAVEL => if s.claimed.contains("travel") { json!({"state":"idle"}) } else { json!({"state":"arrived","record_id":42,"reward_credit":9}) },
+                    api::TRAVEL => if s.departed { json!({"state":"traveling"}) } else if s.claimed.contains("travel") { json!({"state":"idle","daily_limit_reached":false}) } else { json!({"state":"arrived","record_id":42,"reward_credit":9}) },
                     api::CHANCES => json!({"balance":s.chances}),
+                    api::LOTTERY_SUMMARY => {
+                        if s.no_summary {
+                            return (StatusCode::NOT_FOUND, Json(json!({"code":404,"msg":"not found"})));
+                        }
+                        json!({"chances":s.chances})
+                    },
+                    "/activity/growth/buddy/travel/config" => json!({"locations":[{"id":3,"name":"Beach"},{"id":4,"name":"Hill"}]}),
+                    "/activity/growth/buddy/travel/depart" => {
+                        assert_eq!(body, json!({"location_id":3}));
+                        if s.no_buddy {
+                            return (StatusCode::BAD_REQUEST, Json(json!({"code":1,"msg":"no active buddy"})));
+                        }
+                        s.departed = true;
+                        json!({"location":{"name":"Beach"}})
+                    },
                     "/activity/growth/tasks/ready/claim" => {
                         s.claimed.insert("task".into());
                         if let Some(id) = s.disable_on_claim.take() { accounts::set_enabled(&id, false).unwrap(); }
                         json!({"credit":5})
                     },
                     "/activity/growth/redeem" => { assert_eq!(body["tier"], "7d"); s.claimed.insert("streak".into()); json!({"credit_granted":7}) },
-                    "/activity/growth/buddy/travel/claim" => { assert_eq!(body["record_id"], 42); s.claimed.insert("travel".into()); json!({"reward_credit":9}) },
+                    "/activity/growth/buddy/travel/claim" => { assert_eq!(body, json!({})); s.claimed.insert("travel".into()); json!({"reward_credit":9}) },
                     "/activity/growth/lottery/draw" => {
                         if s.reject_draw {
                             return (StatusCode::BAD_REQUEST, Json(json!({"code":1,"msg":"insufficient lottery chance balance"})));
@@ -154,6 +173,10 @@ fn activity_eligibility_is_explicit_and_legacy_accounts_are_opt_in() {
     assert!(tiers(&json!({"streak":{"days":100}})).is_err());
     assert_eq!(
         travel_item(&json!({"state":"arrived"})).unwrap()[0].status,
+        "available"
+    );
+    assert_eq!(
+        travel_item(&json!({"state":"lost"})).unwrap()[0].status,
         "unknown"
     );
     assert!(lottery_item(&json!({"balance":-1})).is_err());
@@ -206,7 +229,15 @@ async fn activity_draw_retry_keeps_idempotency_key_across_reload() {
         s.ambiguous_draw = true;
     }
     let a = account();
-    accounts::configure(&a.id, None, None, None, Some(false), Some(true)).unwrap();
+    accounts::configure(
+        &a.id,
+        accounts::Preferences {
+            auto_rewards: Some(false),
+            auto_lottery: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let first = run(&a.id, Action::Automatic).await;
     assert_eq!(first.management.activity.status, "partial");
     assert_eq!(first.management.activity.history[0].status, "unknown");
@@ -251,7 +282,15 @@ async fn activity_last_draw_is_reconciled_even_with_zero_remaining_chances() {
         s.ambiguous_draw = true;
     }
     let a = account();
-    accounts::configure(&a.id, None, None, None, Some(false), Some(true)).unwrap();
+    accounts::configure(
+        &a.id,
+        accounts::Preferences {
+            auto_rewards: Some(false),
+            auto_lottery: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let first = run(&a.id, Action::Automatic).await;
     let token = first.management.activity.pending_draw.unwrap();
     assert_eq!(mock.data.lock().unwrap().chances, 0);
@@ -344,7 +383,15 @@ async fn activity_disable_stops_remaining_writes_and_preserves_preferences() {
     let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
     let mock = Mock::new().await;
     let a = account();
-    accounts::configure(&a.id, None, None, None, Some(true), Some(false)).unwrap();
+    accounts::configure(
+        &a.id,
+        accounts::Preferences {
+            auto_rewards: Some(true),
+            auto_lottery: Some(false),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     mock.data.lock().unwrap().disable_on_claim = Some(a.id.clone());
     let result = run(&a.id, Action::Automatic).await;
     assert!(!result.enabled);
@@ -387,4 +434,136 @@ async fn activity_auth_errors_never_trigger_claims_and_concurrent_jobs_do_not_qu
     })
     .await
     .unwrap();
+}
+
+#[test]
+fn activity_task_list_keeps_only_actionable_tasks_with_their_credits() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let a = account();
+    let entries = tasks(
+        &json!({"tasks":[
+            {"task_code":"done","title":"Done task","accept_status":"completed","reward_credit":100},
+            {"task_code":"old","task_name":"Old schema","accept_status":"claimed","reward":{"credit":5}},
+            {"task_code":"todo","title":"Client only","accept_status":"not_accepted","progress":{"current":0,"target":1}},
+            {"task_code":"locked","accept_status":"locked"}
+        ]}),
+        &a,
+    )
+    .unwrap();
+    let shown: Vec<_> = entries
+        .iter()
+        .map(|e| (e.id.as_str(), e.name.as_str(), e.status.as_str(), e.credits))
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("done", "Done task", "available", Some(100.0)),
+            ("old", "Old schema", "claimed", Some(5.0))
+        ]
+    );
+}
+
+#[test]
+fn activity_lottery_reads_summary_chances_or_legacy_balance() {
+    assert_eq!(
+        lottery_item(&json!({"chances":2})).unwrap()[0].status,
+        "available"
+    );
+    assert_eq!(
+        lottery_item(&json!({"balance":0})).unwrap()[0].status,
+        "pending"
+    );
+}
+
+fn departures(mock: &Mock) -> usize {
+    mock.data
+        .lock()
+        .unwrap()
+        .writes
+        .iter()
+        .filter(|(p, _)| p == "/activity/growth/buddy/travel/depart")
+        .count()
+}
+
+#[tokio::test]
+async fn activity_travel_departs_once_a_day_only_when_opted_in() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let mock = Mock::new().await;
+    let a = account();
+    run(&a.id, Action::Claim).await;
+    assert_eq!(departures(&mock), 0, "the switch is off by default");
+    accounts::configure(
+        &a.id,
+        accounts::Preferences {
+            auto_travel: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let departed = run(&a.id, Action::Claim).await;
+    assert_eq!(departed.management.activity.status, "success");
+    assert_eq!(departures(&mock), 1);
+    let record = departed
+        .management
+        .activity
+        .history
+        .iter()
+        .find(|r| r.status == "departed")
+        .unwrap();
+    assert_eq!(
+        (record.kind.as_str(), record.detail.as_deref()),
+        ("travel", Some("Beach"))
+    );
+    run(&a.id, Action::Claim).await;
+    assert_eq!(departures(&mock), 1, "a travelling Buddy is not sent again");
+}
+
+#[tokio::test]
+async fn activity_travel_without_a_buddy_is_skipped_with_guidance() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let mock = Mock::new().await;
+    mock.data.lock().unwrap().no_buddy = true;
+    let a = account();
+    accounts::configure(
+        &a.id,
+        accounts::Preferences {
+            auto_travel: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = run(&a.id, Action::Claim).await;
+    assert_eq!(result.management.activity.status, "success");
+    let record = result
+        .management
+        .activity
+        .history
+        .iter()
+        .find(|r| r.kind == "travel" && r.id == "depart")
+        .unwrap();
+    assert_eq!(record.status, "skipped");
+    assert!(record.detail.as_deref().unwrap().contains("Buddy"));
+}
+
+#[tokio::test]
+async fn activity_lottery_falls_back_to_the_legacy_chances_endpoint() {
+    let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+    let mock = Mock::new().await;
+    {
+        let mut s = mock.data.lock().unwrap();
+        s.no_summary = true;
+        s.chances = 1;
+    }
+    let a = account();
+    accounts::configure(
+        &a.id,
+        accounts::Preferences {
+            auto_lottery: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = run(&a.id, Action::Claim).await;
+    assert_eq!(result.management.activity.status, "success");
+    assert_eq!(mock.data.lock().unwrap().draws.len(), 1);
 }

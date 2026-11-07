@@ -65,6 +65,13 @@ impl AccountSchedulingPolicy {
     }
 }
 
+/// Session-affinity key part for a publication's ordered native targets. Registry IDs
+/// never contain whitespace, so a space join cannot collide (`["a,b"]` vs `["a","b"]`),
+/// and a single target keeps its bare ID, as before multi-target publications.
+pub fn target_affinity_key(targets: &[&str]) -> String {
+    targets.join(" ")
+}
+
 pub fn account_backoff_seconds(
     breaker: &crate::models::CircuitBreakerConfig,
     consecutive: u64,
@@ -80,4 +87,22 @@ pub fn account_backoff_seconds(
         .unwrap_or(60)
         .min(86400) as i64;
     minimum.max(step).clamp(1, 86400)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_affinity_keys_are_unambiguous_and_single_targets_unchanged() {
+        assert_eq!(target_affinity_key(&["model"]), "model");
+        assert_ne!(
+            target_affinity_key(&["a,b"]),
+            target_affinity_key(&["a", "b"])
+        );
+        assert_ne!(
+            target_affinity_key(&["a", "b"]),
+            target_affinity_key(&["b", "a"])
+        );
+    }
 }

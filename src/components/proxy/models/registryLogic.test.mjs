@@ -8,8 +8,8 @@ import ts from 'typescript';
 const source = await readFile(new URL('./registryLogic.ts', import.meta.url), 'utf8');
 const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } });
 const logic = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
-const ag = { id: 'antigravity:default', provider_type: 'antigravity', display_name: 'AG source', enabled: true, account_count: 2 };
-const wb = { id: 'workbuddy:default', provider_type: 'workbuddy', display_name: 'WB source', enabled: true, account_count: 1 };
+const ag = { id: 'antigravity:default', provider_type: 'antigravity', display_name: 'AG source', enabled: true, account_count: 2, pools_native_models: false };
+const wb = { id: 'workbuddy:default', provider_type: 'workbuddy', display_name: 'WB source', enabled: true, account_count: 1, pools_native_models: true };
 const candidate = (id, source_id, native_model, patch = {}) => ({ id, source_id, native_model, provider_type: source_id === ag.id ? ag.provider_type : wb.provider_type, display_name: native_model, account_count: 1, verified_account_count: 0, verification_status: 'unverified', ignored: false, last_verified_at: null, capabilities: [], ...patch });
 const publication = (id, source_id, native_model, public_id, patch = {}) => ({ id, source_id, native_model, public_id, display_name: public_id, enabled: true, legacy: false, ...patch });
 const view = (patch = {}) => ({ schema_version: 1, revision: 7, sources: [ag, wb], candidates: [candidate('ag-c', ag.id, 'same-name'), candidate('wb-c', wb.id, 'same-name')], published_models: [], notices: [], ...patch });
@@ -47,9 +47,9 @@ test('OpenAI-compatible upstreams serve OpenAI and Anthropic endpoints only', ()
     assert.equal(model.image_generation, false);
 });
 
-test('native Qoder publications retain their sources and supported client protocols', () => {
-    for (const provider_type of ['qoder']) {
-        const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type };
+test('native Qoder and ChatGPT publications retain their sources and supported client protocols', () => {
+    for (const provider_type of ['qoder', 'chatgpt']) {
+        const source = { ...ag, id: `${provider_type}:default`, provider_type, display_name: provider_type, pools_native_models: true };
         const registry = view({ sources: [source], candidates: [candidate('native-c', source.id, 'same-native')], published_models: [publication('native-p', source.id, 'same-native', `${provider_type}-chat`)] });
         const [model] = logic.registryCatalog(registry);
         assert.deepEqual(model.protocols, ['openai', 'anthropic']);
@@ -182,4 +182,68 @@ test('non-secure headless Web origins can create publication drafts without rand
         if (descriptor) Object.defineProperty(globalThis, 'crypto', descriptor);
         else delete globalThis.crypto;
     }
+});
+
+test('extra target options stay within the source and hide ignored or unavailable candidates', () => {
+    const registry = view({ candidates: [candidate('c1', wb.id, 'a'), candidate('c2', wb.id, 'a-sg'), candidate('c3', wb.id, 'a-ignored', { ignored: true }), candidate('c4', wb.id, 'a-denied', { verification_status: 'unavailable' }), candidate('c5', ag.id, 'a-sg')] });
+    const draft = publication('p', wb.id, 'a', 'alias');
+    assert.deepEqual(logic.extraTargetOptions(registry, draft).map(c => c.native_model), ['a-sg']);
+    assert.deepEqual(logic.extraTargetOptions(registry, { ...draft, extra_native_models: ['a-denied'] }).map(c => c.native_model), ['a-denied', 'a-sg']);
+});
+
+test('pooled sources follow the backend flag, not the provider type', () => {
+    const qoder = { ...ag, id: 'qoder:default', provider_type: 'qoder', pools_native_models: true };
+    // A future pooled provider needs no frontend change; a known type without the flag is not pooled.
+    const future = { ...ag, id: 'future:one', provider_type: 'future', pools_native_models: true };
+    const unflagged = { ...wb, id: 'workbuddy:other', pools_native_models: false };
+    const registry = view({ sources: [ag, wb, qoder, future, unflagged] });
+    assert.equal(logic.pooledSource(registry, wb.id), true);
+    assert.equal(logic.pooledSource(registry, ag.id), false);
+    assert.equal(logic.pooledSource(registry, qoder.id), true);
+    assert.equal(logic.pooledSource(registry, future.id), true);
+    assert.equal(logic.pooledSource(registry, unflagged.id), false);
+    assert.equal(logic.pooledSource(registry, 'missing'), false);
+    assert.deepEqual(logic.nativeTargets(publication('p', wb.id, 'a', 'x', { extra_native_models: ['b'] })), ['a', 'b']);
+    assert.deepEqual(logic.nativeTargets(publication('p', wb.id, 'a', 'x')), ['a']);
+});
+
+test('newly added extra ids are gated like the primary', () => {
+    const base = publication('p', wb.id, 'a', 'alias');
+    const registry = view({ candidates: [candidate('c1', wb.id, 'a', { verification_status: 'verified' }), candidate('c2', wb.id, 'b'), candidate('c3', wb.id, 'd', { verification_status: 'unavailable' })], published_models: [base] });
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [{ ...base }]), false);
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [{ ...base, extra_native_models: ['b'] }]), true);
+    assert.equal(logic.publicationError(registry, [{ ...base, extra_native_models: ['d'] }]), '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.');
+    // Existing extras stay exempt while binding is unchanged and record stays enabled...
+    const withExtra = { ...base, extra_native_models: ['b'] };
+    const held = view({ candidates: registry.candidates, published_models: [withExtra] });
+    assert.equal(logic.needsUnverifiedConfirmation(held, [{ ...withExtra }]), false);
+    // ...but re-enabling or changing the primary gates every extra again.
+    const off = view({ candidates: registry.candidates, published_models: [{ ...withExtra, enabled: false }] });
+    assert.equal(logic.needsUnverifiedConfirmation(off, [{ ...withExtra, enabled: true }]), true);
+    assert.equal(logic.needsUnverifiedConfirmation(held, [{ ...withExtra, native_model: 'a', extra_native_models: ['b'], public_id: 'other' }]), true);
+});
+
+test('the primary target can be rebound within its source and is gated as a new binding', () => {
+    const base = publication('p', wb.id, 'a', 'alias', { extra_native_models: ['b'] });
+    const registry = view({ candidates: [candidate('c1', wb.id, 'a', { verification_status: 'verified' }), candidate('c2', wb.id, 'b', { verification_status: 'verified' }), candidate('c3', wb.id, 'c'), candidate('c4', wb.id, 'd', { verification_status: 'unavailable' }), candidate('c5', wb.id, 'e', { ignored: true }), candidate('c6', ag.id, 'c')], published_models: [base] });
+    assert.deepEqual(logic.primaryTargetOptions(registry, base).map(c => c.native_model), ['a', 'b', 'c']);
+    // The current primary stays selectable even once ignored or unavailable.
+    assert.deepEqual(logic.primaryTargetOptions(registry, { ...base, native_model: 'd' }).map(c => c.native_model), ['a', 'b', 'c', 'd']);
+    // Promoting a checked extra swaps it with the old primary; the alias and the routed set are kept.
+    assert.deepEqual(logic.withPrimaryTarget(base, 'b'), { ...base, native_model: 'b', extra_native_models: ['a'] });
+    assert.deepEqual(logic.withPrimaryTarget(base, 'c'), { ...base, native_model: 'c', extra_native_models: ['b'] });
+    const single = publication('q', wb.id, 'a', 'solo');
+    assert.equal('extra_native_models' in logic.withPrimaryTarget(single, 'c'), false);
+    assert.equal(logic.withPrimaryTarget(base, 'a'), base);
+    // A rebound primary needs fresh evidence or consent; a legacy exemption never follows it.
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [logic.withPrimaryTarget(base, 'c')]), true);
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [logic.withPrimaryTarget(base, 'b')]), false);
+    const legacy = view({ ...registry, published_models: [{ ...single, legacy: true }] });
+    assert.equal(logic.mergePublications(legacy, [logic.withPrimaryTarget({ ...single, legacy: true }, 'b')])[0].legacy, false);
+});
+
+test('realm selection stays limited to WorkBuddy and Qoder; ChatGPT is always global', async () => {
+    const upstream = await readFile(new URL('./UpstreamModels.tsx', import.meta.url), 'utf8');
+    assert.match(upstream, /\['workbuddy', 'qoder'\]\.includes\(/);
+    assert.doesNotMatch(upstream, /hasRealm[^\n]*chatgpt/);
 });

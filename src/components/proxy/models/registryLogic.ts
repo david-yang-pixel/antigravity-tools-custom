@@ -10,6 +10,31 @@ export const publicIdKey = (id: string) => id.replace(/^models\//, '');
 export const candidateFor = (view: ModelRegistryView, model: PublishedModel) =>
     view.candidates.find(c => c.source_id === model.source_id && c.native_model === model.native_model);
 
+/** Whether a publication on this source may bind extra native IDs; the backend decides. */
+export const pooledSource = (view: ModelRegistryView, sourceId: string) =>
+    view.sources.find(s => s.id === sourceId)?.pools_native_models === true;
+export const nativeTargets = (model: PublishedModel) => [model.native_model, ...(model.extra_native_models ?? [])];
+export function extraTargetOptions(view: ModelRegistryView, draft: PublishedModel): CandidateModel[] {
+    const chosen = new Set(draft.extra_native_models ?? []);
+    return view.candidates.filter(c => c.source_id === draft.source_id && c.native_model !== draft.native_model
+        && (chosen.has(c.native_model) || (!c.ignored && c.verification_status !== 'unavailable')))
+        .sort((a, b) => a.native_model.localeCompare(b.native_model));
+}
+
+/** Same-source candidates a publication may take as its primary target; the current one stays listed. */
+export function primaryTargetOptions(view: ModelRegistryView, draft: PublishedModel): CandidateModel[] {
+    return view.candidates.filter(c => c.source_id === draft.source_id
+        && (c.native_model === draft.native_model || (!c.ignored && c.verification_status !== 'unavailable')))
+        .sort((a, b) => a.native_model.localeCompare(b.native_model));
+}
+/** Rebinds the primary target. Promoting a checked extra swaps it with the old primary, so the routed set is kept. */
+export function withPrimaryTarget(draft: PublishedModel, native: string): PublishedModel {
+    if (native === draft.native_model) return draft;
+    const { extra_native_models: extras = [], ...rest } = draft;
+    const next = extras.includes(native) ? extras.map(id => id === native ? draft.native_model : id) : extras;
+    return next.length ? { ...rest, native_model: native, extra_native_models: next } : { ...rest, native_model: native };
+}
+
 export function newPublicationId(): string {
     // randomUUID is absent on non-secure remote Web origins. IDs are identities,
     // not secrets; retain the generated value in the draft across retries.
@@ -45,7 +70,7 @@ export function registryCatalog(view: ModelRegistryView): RegistryCatalogModel[]
             if (declared) return declared.status === 'supported' || declared.status === 'conditional';
             if (source.provider_type === 'antigravity') return protocol !== 'anthropic' || !image;
             // Native Chat sources serve the OpenAI and Anthropic endpoints, never native Gemini.
-            if (['workbuddy', 'openai_compatible', 'qoder'].includes(source.provider_type)) return protocol !== 'gemini';
+            if (['workbuddy', 'openai_compatible', 'qoder', 'chatgpt'].includes(source.provider_type)) return protocol !== 'gemini';
             return false;
         });
         return [{ ...model, provider_type: source.provider_type, source_name: source.display_name, protocols, image_generation: image }];
@@ -65,6 +90,13 @@ const sameBinding = (previous: PublishedModel | undefined, draft: PublishedModel
 const newlyExposed = (previous: PublishedModel | undefined, draft: PublishedModel) => !sameBinding(previous, draft)
     || (!!previous && !previous.enabled && draft.enabled);
 
+// Extras are gated like the primary, except those already held by an unchanged, still-enabled record.
+const gatedExtras = (previous: PublishedModel | undefined, draft: PublishedModel) => {
+    const held = newlyExposed(previous, draft) ? new Set<string>() : new Set(previous?.extra_native_models ?? []);
+    return (draft.extra_native_models ?? []).filter(id => !held.has(id));
+};
+const extraCandidate = (view: ModelRegistryView, draft: PublishedModel, id: string) => candidateFor(view, { ...draft, native_model: id });
+
 export function publicationError(view: ModelRegistryView, drafts: PublishedModel[]): string | null {
     const ids = new Set(drafts.map(d => d.id));
     const names = new Set(view.published_models.filter(p => !ids.has(p.id)).map(p => publicIdKey(p.public_id)));
@@ -78,6 +110,7 @@ export function publicationError(view: ModelRegistryView, drafts: PublishedModel
         const candidate = candidateFor(view, model);
         if (!existing && !candidate) return '候选已变化或移除，草稿保留。 / Candidate changed or removed; draft retained.';
         if (!(existing?.legacy && sameBinding(existing, model)) && newlyExposed(existing, model) && candidate?.verification_status === 'unavailable') return '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.';
+        if (gatedExtras(existing, model).some(id => extraCandidate(view, model, id)?.verification_status === 'unavailable')) return '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.';
         if (!existing && !view.sources.some(s => s.id === model.source_id && s.enabled)) return '来源未启用，不能新增上架。 / Enable the source before publishing.';
     }
     return null;
@@ -87,7 +120,8 @@ export function needsUnverifiedConfirmation(view: ModelRegistryView, drafts: Pub
     return drafts.some(draft => {
         const previous = view.published_models.find(p => p.id === draft.id);
         const grandfathered = previous?.legacy && sameBinding(previous, draft);
-        return newlyExposed(previous, draft) && !grandfathered && candidateFor(view, draft)?.verification_status !== 'verified';
+        return (newlyExposed(previous, draft) && !grandfathered && candidateFor(view, draft)?.verification_status !== 'verified')
+            || gatedExtras(previous, draft).some(id => extraCandidate(view, draft, id)?.verification_status !== 'verified');
     });
 }
 

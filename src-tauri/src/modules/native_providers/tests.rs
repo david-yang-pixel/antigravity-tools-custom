@@ -2,14 +2,14 @@ use super::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
-struct Sandbox {
+pub(crate) struct Sandbox {
     _guard: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
     overrides: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 impl Sandbox {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let guard = crate::modules::account::SHARED_TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -18,6 +18,11 @@ impl Sandbox {
         let overrides = [
             "ABV_QODER_ENABLED",
             "ABV_QODER_MAX_CONCURRENCY",
+            "ABV_QODER_EGRESS_ENABLED",
+            "ABV_CHATGPT_ENABLED",
+            "ABV_CHATGPT_MAX_CONCURRENCY",
+            "ABV_CHATGPT_EGRESS_ENABLED",
+            "ABV_CHATGPT_CLIENT_VERSION",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -52,6 +57,27 @@ impl Drop for Sandbox {
         } else {
             std::env::remove_var("ABV_DATA_DIR");
         }
+    }
+}
+/// Points ChatGPT at a closed local port so a test that only expects failures can never
+/// reach the real service; restores the production endpoints on drop.
+pub(super) struct OfflineChatGpt;
+impl OfflineChatGpt {
+    pub(super) fn new() -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap();
+        chatgpt::endpoints::set_test(Some(chatgpt::endpoints::Endpoints {
+            auth: format!("http://127.0.0.1:{port}"),
+            backend: format!("http://127.0.0.1:{port}/backend-api"),
+        }));
+        Self
+    }
+}
+impl Drop for OfflineChatGpt {
+    fn drop(&mut self) {
+        chatgpt::endpoints::set_test(None);
     }
 }
 fn account(provider: Provider, uid: &str) -> Account {
@@ -118,6 +144,7 @@ fn qoder_catalog_uses_official_free_metadata_and_keeps_disabled_models_unavailab
 #[test]
 fn free_models_with_zero_credits_keep_concurrency_and_failure_cooldowns() {
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     for status in [401, 429] {
         let mut a = account(Provider::Qoder, &format!("free-account-{status}"));
         a.models = qoder::parse_models(&json!({"chat":[
@@ -162,6 +189,30 @@ fn identity_urls_cannot_choose_an_untrusted_credential_destination() {
     }
     assert!(
         http::official_url(Provider::Qoder, "https://openapi.qoder.sh/api/v1/userinfo").is_ok()
+    );
+}
+#[test]
+fn chatgpt_service_urls_stay_on_openai_hosts_and_skip_the_chat_wire() {
+    for good in [
+        "https://chatgpt.com/backend-api/codex/models",
+        "https://auth.openai.com/oauth/token",
+    ] {
+        assert!(
+            http::official_url(Provider::ChatGpt, good).is_ok(),
+            "{good}"
+        );
+    }
+    for bad in [
+        "https://chatgpt.com.attacker.example/a",
+        "https://openapi.qoder.sh/a",
+        "http://chatgpt.com/a",
+    ] {
+        assert!(http::official_url(Provider::ChatGpt, bad).is_err(), "{bad}");
+    }
+    assert!(http::official_url(Provider::Qoder, "https://chatgpt.com/a").is_err());
+    assert_eq!(
+        wire::event(Provider::ChatGpt, "[DONE]").unwrap_err().status,
+        500
     );
 }
 #[test]
@@ -219,14 +270,33 @@ fn scheduler_rotates_limits_concurrency_and_skips_cooling_or_exhausted_accounts(
     let _sandbox = Sandbox::new();
     let a = store::upsert(account(Provider::Qoder, "a"), None).unwrap();
     let b = store::upsert(account(Provider::Qoder, "b"), None).unwrap();
-    let mut first = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
-    assert_eq!(first.account.id, a.id);
-    let second = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
-    assert_eq!(second.account.id, b.id);
+    let mut leases: Vec<_> = (0..10)
+        .map(|_| accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap())
+        .collect();
+    assert_eq!(leases[0].account.id, a.id);
+    assert_eq!(leases[1].account.id, b.id);
+    assert_eq!(
+        leases
+            .iter()
+            .filter(|lease| lease.account.id == a.id)
+            .count(),
+        5
+    );
+    assert_eq!(
+        leases
+            .iter()
+            .filter(|lease| lease.account.id == b.id)
+            .count(),
+        5
+    );
     assert!(accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).is_err());
+    drop(leases.pop());
+    let replacement = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
+    leases.push(replacement);
+    let mut first = leases.remove(0);
     first.failure(429);
     drop(first);
-    drop(second);
+    drop(leases);
     let next = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
     assert_eq!(next.account.id, b.id);
     drop(next);
@@ -269,7 +339,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         let policy = Policy::live(&manager, None).await;
         let first = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -281,7 +351,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         drop(first);
         let same = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -293,7 +363,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         drop(same);
         let other = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-b:conversation",
             &policy,
             &HashSet::new(),
@@ -306,7 +376,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         manager.clear_all_sessions();
         let rebound = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -320,7 +390,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         manager.clear_all_sessions();
         let reassigned = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "user-a:conversation",
             &policy,
             &HashSet::new(),
@@ -339,7 +409,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         let performance = Policy::live(&manager, None).await;
         let first = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "same-conversation",
             &performance,
             &HashSet::new(),
@@ -351,7 +421,7 @@ async fn native_pools_follow_live_modes_and_global_session_reset() {
         drop(first);
         let next = accounts::scheduling::acquire(
             provider,
-            "shared-model",
+            &["shared-model"],
             "same-conversation",
             &performance,
             &HashSet::new(),
@@ -368,6 +438,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     use crate::proxy::sticky_config::{AccountSchedulingPolicy as Policy, SchedulingMode};
     use std::time::Duration;
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     store::upsert(account(Provider::Qoder, "wait-a"), None).unwrap();
     store::upsert(account(Provider::Qoder, "wait-b"), None).unwrap();
     let mut policy = Policy::default();
@@ -377,7 +448,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let deadline = || tokio::time::Instant::now() + Duration::from_secs(3);
     let first = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "waiting",
         &policy,
         &excluded,
@@ -393,7 +464,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let (next, _) = tokio::join!(
         accounts::scheduling::acquire(
             Provider::Qoder,
-            "shared-model",
+            &["shared-model"],
             "waiting",
             &policy,
             &excluded,
@@ -408,7 +479,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
         Duration::from_millis(100),
         accounts::scheduling::acquire(
             Provider::Qoder,
-            "shared-model",
+            &["shared-model"],
             "waiting",
             &policy,
             &excluded,
@@ -427,7 +498,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     balance.sticky.mode = SchedulingMode::Balance;
     let fallback = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "waiting",
         &balance,
         &excluded,
@@ -441,7 +512,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     accounts::scheduling::clear_cooldowns(None);
     let mut cooling = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "deadline",
         &policy,
         &excluded,
@@ -455,7 +526,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let began = tokio::time::Instant::now();
     let error = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "deadline",
         &policy,
         &excluded,
@@ -469,7 +540,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
     let began = tokio::time::Instant::now();
     let error = accounts::scheduling::acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "deadline",
         &policy,
         &excluded,
@@ -486,6 +557,7 @@ async fn native_cache_first_waits_for_its_account_and_honors_both_deadlines() {
 async fn native_fixed_account_never_silently_falls_back() {
     use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     let a = store::upsert(account(Provider::Qoder, "fixed-a"), None).unwrap();
     let b = store::upsert(account(Provider::Qoder, "fixed-b"), None).unwrap();
     store::save_settings(
@@ -499,7 +571,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     let policy = Policy::default();
     let fixed = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new(),
@@ -509,7 +581,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     assert_eq!(fixed.account.id, b.id);
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new()
@@ -531,7 +603,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     accounts::configure(Provider::Qoder, &b.id, Some(false), None).unwrap();
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new()
@@ -540,7 +612,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     store::remove(Provider::Qoder, &b.id).unwrap();
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "fixed",
         &policy,
         &HashSet::new()
@@ -557,7 +629,7 @@ async fn native_fixed_account_never_silently_falls_back() {
     assert_eq!(
         accounts::scheduling::try_acquire(
             Provider::Qoder,
-            "shared-model",
+            &["shared-model"],
             "fixed",
             &policy,
             &HashSet::new()
@@ -574,6 +646,7 @@ async fn native_fixed_account_never_silently_falls_back() {
 async fn native_breaker_and_resets_follow_the_global_manager() {
     use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     let a = store::upsert(account(Provider::Qoder, "breaker-qoder"), None).unwrap();
     let manager = crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
     manager
@@ -585,7 +658,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     let policy = Policy::live(&manager, None).await;
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -598,7 +671,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     assert!(manager.clear_rate_limit(&a.id));
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -612,7 +685,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     let b = store::upsert(account(Provider::Qoder, "breaker-b"), None).unwrap();
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -627,7 +700,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     store::remove(Provider::Qoder, &b.id).unwrap();
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &policy,
         &HashSet::new(),
@@ -646,7 +719,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     assert_eq!(accounts::runtime(&a.id).cooldown_until, 0);
     let mut lease = accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &off,
         &HashSet::new(),
@@ -655,7 +728,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     .unwrap();
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &off,
         &HashSet::new()
@@ -667,7 +740,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
     assert_eq!(accounts::runtime(&a.id).cooldown_until, 0);
     assert!(accounts::scheduling::try_acquire(
         Provider::Qoder,
-        "shared-model",
+        &["shared-model"],
         "",
         &off,
         &HashSet::new()
@@ -678,6 +751,7 @@ async fn native_breaker_and_resets_follow_the_global_manager() {
 #[tokio::test]
 async fn model_tests_respect_source_disablement_and_in_flight_permits() {
     let _sandbox = Sandbox::new();
+    std::env::set_var("ABV_QODER_MAX_CONCURRENCY", "1");
     let account = store::upsert(account(Provider::Qoder, "probe-user"), None).unwrap();
     let lease = accounts::select(Provider::Qoder, "shared-model", &HashSet::new()).unwrap();
     assert!(crate::proxy::upstream::native::probe(
@@ -798,6 +872,7 @@ async fn native_model_discovery_requires_explicit_publication_and_keeps_source_b
     use std::sync::Arc;
     use tower::ServiceExt;
     let _sandbox = Sandbox::new();
+    let _offline = OfflineChatGpt::new();
     let mapping = HashMap::new();
     for provider in Provider::ALL {
         store::upsert(account(provider, provider.key()), None).unwrap();
@@ -822,6 +897,7 @@ async fn native_model_discovery_requires_explicit_publication_and_keeps_source_b
                 display_name: p.name().into(),
                 source_id: p.source().into(),
                 native_model: "shared-model".into(),
+                extra_native_models: Vec::new(),
                 enabled: true,
                 legacy: false,
             })
@@ -1085,3 +1161,559 @@ async fn registry_refresh_skips_an_unreadable_native_vault_and_still_reports() {
         .iter()
         .any(|n| n.contains("Qoder") && n.contains("已跳过该来源")));
 }
+
+#[test]
+fn cosy_client_ip_and_hostname_are_stable_per_account_and_differ_between_accounts() {
+    let a = account(Provider::Qoder, "ip-a");
+    let b = account(Provider::Qoder, "ip-b");
+    assert_eq!(
+        qoder::sign::client_ip(&a),
+        qoder::sign::client_ip(&a.clone())
+    );
+    assert_eq!(qoder::sign::hostname(&a), qoder::sign::hostname(&a.clone()));
+    assert_ne!(qoder::sign::client_ip(&a), qoder::sign::client_ip(&b));
+    assert_ne!(qoder::sign::hostname(&a), qoder::sign::hostname(&b));
+    assert!(qoder::sign::client_ip(&a).starts_with("169.254."));
+    let headers = qoder::sign::headers(
+        &a,
+        "body",
+        "https://gateway.qoder.com.cn/algo/api/v2/x",
+        "m",
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        headers["cosy-clientip"],
+        qoder::sign::client_ip(&a).as_str()
+    );
+    assert_eq!(
+        headers["cosy-machinehostname"],
+        qoder::sign::hostname(&a).as_str()
+    );
+}
+
+#[test]
+fn modern_qoder_hostname_and_encoded_sse_follow_the_official_protocol() {
+    assert_eq!(
+        qoder::sign::normalize_hostname("  dev-host.local  "),
+        "dev-host.local"
+    );
+    assert_eq!(
+        qoder::sign::normalize_hostname("München.local"),
+        "xn--mnchen-3ya.local"
+    );
+    let name = qoder::sign::normalize_hostname(&format!("{}\r\nheader: injected", "x".repeat(110)));
+    assert!(name.len() <= 96 && !name.contains(['\r', '\n']));
+    let chunk = serde_json::json!({"choices":[{"delta":{"content":"decoded"}}]});
+    let encoded = qoder::sign::encode(chunk.to_string().as_bytes());
+    let decoded = wire::event(Provider::Qoder, &encoded).unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), chunk);
+    let envelope = serde_json::json!({"statusCodeValue":200,"body":encoded});
+    assert_eq!(
+        wire::event(Provider::Qoder, &envelope.to_string()).unwrap(),
+        Some(decoded)
+    );
+    let done = qoder::sign::encode(b"[DONE]");
+    assert_eq!(
+        wire::event(Provider::Qoder, &done).unwrap(),
+        Some("[DONE]".into())
+    );
+    assert_eq!(
+        wire::event(
+            Provider::Qoder,
+            &serde_json::json!({"body":done}).to_string()
+        )
+        .unwrap(),
+        Some("[DONE]".into())
+    );
+}
+
+#[test]
+fn idle_accounts_only_renew_near_expiry_and_new_catalogs_are_always_fetched() {
+    let at = now();
+    let mut a = account(Provider::Qoder, "idle");
+    a.next_sync_at = at - 1;
+    // Never fetched: due so the account can become schedulable at all.
+    assert_eq!(accounts::work(&a, at), Some(accounts::Work::Sync));
+    a.models_updated_at = at - 3600;
+    // Fetched before and unused since: no catalog/quota heartbeat.
+    assert_eq!(accounts::work(&a, at), None);
+    assert!(accounts::sync_paused(&a, at));
+    a.expires_at = at + 120;
+    assert_eq!(accounts::work(&a, at), Some(accounts::Work::Renew));
+    a.credentials.refresh_token.clear();
+    assert_eq!(accounts::work(&a, at), None);
+    a.auto_refresh = false;
+    a.models_updated_at = 0;
+    assert_eq!(accounts::work(&a, at), None);
+    assert!((900..1080).contains(&accounts::sync_interval(&a.id)));
+}
+
+#[test]
+fn idle_zero_balance_accounts_keep_recovery_until_credits_return() {
+    let at = now();
+    let mut a = account(Provider::Qoder, "idle-quota-recovery");
+    a.models_updated_at = at - 86400;
+    a.next_sync_at = at - 1;
+    a.quota = Some(
+        qoder::parse_quota(&json!({"userQuota":{"total":100,"remaining":0,"used":100}})).unwrap(),
+    );
+    // No in-memory activity, as after a restart. Recovery also survives expiry
+    // of the quota's admission TTL; it never becomes a catalog poll.
+    for age in [0, 901, 86400] {
+        a.quota.as_mut().unwrap().updated_at = at - age;
+        assert_eq!(accounts::work(&a, at), Some(accounts::Work::Quota));
+        assert!(!accounts::sync_paused(&a, at));
+        assert_eq!(AccountView::from(&a).next_sync_at, a.next_sync_at);
+    }
+    assert!(!a.quota.as_ref().unwrap().exhausted());
+    // Existing due time and operator switches still bound recovery work.
+    a.next_sync_at = at + accounts::sync_interval(&a.id);
+    assert_eq!(accounts::work(&a, at), None);
+    assert_eq!(
+        accounts::work(&a, a.next_sync_at),
+        Some(accounts::Work::Quota)
+    );
+    a.next_sync_at = at - 1;
+    a.enabled = false;
+    assert_eq!(accounts::work(&a, at), None);
+    a.enabled = true;
+    a.auto_refresh = false;
+    assert_eq!(accounts::work(&a, at), None);
+    a.auto_refresh = true;
+    // A successful recovery stops the idle heartbeat again. Unknown and
+    // unlimited balances also do not start a zero-balance recovery loop.
+    for remaining in [Some(20.0), None] {
+        a.quota.as_mut().unwrap().remaining = remaining;
+        assert_eq!(accounts::work(&a, at), None);
+        assert!(accounts::sync_paused(&a, at));
+    }
+    a.quota.as_mut().unwrap().remaining = Some(0.0);
+    a.quota.as_mut().unwrap().unlimited = true;
+    assert_eq!(accounts::work(&a, at), None);
+    assert!(accounts::sync_paused(&a, at));
+}
+
+#[tokio::test]
+async fn duplicate_import_is_rejected_before_egress_and_preserves_saved_tokens() {
+    let _sandbox = Sandbox::new();
+    let mut a = account(Provider::Qoder, "duplicate-import");
+    a.expires_at = now() - 3600;
+    let a = store::upsert(a, None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    // Any attempt to obtain a login route fails locally, before networking. The
+    // duplicate-credential guard must run even before that route validation.
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("workbuddy_egress.json"),
+        "invalid egress settings",
+    )
+    .unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"auth":{
+            "accessToken":"expired-import-access",
+            "refreshToken":a.credentials.refresh_token,
+            "expiresAt":a.expires_at
+        }}),
+        None,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(error.contains("already saved"), "{error}");
+    assert_eq!(store::all(Provider::Qoder).unwrap().len(), 1);
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn duplicate_import_rechecks_credentials_saved_while_waiting_for_egress() {
+    let _sandbox = Sandbox::new();
+    // If the duplicate guard regresses, client creation fails locally rather
+    // than letting this test contact a real Qoder endpoint.
+    let mut config = crate::models::AppConfig::default();
+    config.proxy.upstream_proxy.enabled = true;
+    config.proxy.upstream_proxy.url = "http://127.0.0.1:invalid".into();
+    crate::modules::config::save_app_config(&config).unwrap();
+    let route = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::modules::egress::login_route(
+            crate::modules::egress::Pool::Native(Provider::Qoder),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let a = account(Provider::Qoder, "concurrent-import");
+    let import = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":a.credentials.refresh_token}),
+        None,
+    );
+    tokio::pin!(import);
+    // The vault is empty at the first guard; suspend at the held login lock.
+    assert!(futures::poll!(&mut import).is_pending());
+    let a = store::upsert(a, None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    drop(route);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), &mut import)
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+    assert!(error.contains("already saved"), "{error}");
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn qoder_import_ignores_refresh_fingerprints() {
+    use sha2::{Digest, Sha256};
+    let _sandbox = Sandbox::new();
+    // Client creation fails locally, so a token past the duplicate guard never leaves
+    // this machine; the error then comes from the transport, not the guard.
+    let mut config = crate::models::AppConfig::default();
+    config.proxy.upstream_proxy.enabled = true;
+    config.proxy.upstream_proxy.url = "http://127.0.0.1:invalid".into();
+    crate::modules::config::save_app_config(&config).unwrap();
+    let mut a = account(Provider::Qoder, "rotated-away");
+    a.credentials.refresh_token = "rotated".into();
+    a.credentials.imported_refresh_sha256 = vec![format!("{:x}", Sha256::digest(b"old-rt"))];
+    let a = store::upsert(a, None).unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":"old-rt"}),
+        None,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(!error.contains("already saved"), "{error}");
+    let saved = store::get(Provider::Qoder, &a.id).unwrap();
+    assert_eq!(saved.credentials.refresh_token, "rotated");
+}
+
+#[tokio::test]
+async fn qoder_import_with_account_id_is_refused_before_egress() {
+    let _sandbox = Sandbox::new();
+    let a = store::upsert(account(Provider::Qoder, "row-import"), None).unwrap();
+    let before = serde_json::to_value(&a).unwrap();
+    // Any login route fails locally: the refusal must come before it.
+    std::fs::write(
+        crate::modules::account::get_data_dir()
+            .unwrap()
+            .join("workbuddy_egress.json"),
+        "invalid egress settings",
+    )
+    .unwrap();
+    let error = login::import(
+        Provider::Qoder,
+        Realm::Cn,
+        json!({"refreshToken":"new-refresh"}),
+        Some(&a.id),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(
+        error,
+        "Qoder accounts reauthorize from their row's browser login"
+    );
+    assert_eq!(
+        serde_json::to_value(store::get(Provider::Qoder, &a.id).unwrap()).unwrap(),
+        before
+    );
+}
+
+fn model(id: &str, is_free: bool) -> Model {
+    Model {
+        id: id.into(),
+        name: id.into(),
+        is_free,
+        ..Default::default()
+    }
+}
+fn with_models(uid: &str, models: Vec<Model>) -> Account {
+    let mut a = account(Provider::Qoder, uid);
+    a.models = models;
+    a
+}
+fn exhausted_quota() -> Quota {
+    qoder::parse_quota(&json!({"userQuota":{"total":100,"used":100,"remaining":0}})).unwrap()
+}
+#[test]
+fn native_group_pools_accounts_with_different_native_ids() {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    let cn = store::upsert(
+        with_models("group-cn", vec![model("shared-model", false)]),
+        None,
+    )
+    .unwrap();
+    let global = store::upsert(
+        with_models("group-global", vec![model("shared-model-sg", false)]),
+        None,
+    )
+    .unwrap();
+    let policy = Policy::default();
+    let targets = ["shared-model", "shared-model-sg"];
+    let first =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    let second =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    let mut picked: Vec<_> = [&first, &second]
+        .iter()
+        .map(|l| (l.account.id.clone(), l.model.clone()))
+        .collect();
+    picked.sort();
+    let mut expected = vec![
+        (cn.id.clone(), "shared-model".to_string()),
+        (global.id.clone(), "shared-model-sg".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(picked, expected);
+}
+#[test]
+fn native_group_quota_filter_applies_per_target() {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    let policy = Policy::default();
+    let targets = ["paid-model", "free-model-sg"];
+    let mut paid_only = with_models("quota-paid", vec![model("paid-model", false)]);
+    paid_only.quota = Some(exhausted_quota());
+    let stored = store::upsert(paid_only, None).unwrap();
+    assert!(accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &targets,
+        "",
+        &policy,
+        &HashSet::new()
+    )
+    .is_err());
+    store::update(Provider::Qoder, &stored.id, None, |a| {
+        a.models = vec![model("paid-model", false), model("free-model-sg", true)];
+    })
+    .unwrap();
+    let lease =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    assert_eq!(lease.model, "free-model-sg");
+    store::update(Provider::Qoder, &stored.id, None, |a| {
+        a.models = vec![model("paid-model", true)];
+    })
+    .unwrap();
+    drop(lease);
+    let lease =
+        accounts::scheduling::try_acquire(Provider::Qoder, &targets, "", &policy, &HashSet::new())
+            .unwrap()
+            .unwrap();
+    assert_eq!(lease.model, "paid-model");
+}
+#[test]
+fn native_group_prefers_first_target_on_accounts_listing_both() {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    store::upsert(
+        with_models(
+            "both",
+            vec![
+                model("shared-model-sg", false),
+                model("shared-model", false),
+            ],
+        ),
+        None,
+    )
+    .unwrap();
+    let lease = accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &["shared-model", "shared-model-sg"],
+        "",
+        &Policy::default(),
+        &HashSet::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(lease.model, "shared-model");
+}
+#[test]
+fn publication_targets_lease_the_only_enabled_accounts_native_id() {
+    use crate::modules::model_registry::PublishedModel;
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let _sandbox = Sandbox::new();
+    let mut cn = with_models("only-cn", vec![model("shared-model", false)]);
+    cn.enabled = false;
+    store::upsert(cn, None).unwrap();
+    let global = store::upsert(
+        with_models("only-global", vec![model("shared-model-sg", false)]),
+        None,
+    )
+    .unwrap();
+    let published = PublishedModel {
+        id: "p".into(),
+        public_id: "public-model".into(),
+        display_name: "Public".into(),
+        source_id: "qoder".into(),
+        native_model: "shared-model".into(),
+        extra_native_models: vec!["shared-model-sg".into()],
+        enabled: true,
+        legacy: false,
+    };
+    let lease = accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &published.native_models(),
+        "",
+        &Policy::default(),
+        &HashSet::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(lease.account.id, global.id);
+    assert_eq!(lease.model, "shared-model-sg");
+}
+
+async fn settle_lease(uid: &str, breaker_enabled: bool) -> (Account, accounts::Lease) {
+    use crate::proxy::sticky_config::AccountSchedulingPolicy as Policy;
+    let a = store::upsert(account(Provider::Qoder, uid), None).unwrap();
+    let manager = crate::proxy::TokenManager::new(crate::modules::account::get_data_dir().unwrap());
+    manager
+        .update_circuit_breaker_config(crate::models::CircuitBreakerConfig {
+            enabled: breaker_enabled,
+            ..Default::default()
+        })
+        .await;
+    let policy = Policy::live(&manager, None).await;
+    let lease = accounts::scheduling::try_acquire(
+        Provider::Qoder,
+        &["shared-model"],
+        "",
+        &policy,
+        &HashSet::new(),
+    )
+    .unwrap()
+    .unwrap();
+    (a, lease)
+}
+
+#[tokio::test]
+async fn lease_settle_until_blocks_even_with_breaker_disabled() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-until", false).await;
+    lease.settle(&http::Failure::classified(
+        429,
+        "q",
+        http::Penalty::Until {
+            at: now() + 3600,
+            message: "Account quota exhausted",
+        },
+        true,
+    ));
+    drop(lease);
+    let r = accounts::runtime(&a.id);
+    assert!(r.cooldown_until >= now() + 3599);
+    assert_eq!(r.last_error.as_deref(), Some("Account quota exhausted"));
+}
+
+#[tokio::test]
+async fn lease_settle_neutral_leaves_counters_untouched() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-neutral", true).await;
+    lease.settle(&http::Failure::classified(
+        400,
+        "q",
+        http::Penalty::Neutral,
+        false,
+    ));
+    drop(lease);
+    let r = accounts::runtime(&a.id);
+    assert_eq!(r.failures, 0);
+    assert_eq!(r.cooldown_until, 0);
+}
+
+#[tokio::test]
+async fn lease_settle_disable_turns_account_off() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-disable", true).await;
+    lease.settle(&http::Failure::classified(
+        401,
+        "q",
+        http::Penalty::Disable {
+            message: "dead".into(),
+        },
+        true,
+    ));
+    drop(lease);
+    let stored = store::get(Provider::Qoder, &a.id).unwrap();
+    assert!(!stored.enabled);
+    assert_eq!(stored.auth_error.as_deref(), Some("dead"));
+    assert_eq!(accounts::runtime(&a.id).failures, 1);
+}
+
+#[tokio::test]
+async fn lease_settle_disable_skips_a_reimported_account() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-disable-stale", true).await;
+    // The account is re-imported while the request is in flight.
+    let reimported = store::upsert(account(Provider::Qoder, "settle-disable-stale"), None).unwrap();
+    assert_eq!(reimported.id, a.id);
+    assert_ne!(reimported.revision, lease.account.revision);
+    lease.settle(&http::Failure::classified(
+        401,
+        "q",
+        http::Penalty::Disable {
+            message: "dead".into(),
+        },
+        true,
+    ));
+    drop(lease);
+    let stored = store::get(Provider::Qoder, &a.id).unwrap();
+    assert!(stored.enabled);
+    assert!(!stored.credential_dead);
+    assert_eq!(stored.auth_error, None);
+}
+
+#[tokio::test]
+async fn lease_settle_without_penalty_matches_failure_after() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-plain-a", true).await;
+    lease.settle(&http::Failure::new(429, "x"));
+    drop(lease);
+    store::remove(Provider::Qoder, &a.id).unwrap();
+    let (b, mut lease) = settle_lease("settle-plain-b", true).await;
+    lease.failure_after(429, None);
+    drop(lease);
+    let (ra, rb) = (accounts::runtime(&a.id), accounts::runtime(&b.id));
+    assert_eq!(ra.failures, rb.failures);
+    assert_eq!(ra.last_error, rb.last_error);
+    assert!((ra.cooldown_until - rb.cooldown_until).abs() <= 1);
+    assert_eq!(ra.failures, 1);
+}
+
+#[test]
+fn plain_clients_are_cached_per_account_and_route() {
+    use crate::modules::egress::Exit;
+    let a = account(Provider::Qoder, "plain-cache");
+    assert!(!http::plain_cached(&a.id));
+    http::plain_client_on(&a, &Exit::Direct).unwrap();
+    assert!(http::plain_cached(&a.id));
+    http::plain_client_on(&a, &Exit::Direct).unwrap();
+    http::forget(&a.id);
+    assert!(!http::plain_cached(&a.id));
+}
+
+#[path = "chatgpt_dispatch_tests.rs"]
+mod chatgpt_dispatch;

@@ -10,7 +10,15 @@ use std::time::Duration;
 pub(super) const TASKS: &str = "/v2/activity/growth/tasks";
 pub(super) const STREAK: &str = "/activity/growth/streak";
 pub(super) const TRAVEL: &str = "/activity/growth/buddy/travel/status";
+/// Free draws remaining; current upstream. [`CHANCES`] is the older endpoint kept as fallback.
+pub(super) const LOTTERY_SUMMARY: &str = "/activity/growth/lottery/summary";
 pub(super) const CHANCES: &str = "/activity/growth/lottery/chances";
+pub(super) const TRAVEL_CONFIG: &str = "/activity/growth/buddy/travel/config";
+pub(super) const TRAVEL_DEPART: &str = "/activity/growth/buddy/travel/depart";
+pub(super) const TRAVEL_CLAIM: &str = "/activity/growth/buddy/travel/claim";
+/// Upstream answer to a departure from an account that has not claimed its first Buddy.
+pub(super) const NO_BUDDY: &str =
+    "No Buddy yet: claim one in the official WorkBuddy client before sending it traveling";
 
 #[derive(Debug)]
 pub(super) struct Error {
@@ -103,6 +111,13 @@ async fn parse(response: rquest::Response) -> Result<Value, Error> {
         .or_else(|| value["message"].as_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if http == StatusCode::BAD_REQUEST && msg.contains("no active buddy") {
+        return Err(Error {
+            status: "skipped",
+            detail: NO_BUDDY.into(),
+            http: http.as_u16(),
+        });
+    }
     // Only explicit business outcomes are benign. A 403 alone is never eligibility evidence.
     let skipped = (http == StatusCode::CONFLICT
         && ["duplicate", "已领取"].iter().any(|m| msg.contains(m)))

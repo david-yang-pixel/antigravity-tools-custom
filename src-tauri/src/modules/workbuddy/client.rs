@@ -9,10 +9,12 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
 /// Connection settings shared by direct and egress clients.
-/// System and Antigravity proxies are ignored. TLS and HTTP/2 follow Chrome 123,
-/// without that profile's browser headers, so each request keeps the WorkBuddy
-/// User-Agent and identity headers supplied by the caller.
+/// Uses the captured official Electron/Node HTTP/1.1 profile. The former Chrome
+/// profile remains an explicit administrator rollback, never an automatic replay.
 pub fn builder() -> rquest::ClientBuilder {
+    if !super::transport::legacy_enabled() {
+        return super::transport::builder();
+    }
     rquest::Client::builder()
         .emulation(
             rquest_util::EmulationOption::builder()
@@ -527,7 +529,8 @@ pub async fn chat(
     }
     require_leading_system(&mut payload)?;
     neutralize_system_openings(&mut payload);
-    let conversation = upstream_conversation_id(&session_key(scope, &payload));
+    let conversation =
+        upstream_conversation_id(&format!("{}:{}", account.id, session_key(scope, &payload)));
     let mut h = headers(account.realm, Some(account)).map_err(ChatError::Account)?;
     add(&mut h, "accept", "application/json, text/event-stream").map_err(ChatError::Account)?;
     let product_version = if account.client.product_version.is_empty() {
@@ -537,6 +540,9 @@ pub async fn chat(
     };
     for (name, value) in [
         ("x-agent-purpose", "conversation"),
+        ("x-agent-intent", "craft"),
+        ("x-agent-type", "main"),
+        ("x-private-data", "true"),
         ("x-ide-name", "WorkBuddy"),
         ("x-ide-type", "WorkBuddy"),
         ("x-ide-version", product_version),
@@ -544,17 +550,16 @@ pub async fn chat(
     ] {
         add(&mut h, name, value).map_err(ChatError::Account)?;
     }
+    // Official buildConversationHeaders shares one generated message/request ID.
+    let message_id = uuid::Uuid::new_v4().simple().to_string();
     for (name, value) in [
         ("x-conversation-id", conversation),
         (
             "x-conversation-request-id",
             uuid::Uuid::new_v4().simple().to_string(),
         ),
-        (
-            "x-conversation-message-id",
-            uuid::Uuid::new_v4().simple().to_string(),
-        ),
-        ("x-request-id", uuid::Uuid::new_v4().simple().to_string()),
+        ("x-conversation-message-id", message_id.clone()),
+        ("x-request-id", message_id),
         (
             "x-root-request-id",
             uuid::Uuid::new_v4().simple().to_string(),
@@ -655,6 +660,48 @@ mod tests {
             self.0.abort();
             std::env::remove_var("STELLAR_TEST_WORKBUDDY_BASE");
         }
+    }
+    #[tokio::test]
+    async fn workbuddy_conversation_identity_is_stable_within_an_account_and_isolated_between_accounts(
+    ) {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "STELLAR_TEST_WORKBUDDY_BASE",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let app = Router::new().route(
+            "/v2/chat/completions",
+            post(|headers: HeaderMap| async move {
+                Json(
+                    json!({"conversation":headers["x-conversation-id"].to_str().unwrap(),
+                "message":headers["x-conversation-message-id"].to_str().unwrap(),
+                "request":headers["x-request-id"].to_str().unwrap()}),
+                )
+            }),
+        );
+        let _mock = Mock(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        async fn send(account: &Account) -> Value {
+            chat(account, "same-downstream-session",
+                json!({"messages":[{"role":"system","content":"Use supplied context."},{"role":"user","content":"test input"}]}),
+                "test-model", tokio::time::Instant::now() + Duration::from_secs(3))
+                .await.unwrap().json().await.unwrap()
+        }
+        let a =
+            super::super::accounts::parse_import(json!({"uid":"identity-a","accessToken":"test"}))
+                .unwrap();
+        let b =
+            super::super::accounts::parse_import(json!({"uid":"identity-b","accessToken":"test"}))
+                .unwrap();
+        let first = send(&a).await;
+        let repeated = send(&a).await;
+        let other = send(&b).await;
+        assert_eq!(first["conversation"], repeated["conversation"]);
+        assert_ne!(first["conversation"], other["conversation"]);
+        assert_eq!(first["message"], first["request"]);
+        assert_ne!(first["request"], repeated["request"]);
     }
     #[tokio::test]
     async fn workbuddy_request_deadline_bounds_refresh_wait_and_preserves_rotated_tokens() {
@@ -937,8 +984,9 @@ mod tests {
                     .map(|name| headers[name].to_str().unwrap().to_owned());
                     assert_eq!(
                         ids.iter().collect::<std::collections::HashSet<_>>().len(),
-                        6
+                        5
                     );
+                    assert_eq!(ids[2], ids[3]);
                     assert_eq!(ids[0].len(), 32);
                     assert_eq!(
                         headers["accept"].to_str().unwrap(),

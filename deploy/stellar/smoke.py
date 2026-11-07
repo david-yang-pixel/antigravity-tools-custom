@@ -38,13 +38,18 @@ def main():
     request('/usage')
     request('/api/user-tokens', 401)
     request('/api/token-portal/me', 401)
+    invalid_version_target = {'target': {'region': 'cn', 'platform': 'not-a-platform'}}
+    request('/api/workbuddy-client-version', 401, data=invalid_version_target)
     admin = os.environ['SMOKE_ADMIN']
     request('/api/proxy/start', key=admin, method='POST')
+    # Exercise the authenticated route without making any external release request.
+    request('/api/workbuddy-client-version', 422, key=admin, data=invalid_version_target)
     token = request('/api/user-tokens', key=admin, data={
         'username': 'CI smoke test', 'expires_type': 'never', 'max_ips': 0,
         'max_concurrency': 2,
     })
     key = token['token']
+    request('/api/workbuddy-client-version', 401, key=key, data=invalid_version_target)
     token_path = '/api/user-tokens/' + token['id']
     overview = request('/api/token-portal/me', key=key)
     verify_portal_response(overview)

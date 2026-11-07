@@ -349,7 +349,14 @@ async fn discover_native_account(
         .await
         .map_err(|e| e.to_string())?;
     let models = match provider {
-        NativeProvider::Qoder => native::qoder::models(&account).await,
+        NativeProvider::Qoder => match native::http::client_for(&account).await {
+            Ok(client) => native::qoder::models(&client, &account).await,
+            Err(error) => Err(error),
+        },
+        NativeProvider::ChatGpt => match native::http::plain_client_for(&account).await {
+            Ok(client) => native::chatgpt::models::fetch(&client, &account).await,
+            Err(error) => Err(error),
+        },
     }
     .map_err(|e| e.to_string())?;
     let ids = models.iter().map(|m| m.id.clone()).collect();
@@ -369,10 +376,14 @@ async fn discover_native(
     if !native::store::settings(provider)?.enabled {
         return Err("Enable this source before discovering its models".into());
     }
-    let realm = realm.map(|realm| match realm {
-        super::workbuddy::accounts::Realm::Cn => native::Realm::Cn,
-        super::workbuddy::accounts::Realm::Global => native::Realm::Global,
-    });
+    let realm = match provider {
+        NativeProvider::Qoder => realm.map(|realm| match realm {
+            super::workbuddy::accounts::Realm::Cn => native::Realm::Cn,
+            super::workbuddy::accounts::Realm::Global => native::Realm::Global,
+        }),
+        // Every ChatGPT account is global: a region filter has nothing to narrow.
+        NativeProvider::ChatGpt => None,
+    };
     let accounts = shuffled(
         native::store::all(provider)?
             .into_iter()

@@ -1,8 +1,10 @@
 //! First-party Qoder device authorization, quota API and COSY model/inference service.
+#[path = "qoder/releases.rs"]
+pub mod releases;
 #[path = "qoder/sign.rs"]
 pub mod sign;
 use super::{
-    http::{self, Failure},
+    http::{self, DispatchFailure, Failure},
     *,
 };
 use reqwest::{header::HeaderMap, Method};
@@ -39,7 +41,14 @@ pub fn headers(a: &Account) -> Result<HeaderMap, Failure> {
             "authorization",
             format!("Bearer {}", a.credentials.access_token),
         ),
-        ("user-agent", format!("Qoder/{}", sign::version())),
+        (
+            "user-agent",
+            format!(
+                "{}/{}",
+                if sign::legacy() { "Qoder" } else { "qoder" },
+                sign::version()
+            ),
+        ),
         ("accept", "application/json".into()),
         ("content-type", "application/json".into()),
         ("x-machine-id", a.credentials.machine_id.clone()),
@@ -47,6 +56,11 @@ pub fn headers(a: &Account) -> Result<HeaderMap, Failure> {
         ("origin", website(a.realm).into()),
     ] {
         http::insert(&mut h, key, &value)?;
+    }
+    if !sign::legacy() {
+        for name in ["content-type", "x-machine-id", "x-request-id", "origin"] {
+            h.remove(name);
+        }
     }
     Ok(h)
 }
@@ -82,7 +96,10 @@ pub fn apply_tokens(a: &mut Account, value: &Value) -> Result<(), Failure> {
     }
     Ok(())
 }
-pub async fn refresh(a: &mut Account) -> Result<(), Failure> {
+pub async fn refresh(
+    client: &qoder_client::transport::Client,
+    a: &mut Account,
+) -> Result<(), Failure> {
     let refresh = &a.credentials.refresh_token;
     let mut attempts = Vec::new();
     if !refresh.is_empty() {
@@ -107,6 +124,7 @@ pub async fn refresh(a: &mut Account) -> Result<(), Failure> {
     );
     for (path, body) in attempts {
         match http::json(
+            client,
             Provider::Qoder,
             Method::POST,
             &format!("{}{path}", openapi(a.realm)),
@@ -121,8 +139,12 @@ pub async fn refresh(a: &mut Account) -> Result<(), Failure> {
     }
     Err(last)
 }
-pub async fn identity(a: &mut Account) -> Result<(), Failure> {
+pub async fn identity(
+    client: &qoder_client::transport::Client,
+    a: &mut Account,
+) -> Result<(), Failure> {
     let value = http::json(
+        client,
         Provider::Qoder,
         Method::GET,
         &format!("{}/api/v1/userinfo", openapi(a.realm)),
@@ -146,15 +168,19 @@ pub async fn identity(a: &mut Account) -> Result<(), Failure> {
     }
     a.credentials.organization_id = text(v, &["organization_id", "organizationId"]);
     a.credentials.organization_name = text(v, &["organization_name", "organizationName"]);
+    a.credentials.organization_tags = v.get("organization_tags").cloned();
+    a.credentials.data_policy_agreed = v.get("data_policy_agreed").and_then(Value::as_bool);
     Ok(())
 }
-pub async fn models(a: &Account) -> Result<Vec<Model>, Failure> {
-    let url = format!("{}/algo/api/v2/model/list?Encode=1", gateway(a.realm));
-    let body = sign::encode(b"{}");
-    let response = http::client()?
-        .get(http::official_url(Provider::Qoder, &url)?)
-        .headers(sign::headers(a, &body, &url, "", false)?)
-        .body(body)
+pub async fn models(
+    client: &qoder_client::transport::Client,
+    a: &Account,
+) -> Result<Vec<Model>, Failure> {
+    let signed = sign::prepare(a, "{}".into(), None, client.uses_proxy()).await?;
+    let response = client
+        .get(http::official_url(Provider::Qoder, &signed.url)?)
+        .headers(signed_headers(&signed.headers)?)
+        .body(signed.body.unwrap_or_default())
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await
@@ -197,8 +223,12 @@ pub fn parse_models(value: &Value) -> Result<Vec<Model>, Failure> {
     }
     Ok(models.into_values().take(2000).collect())
 }
-pub async fn quota(a: &Account) -> Result<Quota, Failure> {
+pub async fn quota(
+    client: &qoder_client::transport::Client,
+    a: &Account,
+) -> Result<Quota, Failure> {
     let value = http::json(
+        client,
         Provider::Qoder,
         Method::GET,
         &format!("{}/api/v2/quota/usage", openapi(a.realm)),
@@ -258,20 +288,44 @@ pub fn parse_quota(value: &Value) -> Result<Quota, Failure> {
     Ok(Quota::from_packs("credits", packs))
 }
 pub async fn chat(
+    client: &qoder_client::transport::Client,
     a: &Account,
     model: &str,
     payload: Value,
     timeout: std::time::Duration,
-) -> Result<reqwest::Response, Failure> {
+) -> Result<reqwest::Response, DispatchFailure> {
+    let deadline = tokio::time::Instant::now() + timeout;
     let body = super::wire::qoder_request(a, model, payload)?;
-    let encoded = sign::encode(body.to_string().as_bytes());
-    let url = format!("{}/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1", gateway(a.realm));
-    http::client()?
-        .post(http::official_url(Provider::Qoder, &url)?)
-        .headers(sign::headers(a, &encoded, &url, model, true)?)
-        .body(encoded)
-        .timeout(timeout)
+    let signed = tokio::time::timeout_at(
+        deadline,
+        sign::prepare(a, body.to_string(), Some(model), client.uses_proxy()),
+    )
+    .await
+    .map_err(|_| Failure::new(504, "Qoder request preparation timed out"))??;
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(Failure::new(504, "Qoder request timed out before dispatch").into());
+    }
+    client
+        .post(http::official_url(Provider::Qoder, &signed.url)?)
+        .headers(signed_headers(&signed.headers)?)
+        .body(signed.body.unwrap_or_default())
+        .timeout(remaining)
         .send()
         .await
-        .map_err(|_| Failure::new(502, "Qoder inference connection failed"))
+        .map_err(|_| {
+            DispatchFailure::Connection(Failure::new(502, "Qoder inference connection failed"))
+        })
+}
+
+fn signed_headers(values: &BTreeMap<String, String>) -> Result<HeaderMap, Failure> {
+    let mut headers = HeaderMap::new();
+    for (key, value) in values {
+        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+            .map_err(|_| "Invalid Qoder signed header name")?;
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| "Invalid Qoder signed header value")?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
 }

@@ -1,6 +1,7 @@
 //! Short-lived, administrator-initiated PKCE sessions for Qoder's device grant: the
 //! administrator signs in on the official page while this service polls for the grant.
 use super::{http, *};
+use crate::modules::egress::{self, LoginHold, Pool};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use reqwest::{header::HeaderMap, Method};
@@ -18,6 +19,11 @@ struct Pending {
     expires_at: i64,
     expected: Option<String>,
     completed: Option<String>,
+    /// Egress node the whole authorization uses; the account inherits it.
+    node: Option<String>,
+    /// Keeps that node off the pool's free list until the account is bound or the
+    /// session ends.
+    hold: Option<LoginHold>,
 }
 struct Session {
     provider: Provider,
@@ -57,6 +63,32 @@ fn session(id: &str, provider: Provider) -> Result<Arc<Session>, String> {
     }
     Ok(session)
 }
+/// Drops cancelled and expired sessions, which also releases their node holds. A
+/// session locked by an in-flight poll is kept until that poll finishes.
+fn purge(sessions: &mut HashMap<String, Arc<Session>>) {
+    sessions.retain(|_, session| {
+        session.pending.try_lock().map_or(true, |p| {
+            p.expires_at > now() && session.cancelled.lock().is_ok_and(|c| !*c)
+        })
+    });
+}
+/// A saved account keeps its node. A token for it issued through another address would
+/// tie that address to the account's identity, so such a sign-in is refused.
+fn bound_elsewhere(provider: Provider, a: &Account, node: Option<&str>) -> Result<bool, String> {
+    let Some(previous) = store::all(provider)?
+        .into_iter()
+        .find(|p| p.uid == a.uid && p.realm == a.realm)
+    else {
+        return Ok(false);
+    };
+    Ok(egress::bound_node(Pool::Native(provider), &previous.id)?
+        .is_some_and(|bound| node != Some(bound.as_str())))
+}
+const BOUND_ELSEWHERE: &str =
+    "This account is bound to another egress node; reauthorize it from its own row";
+/// ChatGPT has no browser reauthorization: its row re-imports a token through its node.
+const CHATGPT_BOUND_ELSEWHERE: &str =
+    "This ChatGPT account is bound to another egress node; re-import its token from the account's own row";
 fn valid(p: &Pending, session: &Session) -> Result<(), String> {
     if *session
         .cancelled
@@ -73,15 +105,37 @@ pub async fn start(
     realm: Realm,
     account_id: Option<&str>,
 ) -> Result<Started, String> {
+    // Only Qoder has a device grant; ChatGPT accounts are imported from a refresh token.
+    match provider {
+        Provider::Qoder => {}
+        Provider::ChatGpt => {
+            return Err("ChatGPT accounts are added by importing a refresh token".into())
+        }
+    }
     let mut a = Account::new(provider, realm);
+    let mut preferred = None;
     if let Some(id) = account_id {
         let previous = store::get(provider, id)?;
         if previous.realm != realm {
             return Err("Reauthorization must use the account's region".into());
         }
-        a.credentials.machine_id = previous.credentials.machine_id;
-        a.credentials.device_id = previous.credentials.device_id;
+        a.credentials = Credentials {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            personal_token: String::new(),
+            ..previous.credentials
+        };
+        // A saved account reauthorizes through its own node.
+        preferred = egress::bound_node(Pool::Native(provider), id)?;
     }
+    // Release abandoned sessions before choosing a node, or their holds hide it.
+    if let Ok(mut sessions) = SESSIONS.lock() {
+        purge(&mut sessions);
+    }
+    let mut route = egress::login_route(Pool::Native(provider), preferred.as_deref()).await?;
+    let node = route.node.clone();
+    let mut hold = route.hold.take();
+    drop(route);
     let id = uuid::Uuid::new_v4().to_string();
     let (verifier, challenge) = pkce();
     let nonce = if realm == Realm::Cn {
@@ -90,6 +144,9 @@ pub async fn start(
         uuid::Uuid::new_v4().simple().to_string()
     };
     let expires_at = now() + TTL;
+    if let Some(hold) = hold.as_mut() {
+        hold.hold_until(expires_at);
+    }
     let mut url = url::Url::parse(&format!("{}/device/selectAccounts", qoder::website(realm)))
         .map_err(|_| "Invalid Qoder authorization URL")?;
     {
@@ -110,14 +167,12 @@ pub async fn start(
         expires_at,
         expected: account_id.map(str::to_owned),
         completed: None,
+        node,
+        hold,
     };
     {
         let mut sessions = SESSIONS.lock().map_err(|_| "Login sessions unavailable")?;
-        sessions.retain(|_, session| {
-            session.pending.try_lock().map_or(true, |p| {
-                p.expires_at > now() && session.cancelled.lock().is_ok_and(|c| !*c)
-            })
-        });
+        purge(&mut sessions);
         if sessions.len() >= 20 {
             return Err("Too many pending authorizations; cancel one or wait for expiry".into());
         }
@@ -158,7 +213,9 @@ pub async fn poll(provider: Provider, id: &str) -> Result<Poll, String> {
         .append_pair("challenge_method", "S256");
     let mut headers = HeaderMap::new();
     http::insert(&mut headers, "user-agent", "QoderWork").map_err(|e| e.to_string())?;
-    let result = http::json(provider, Method::GET, url.as_str(), headers, None).await;
+    let route = egress::login_route(Pool::Native(provider), p.node.as_deref()).await?;
+    let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
+    let result = http::json(&client, provider, Method::GET, url.as_str(), headers, None).await;
     let value = match result {
         Ok(value) => value,
         Err(e) if e.status == 202 || e.status == 404 => {
@@ -176,9 +233,10 @@ pub async fn poll(provider: Provider, id: &str) -> Result<Poll, String> {
         });
     }
     qoder::apply_tokens(&mut p.account, &value).map_err(|e| e.to_string())?;
-    qoder::identity(&mut p.account)
+    qoder::identity(&client, &mut p.account)
         .await
         .map_err(|e| e.to_string())?;
+    drop(route);
     // Cancellation can run while the provider request is in flight. Serialize its flag
     // with this final commit, rather than making Cancel wait for the network poll.
     let cancelled = session
@@ -188,7 +246,23 @@ pub async fn poll(provider: Provider, id: &str) -> Result<Poll, String> {
     if *cancelled || p.expires_at <= now() {
         return Err("Login cancelled or expired".into());
     }
+    if bound_elsewhere(provider, &p.account, p.node.as_deref())? {
+        drop(cancelled);
+        *session
+            .cancelled
+            .lock()
+            .map_err(|_| "Login cancellation unavailable")? = true;
+        if let Some(hold) = p.hold.as_mut() {
+            hold.release();
+        }
+        return Err(BOUND_ELSEWHERE.into());
+    }
     let account = store::upsert(p.account.clone(), p.expected.as_deref())?;
+    // Bind before the first sync, or auto-assignment would pick another node.
+    egress::adopt(Pool::Native(provider), &account.id, p.node.as_deref());
+    if let Some(hold) = p.hold.as_mut() {
+        hold.release();
+    }
     p.completed = Some(account.id.clone());
     drop(cancelled);
     let id = account.id.clone();
@@ -207,6 +281,13 @@ pub async fn cancel(provider: Provider, id: &str) -> Result<(), String> {
         .cancelled
         .lock()
         .map_err(|_| "Login cancellation unavailable")? = true;
+    // Free the node now unless a poll holds the session; purge or the hold's own
+    // deadline frees it otherwise.
+    if let Ok(mut p) = session.pending.try_lock() {
+        if let Some(hold) = p.hold.as_mut() {
+            hold.release();
+        }
+    }
     Ok(())
 }
 
@@ -232,6 +313,26 @@ fn imported_account(provider: Provider, realm: Realm, value: &Value) -> Account 
     a
 }
 
+/// A ChatGPT import is one refresh token: a bare JSON string, or an object carrying it.
+/// ChatGPT accounts always live in the global realm, whatever the request says.
+fn imported_chatgpt(value: &Value) -> Result<Account, String> {
+    let token = match value {
+        Value::String(token) => token.trim().to_owned(),
+        Value::Object(_) => text(value, &["refresh_token", "refreshToken", "rt"])
+            .trim()
+            .to_owned(),
+        _ => String::new(),
+    };
+    if token.is_empty() {
+        return Err(
+            "Paste a ChatGPT refresh token, as a string or as {\"refresh_token\": \"...\"}".into(),
+        );
+    }
+    let mut a = Account::new(Provider::ChatGpt, Realm::Global);
+    a.credentials.refresh_token = token;
+    Ok(a)
+}
+
 /// An imported access token is used as-is only while it is present and unexpired (with a
 /// one-minute margin); otherwise any refresh/personal credential is exchanged first.
 fn needs_refresh_before_import(a: &Account, at: i64) -> bool {
@@ -241,31 +342,224 @@ fn needs_refresh_before_import(a: &Account, at: i64) -> bool {
         || (refreshable && a.expires_at > 0 && a.expires_at <= at + 60)
 }
 
-pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<AccountView, String> {
-    let mut a = imported_account(provider, realm, &value);
-    let refreshed = needs_refresh_before_import(&a, now());
-    if refreshed {
-        qoder::refresh(&mut a).await.map_err(|e| e.to_string())?;
+/// Hex SHA-256 of a pasted refresh token; the token itself is never kept for this.
+fn fingerprint(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+/// Imports use a new login route, not an existing account's refresh transaction.
+/// Reject known credentials before any network I/O: rotating one and then failing
+/// identity validation or the egress check would strand the saved refresh token.
+/// Check all saved regions, including when the administrator selected the wrong one.
+fn reject_saved_credentials(a: &Account, saved: &[Account]) -> Result<(), String> {
+    let supplied = &a.credentials;
+    // A rotated ChatGPT refresh token is no longer saved verbatim; its import fingerprint
+    // still is.
+    let pasted = match a.provider {
+        Provider::Qoder => None,
+        Provider::ChatGpt => {
+            (!supplied.refresh_token.is_empty()).then(|| fingerprint(&supplied.refresh_token))
+        }
+    };
+    if saved.iter().any(|previous| {
+        let credentials = &previous.credentials;
+        [
+            (&supplied.access_token, &credentials.access_token),
+            (&supplied.refresh_token, &credentials.refresh_token),
+            (&supplied.personal_token, &credentials.personal_token),
+        ]
+        .into_iter()
+        .any(|(supplied, saved)| !supplied.is_empty() && supplied == saved)
+            || pasted
+                .as_ref()
+                .is_some_and(|digest| credentials.imported_refresh_sha256.contains(digest))
+    }) {
+        return Err("This credential is already saved; refresh or reauthorize the account from its own row instead of importing it again".into());
     }
-    if let Err(error) = qoder::identity(&mut a).await {
+    Ok(())
+}
+
+/// Validates an imported Qoder export and fills its identity.
+async fn authorize_qoder(
+    client: &qoder_client::transport::Client,
+    a: &mut Account,
+) -> Result<(), http::Failure> {
+    let refreshed = needs_refresh_before_import(a, now());
+    if refreshed {
+        qoder::refresh(client, a).await?;
+    }
+    if let Err(error) = qoder::identity(client, a).await {
         // An export may carry an access token that was revoked or expired without a
         // recorded expiry; retry once with the refresh credential before giving up.
         let refreshable =
             !a.credentials.refresh_token.is_empty() || !a.credentials.personal_token.is_empty();
         if refreshed || !refreshable || !matches!(error.status, 401 | 403) {
-            return Err(error.to_string());
+            return Err(error);
         }
-        qoder::refresh(&mut a).await.map_err(|e| e.to_string())?;
-        qoder::identity(&mut a).await.map_err(|e| e.to_string())?;
+        qoder::refresh(client, a).await?;
+        qoder::identity(client, a).await?;
     }
-    let root = value
-        .get("auth")
-        .filter(|v| v.is_object())
-        .unwrap_or(&value);
-    if let Some(previous) = store::all(provider)?
-        .into_iter()
-        .find(|previous| previous.uid == a.uid && previous.realm == a.realm)
-    {
+    Ok(())
+}
+
+pub async fn import(
+    provider: Provider,
+    realm: Realm,
+    value: Value,
+    account_id: Option<&str>,
+) -> Result<AccountView, String> {
+    // Only ChatGPT re-imports onto a row; Qoder rows reauthorize through the device grant.
+    if provider == Provider::Qoder && account_id.is_some() {
+        return Err("Qoder accounts reauthorize from their row's browser login".into());
+    }
+    let mut a = match provider {
+        Provider::Qoder => imported_account(provider, realm, &value),
+        Provider::ChatGpt => imported_chatgpt(&value)?,
+    };
+    let pasted = a.credentials.refresh_token.clone();
+    reject_saved_credentials(&a, &store::all(provider)?)?;
+    // A row re-import goes through that account's own node, like a browser
+    // reauthorization. A new account is validated through the node it would take,
+    // and keeps that node.
+    let preferred = match account_id {
+        Some(id) => {
+            store::get(provider, id)?;
+            egress::bound_node(Pool::Native(provider), id)?
+        }
+        None => None,
+    };
+    let route = egress::login_route(Pool::Native(provider), preferred.as_deref()).await?;
+    // Another import may have saved these credentials while we waited for the
+    // serialized login route. Recheck under that route's guard before using them.
+    reject_saved_credentials(&a, &store::all(provider)?)?;
+    match provider {
+        Provider::Qoder => {
+            let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
+            authorize_qoder(&client, &mut a)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Provider::ChatGpt => {
+            // The refresh token is the whole import: always exchange it, then require the
+            // workspace identity the new tokens carry.
+            let client =
+                http::plain_login_client(provider, &route.exit).map_err(|e| e.to_string())?;
+            chatgpt::auth::refresh(&client, &mut a)
+                .await
+                .map_err(|e| e.to_string())?;
+            // The pasted refresh token is spent from here on.
+            chatgpt::identity::apply(&mut a)
+                .map_err(|e| salvage_chatgpt(&a, &pasted, e.to_string()))?;
+        }
+    }
+    let a = match provider {
+        Provider::Qoder => save_import(
+            provider,
+            a,
+            &value,
+            account_id,
+            route.node.as_deref(),
+            &pasted,
+        )?,
+        Provider::ChatGpt => save_import(
+            provider,
+            a.clone(),
+            &value,
+            account_id,
+            route.node.as_deref(),
+            &pasted,
+        )
+        .map_err(|error| salvage_chatgpt(&a, &pasted, error))?,
+    };
+    drop(route);
+    let id = a.id.clone();
+    tokio::spawn(async move {
+        let _ = accounts::sync(provider, &id, false).await;
+    });
+    Ok((&a).into())
+}
+
+/// After a ChatGPT token exchange the pasted refresh token is spent. When the import then
+/// fails, the rotated credentials are kept on the saved account the new tokens identify
+/// (under its revision, egress binding unchanged); without one, the administrator learns
+/// that a new Codex sign-in is needed.
+fn salvage_chatgpt(a: &Account, pasted: &str, error: String) -> String {
+    let owner = store::all(Provider::ChatGpt).ok().and_then(|all| {
+        all.into_iter()
+            .find(|saved| !a.uid.is_empty() && saved.uid == a.uid && saved.realm == a.realm)
+    });
+    if let Some(owner) = owner {
+        let saved = store::update(Provider::ChatGpt, &owner.id, Some(&owner.revision), |s| {
+            s.credentials.access_token = a.credentials.access_token.clone();
+            s.credentials.refresh_token = a.credentials.refresh_token.clone();
+            s.credentials.id_token = a.credentials.id_token.clone();
+            s.credentials.chatgpt_account_id = a.credentials.chatgpt_account_id.clone();
+            s.expires_at = a.expires_at;
+            // These are new credentials: like any new authorization they invalidate older
+            // operations in flight and revive an account its dead credential turned off,
+            // never one the administrator turned off.
+            s.revision = uuid::Uuid::new_v4().to_string();
+            s.enabled = s.enabled || s.credential_dead;
+            s.credential_dead = false;
+            s.auth_error = None;
+            if !pasted.is_empty() {
+                store::add_fingerprints(
+                    &mut s.credentials.imported_refresh_sha256,
+                    [fingerprint(pasted)],
+                );
+            }
+        });
+        if saved.is_ok() {
+            let name = if owner.nickname.is_empty() {
+                &owner.uid
+            } else {
+                &owner.nickname
+            };
+            return format!(
+                "This token belongs to ChatGPT account {name}; its credentials were updated there"
+            );
+        }
+    }
+    format!(
+        "{error}. The pasted refresh token was consumed; sign in to Codex again to get a new one"
+    )
+}
+
+/// Validates an authorized import against its row, its egress binding and the vault, then
+/// saves it on `node`.
+fn save_import(
+    provider: Provider,
+    mut a: Account,
+    value: &Value,
+    account_id: Option<&str>,
+    node: Option<&str>,
+    pasted: &str,
+) -> Result<Account, String> {
+    if let Some(id) = account_id {
+        let previous = store::get(provider, id)?;
+        if previous.uid != a.uid || previous.realm != a.realm {
+            return Err(format!(
+                "This token belongs to a different {} account",
+                provider.name()
+            ));
+        }
+    }
+    if bound_elsewhere(provider, &a, node)? {
+        return Err(match provider {
+            Provider::Qoder => BOUND_ELSEWHERE,
+            Provider::ChatGpt => CHATGPT_BOUND_ELSEWHERE,
+        }
+        .into());
+    }
+    let root = value.get("auth").filter(|v| v.is_object()).unwrap_or(value);
+    // Only Qoder accounts carry a device identity worth keeping across imports.
+    let previous = match provider {
+        Provider::Qoder => store::all(provider)?
+            .into_iter()
+            .find(|previous| previous.uid == a.uid && previous.realm == a.realm),
+        Provider::ChatGpt => None,
+    };
+    if let Some(previous) = previous {
         if text(root, &["machineId", "machine_id"]).is_empty() {
             a.credentials.machine_id = previous.credentials.machine_id;
         }
@@ -273,12 +567,14 @@ pub async fn import(provider: Provider, realm: Realm, value: Value) -> Result<Ac
             a.credentials.device_id = previous.credentials.device_id;
         }
     }
-    let a = store::upsert(a, None)?;
-    let id = a.id.clone();
-    tokio::spawn(async move {
-        let _ = accounts::sync(provider, &id, false).await;
-    });
-    Ok((&a).into())
+    if provider == Provider::ChatGpt && !pasted.is_empty() {
+        a.credentials
+            .imported_refresh_sha256
+            .push(fingerprint(pasted));
+    }
+    let a = store::upsert(a, account_id)?;
+    egress::adopt(Pool::Native(provider), &a.id, node);
+    Ok(a)
 }
 
 #[cfg(test)]
@@ -317,6 +613,43 @@ mod tests {
         assert!(!needs_refresh_before_import(&a, at));
         a.credentials.access_token.clear();
         assert!(needs_refresh_before_import(&a, at));
+    }
+    #[test]
+    fn saved_tokens_are_rejected_individually_before_import() {
+        let at = now();
+        let mut previous = Account::new(Provider::Qoder, Realm::Cn);
+        previous.credentials.access_token = "saved-access".into();
+        previous.credentials.refresh_token = "saved-refresh".into();
+        previous.credentials.personal_token = "saved-personal".into();
+        let saved = [previous];
+        for auth in [
+            serde_json::json!({"accessToken":"saved-access"}),
+            serde_json::json!({"accessToken":"expired","refreshToken":"saved-refresh","expiresAt":at - 1}),
+            serde_json::json!({"personalToken":"saved-personal"}),
+        ] {
+            for realm in [Realm::Cn, Realm::Global] {
+                let a = imported_account(Provider::Qoder, realm, &auth);
+                let error = reject_saved_credentials(&a, &saved).unwrap_err();
+                assert!(error.contains("already saved"));
+                assert!(error.contains("reauthorize"));
+                assert!(!error.contains("saved-refresh"));
+            }
+        }
+    }
+    #[test]
+    fn empty_tokens_and_device_identifiers_do_not_mark_an_import_as_saved() {
+        let mut previous = Account::new(Provider::Qoder, Realm::Cn);
+        previous.credentials.access_token = "saved-access".into();
+        let a = imported_account(
+            Provider::Qoder,
+            Realm::Cn,
+            &serde_json::json!({
+                "accessToken":"new-access",
+                "machineId":previous.credentials.machine_id,
+                "deviceId":previous.credentials.device_id
+            }),
+        );
+        assert!(reject_saved_credentials(&a, &[previous]).is_ok());
     }
     #[tokio::test]
     async fn cancel_does_not_wait_for_an_in_flight_poll() {

@@ -3,9 +3,12 @@
 
 pub mod chat_codec;
 pub(crate) mod chat_relay;
+pub mod chatgpt_ws;
 pub mod client;
 pub mod native;
 pub mod openai_compat;
+pub(crate) mod responses_relay;
+pub mod responses_wire;
 pub mod retry;
 pub mod workbuddy;
 
@@ -23,6 +26,25 @@ pub(crate) fn error_response(status: StatusCode, code: &str, message: &str) -> R
         Json(serde_json::json!({"error": {"type": code, "code": code, "message": message}})),
     )
         .into_response()
+}
+
+/// Keeps the monitor's captured upstream body naming the native ID actually sent. The
+/// body is stamped and re-serialized only when `model` differs from the last capture
+/// recorded in `captured` (start with an empty string to capture unconditionally).
+pub(crate) fn recapture(
+    capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
+    captured: &mut String,
+    model: &str,
+    payload: &serde_json::Value,
+) {
+    if captured != model {
+        if let Some(capture) = capture {
+            let mut body = payload.clone();
+            body["model"] = serde_json::json!(model);
+            capture.set_value(&body);
+        }
+        *captured = model.to_owned();
+    }
 }
 
 /// The registry binding admitted for this request. Normally inserted by the model

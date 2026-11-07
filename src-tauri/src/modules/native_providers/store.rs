@@ -2,6 +2,8 @@
 use super::{Account, Provider, Settings, SettingsView};
 use std::{path::PathBuf, sync::Mutex};
 static LOCK: Mutex<()> = Mutex::new(());
+/// Pasted refresh-token fingerprints kept per account (oldest dropped first).
+const MAX_IMPORTED_FINGERPRINTS: usize = 32;
 
 fn path(provider: Provider) -> Result<PathBuf, String> {
     Ok(crate::modules::account::get_data_dir()?.join(format!("{}_accounts.enc", provider.key())))
@@ -67,6 +69,16 @@ pub fn update(
     write(provider, &accounts)?;
     Ok(result)
 }
+/// Appends import fingerprints not yet recorded, keeping the newest 32.
+pub fn add_fingerprints(imported: &mut Vec<String>, digests: impl IntoIterator<Item = String>) {
+    for digest in digests {
+        if !imported.contains(&digest) {
+            imported.push(digest);
+        }
+    }
+    let excess = imported.len().saturating_sub(MAX_IMPORTED_FINGERPRINTS);
+    imported.drain(..excess);
+}
 pub fn upsert(mut account: Account, expected: Option<&str>) -> Result<Account, String> {
     if account.uid.trim().is_empty() || account.credentials.access_token.is_empty() {
         return Err("Authorization returned no usable account identity".into());
@@ -88,7 +100,15 @@ pub fn upsert(mut account: Account, expected: Option<&str>) -> Result<Account, S
     if let Some(index) = position {
         let previous = &accounts[index];
         account.id = previous.id.clone();
-        account.enabled = previous.enabled;
+        // A new authorization revives an account its dead credential turned off, but never
+        // one the administrator turned off.
+        account.enabled = previous.enabled || previous.credential_dead;
+        let mut imported = previous.credentials.imported_refresh_sha256.clone();
+        add_fingerprints(
+            &mut imported,
+            std::mem::take(&mut account.credentials.imported_refresh_sha256),
+        );
+        account.credentials.imported_refresh_sha256 = imported;
         account.auto_refresh = previous.auto_refresh;
         account.quota = previous.quota.clone();
         account.models = previous.models.clone();

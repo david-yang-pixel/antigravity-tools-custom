@@ -1,17 +1,28 @@
 {
   "nativeProviders": {
+    "clientVersion": {
+      "title": "{{provider}} CLI version",
+      "bundled": "Bundled {{version}}",
+      "latest": "Official latest {{version}}",
+      "checking": "Checking",
+      "failed": "Check failed",
+      "available": "Official update available",
+      "current": "No newer release found",
+      "unknown": "Not checked yet",
+      "check": "Check official version",
+      "hint": "Checks the official npm release. Compatibility updates are verified and delivered with this application.",
+      "checkedAt": "Last successful check: {{time}}",
+      "failureHint": "Could not query the official version. Try again later or check the network and upstream proxy settings.",
+      "legacy": "Legacy protocol ({{version}}) is active; release checks still compare against the bundled components.",
+      "override": "The advertised version is overridden to {{version}}; release checks compare against the actual bundled components."
+    },
     "title": "{{provider}} accounts",
     "description": "Authorize accounts, view official balances, and use automatic renewal and account rotation.",
     "import": "Import credentials",
     "add": "Add account",
     "dismiss": "Dismiss",
-    "enableSource": "Enable source",
-    "preferred": "Fixed account",
-    "automatic": "Automatic (use global scheduling)",
-    "schedulingHint": "Automatic selection follows the global Cache First, Balance or Performance mode, wait limits and circuit breaker in API Proxy. A fixed account applies only to this source and prevents switching to another account.",
-    "schedulingLink": "View global scheduling settings",
-    "removedAccount": "Previous account removed",
-    "envLocked": "Managed by environment variables",
+    "sourceDisabled": "This source is disabled; its accounts are not used for API requests.",
+    "sourceSettingsLink": "Open API Proxy → Models → Source configuration",
     "reload": "Reload",
     "cancel": "Cancel",
     "region": "Account region",
@@ -29,6 +40,8 @@
     "empty": "No accounts yet",
     "emptyHint": "Add your {{provider}} account to get started.",
     "account": "Account",
+    "egress": "Egress node",
+    "egressDescription": "When enabled, each {{provider}} account stays on one node of your airport subscription. Chat, renewal, model, quota and authorization traffic all leave through that node. The subscription link, node filters and auto-assign are shared with WorkBuddy; the switch and node bindings are separate: within one source a node serves one account, while a WorkBuddy account and a {{provider}} account may use the same node. A binding is not moved later; when its node is unusable the account fails instead of falling back to the server address. When off, the upstream proxy setting in API Proxy applies. Requires mihomo on the server (bundled in the Docker image).",
     "balance": "Official balance",
     "health": "Status",
     "authorization": "Authorization expiry",
@@ -52,6 +65,7 @@
     "noRefresh": "Reauthorize after expiry",
     "enableAccount": "Use in rotation",
     "autoRefresh": "Background renewal and balance sync",
+    "syncIdle": "Idle: background sync resumes after the next request; tokens are still renewed near expiry",
     "nextSync": "Next maintenance: {{time}}",
     "sync": "Sync balance and models",
     "renew": "Renew now",
@@ -62,7 +76,21 @@
     "deleteTitle": "Remove account",
     "deleteHint": "Remove local credentials for {{name}}? This account will stop participating in rotation.",
     "authorized": "Account authorization saved",
-    "loginExpired": "Authorization expired. Get a new link."
+    "loginExpired": "Authorization expired. Get a new link.",
+    "chatgpt": {
+      "importHint": "Paste a ChatGPT (Codex) credential: either the bare refresh token, or JSON such as {\"refresh_token\":\"...\"}. Identity is verified with OpenAI before saving. ChatGPT has no browser sign-in here.",
+      "importPlaceholder": "{\"refresh_token\":\"...\"} or a bare token",
+      "reimport": "Re-import",
+      "reimportTitle": "Re-import credentials",
+      "reimportHint": "Replace the credentials of this account. A token for a different ChatGPT account is rejected.",
+      "authError": "Credential rejected by OpenAI; the account was disabled. Re-import it from this row."
+    },
+    "quota": {
+      "window5h": "5-hour window",
+      "window7d": "7-day window",
+      "reset": "Resets {{time}}",
+      "used": "{{percent}}% used"
+    }
   },
   "topup": {
     "pending_orders": "Pending payments",
@@ -1347,7 +1375,7 @@
       "scheduling": {
         "title": "Account Rotation & Scheduling",
         "title_tooltip": "Controls how sessions are bound to accounts and how rate limits are handled.",
-        "subtitle": "Scheduling, wait limits, session reset and circuit-breaker backoff apply to Antigravity, WorkBuddy and Qoder pools. Fixed accounts are selected separately for each provider.",
+        "subtitle": "Scheduling, wait limits, session reset and circuit-breaker backoff apply to Antigravity, WorkBuddy, Qoder and ChatGPT pools. Fixed accounts are selected separately for each provider.",
         "mode": "Scheduling Mode",
         "mode_tooltip": "Cache-First: Bind session to account, wait on rate limit (maximize cache utility); Balance: Bind session, switch account on rate limit; Performance: Standard Round-robin.",
         "modes": {
@@ -2201,6 +2229,34 @@
     "success": "Thinking block cache cleared successfully and will rebuild automatically."
   },
   "workbuddy": {
+    "clientVersion": {
+      "title": "WorkBuddy client version",
+      "region": "Release region",
+      "platform": "Release platform",
+      "latest": "Official latest for this channel: {{version}}",
+      "baseline": "Validated baseline: {{target}} · WorkBuddy {{version}} · CLI {{cli}}",
+      "checking": "Checking",
+      "failed": "Check failed",
+      "available": "Official update available; compatibility review needed",
+      "current": "No higher version found",
+      "unknown": "Not checked yet",
+      "unverified": "This distribution is not validated",
+      "check": "Check official version",
+      "hint": "Checks official releases by region and platform. New releases need compatibility validation; checking does not change account versions, protocols or installed components.",
+      "checkedAt": "Last successful check: {{time}}",
+      "failureHint": "Could not query the official release. The last successful result is retained; check the network or upstream proxy and retry.",
+      "legacy": "The Chrome compatibility fallback is active. Matching version numbers do not confirm transport alignment.",
+      "mismatches": "{{count}} account(s) use a different request version combination. Review their account details.",
+      "accountTitle": "Request client version",
+      "accountMismatch": "This version combination differs from the validated baseline. Compatibility is unverified.",
+      "platforms": {
+        "linux-x64-deb": "Linux x64 (DEB)",
+        "linux-arm64-deb": "Linux ARM64 (DEB)",
+        "darwin-x64": "macOS Intel",
+        "darwin-arm64": "macOS Apple Silicon",
+        "win32-x64-user": "Windows x64"
+      }
+    },
     "unverified_target": "Select a WorkBuddy model from the current account catalog.",
     "pending_verification": "Not verified (existing calls remain enabled)",
     "fetch_models": "Fetch available models",
@@ -2288,6 +2344,14 @@
       "checkin_already": "Already checked in today",
       "checkin_pending": "Pending today",
       "checkin_failed": "Check-in failed",
+      "checkin_resume_hint": "Only clears the pause; sends no request and preserves attempts and cooldown.",
+      "checkin_resume": "Reviewed error; resume check-in",
+      "checkin_reauthorize": "Reauthorize this account to resume check-in.",
+      "checkin_retry_at": "Retry no earlier than {{time}}",
+      "checkin_attempts": "Attempts today: {{count}} / 3",
+      "checkin_cooling": "Check-in cooling down",
+      "checkin_limited": "Today's attempt limit reached",
+      "checkin_paused": "Check-in paused",
       "last_checkin_attempt": "Last attempt: {{time}}",
       "checkin_attempt_unknown": "Attempt time not recorded",
       "checkin_unsupported": "Unavailable for global accounts",
@@ -2298,7 +2362,7 @@
       "managed": "Auto-manage",
       "auto_checkin": "Auto check-in",
       "keepalive": "Auto keepalive",
-      "managed_hint": "While the service runs: sync credits and models every 15 minutes, check in daily (UTC+8), refresh credentials daily and about 30 minutes before expiry; inference does not block on refresh while the token is still valid. Disabled accounts are skipped.",
+      "managed_hint": "Only accounts used for real inference in the last 6 hours automatically sync models/credits and check in during staggered daytime slots (UTC+8). A successful check-in stops for the day. Manual and automatic check-in share 3 attempts per day, increasing cooldowns and upstream waiting times. Authorization failures or business rejections pause check-in. Credentials renew about 30 minutes before expiry. Disabling an account pauses background tasks.",
       "checkin_now": "Check in now",
       "status_error": "Account error",
       "account_column": "Account",
@@ -2318,6 +2382,7 @@
       "unsupported": "Activity rewards are available for China accounts only.",
       "auto_rewards": "Auto-claim rewards",
       "auto_lottery": "Auto free draws",
+      "auto_travel": "Auto send Buddy travelling",
       "hint": "Only claim rewards the upstream confirms are eligible. When auto free draws are enabled, claiming also uses gifted draw chances without spending credits.",
       "paused_hint": "Automatic tasks are paused. Enable the account and auto-manage to resume.",
       "checked_at": "Last query",
@@ -2348,14 +2413,9 @@
       "item_unsupported": "Unsupported",
       "item_failed": "Failed",
       "item_unknown": "Result unconfirmed",
-      "item_skipped": "Skipped"
-    },
-    "scheduling": {
-      "fixed_account": "WorkBuddy fixed account",
-      "refresh_accounts": "Refresh WorkBuddy accounts",
-      "automatic": "Automatic (use the scheduling mode above)",
-      "unavailable": "Selected account was removed; select another",
-      "hint": "Pinning restricts WorkBuddy requests to this account without affecting Antigravity. Cache First waits up to the configured limit; Balance switches away from cooling accounts on subsequent requests."
+      "item_skipped": "Skipped",
+      "item_departed": "Departed",
+      "travel_depart": "Buddy travel departure"
     },
     "egress": {
       "title": "Egress nodes (airport subscription)",

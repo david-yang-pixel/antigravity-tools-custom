@@ -84,6 +84,7 @@ pub struct AccountView {
     pub last_error: Option<String>,
     pub status: String,
     pub in_flight: usize,
+    pub client_profile: super::identity::ProfileView,
     pub management: super::maintenance::Management,
     pub health: Health,
     pub cooldown_until: i64,
@@ -266,7 +267,7 @@ fn write(accounts: &[Account]) -> Result<(), String> {
     crate::utils::fs::write_atomic(&path()?, &data)
         .map_err(|_| "Cannot save WorkBuddy accounts".into())
 }
-pub(super) fn all() -> Result<Vec<Account>, String> {
+pub(crate) fn all() -> Result<Vec<Account>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "WorkBuddy account store unavailable")?;
@@ -337,6 +338,7 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         })
         .unwrap_or_default();
     model_cooldowns.sort_by(|a, b| a.model.cmp(&b.model));
+    let client_profile = super::identity::profile_view(&account);
     Ok(AccountView {
         id: account.id,
         uid: account.uid,
@@ -350,6 +352,7 @@ pub(super) fn view(mut account: Account) -> Result<AccountView, String> {
         last_error: account.last_error,
         status: status.into(),
         in_flight: entry.map(|e| e.in_flight).unwrap_or(0),
+        client_profile,
         management: account.management,
         health: entry.map(|e| e.health.clone()).unwrap_or_default(),
         cooldown_until: entry.map(|e| e.cooldown_until).unwrap_or(0),
@@ -377,6 +380,10 @@ pub fn validate(account: &Account) -> Result<(), String> {
         &account.access_token,
         &account.refresh_token,
         &account.device_token,
+        &account.client.product_version,
+        &account.client.cli_version,
+        &account.client.machine_id,
+        &account.client.session_id,
     ] {
         if value.len() > 16384
             || value.starts_with("ag_enc_")
@@ -410,9 +417,16 @@ pub fn upsert(mut account: Account) -> Result<AccountView, String> {
             account.models_verified_at = old.models_verified_at;
             account.management = old.management.clone();
             account.management.next_sync_at = 0;
-            // Stable per-account fingerprints survive reauthorization even when the
-            // new payload carries a different non-empty device_token / client block.
-            if !old.device_token.is_empty() {
+            // New credentials permit an explicit recovery, but cannot reset the
+            // persisted daily budget or shorten an upstream Retry-After hold.
+            account.management.checkin_guard.pause = None;
+            if account.management.checkin_status == "paused" {
+                account.management.checkin_status = "pending".into();
+                account.management.checkin_error = None;
+            }
+            // Machine/session identity survives reauthorization. A fresh SDK token
+            // may replace its old snapshot, but an omitted token does not erase it.
+            if account.device_token.is_empty() {
                 account.device_token = old.device_token.clone();
             }
             if account.refresh_token.is_empty() {
@@ -728,33 +742,58 @@ pub(super) fn edit_management(
     };
     view(result)
 }
-pub fn configure(
-    id: &str,
-    managed: Option<bool>,
-    auto_checkin: Option<bool>,
-    keepalive: Option<bool>,
-    auto_rewards: Option<bool>,
-    auto_lottery: Option<bool>,
-) -> Result<AccountView, String> {
-    if (auto_rewards == Some(true) || auto_lottery == Some(true)) && get(id)?.realm != Realm::Cn {
+/// Administrator switches; `None` keeps the stored value.
+#[derive(Default)]
+pub struct Preferences {
+    pub managed: Option<bool>,
+    pub auto_checkin: Option<bool>,
+    pub keepalive: Option<bool>,
+    pub auto_rewards: Option<bool>,
+    pub auto_lottery: Option<bool>,
+    pub auto_travel: Option<bool>,
+}
+impl Preferences {
+    pub fn is_empty(&self) -> bool {
+        [
+            self.managed,
+            self.auto_checkin,
+            self.keepalive,
+            self.auto_rewards,
+            self.auto_lottery,
+            self.auto_travel,
+        ]
+        .iter()
+        .all(Option::is_none)
+    }
+}
+pub fn configure(id: &str, preferences: Preferences) -> Result<AccountView, String> {
+    let activity = [
+        preferences.auto_rewards,
+        preferences.auto_lottery,
+        preferences.auto_travel,
+    ];
+    if activity.contains(&Some(true)) && get(id)?.realm != Realm::Cn {
         return Err("WorkBuddy activity rewards are only supported for domestic accounts".into());
     }
     edit_management(id, |m| {
-        if let Some(value) = managed {
+        if let Some(value) = preferences.managed {
             m.managed = value;
         }
-        if let Some(value) = auto_checkin {
+        if let Some(value) = preferences.auto_checkin {
             m.auto_checkin = value;
             m.auto_checkin_chosen = true;
         }
-        if let Some(value) = keepalive {
+        if let Some(value) = preferences.keepalive {
             m.keepalive = value;
         }
-        if let Some(value) = auto_rewards {
+        if let Some(value) = preferences.auto_rewards {
             m.auto_rewards = value;
         }
-        if let Some(value) = auto_lottery {
+        if let Some(value) = preferences.auto_lottery {
             m.auto_lottery = value;
+        }
+        if let Some(value) = preferences.auto_travel {
+            m.auto_travel = value;
         }
         m.next_sync_at = 0;
     })
@@ -776,6 +815,7 @@ pub(super) fn save_observation(account: &mut Account) -> Result<(), String> {
     account.management.keepalive = old.management.keepalive;
     account.management.auto_rewards = old.management.auto_rewards;
     account.management.auto_lottery = old.management.auto_lottery;
+    account.management.auto_travel = old.management.auto_travel;
     account.management.activity = old.management.activity.clone();
     if account.client.machine_id.is_empty() {
         account.client = old.client.clone();
@@ -926,7 +966,14 @@ pub fn parse_import(value: Value) -> Result<Account, String> {
         realm,
         access_token: text(auth, &["accessToken", "access_token"]),
         refresh_token: text(auth, &["refreshToken", "refresh_token"]),
-        device_token: text(&value, &["device_token"]),
+        device_token: {
+            let token = text(auth, &["deviceToken", "device_token"]);
+            if token.is_empty() {
+                text(&value, &["deviceToken", "device_token"])
+            } else {
+                token
+            }
+        },
         expires_at: auth
             .get("expiresAt")
             .or_else(|| auth.get("expires_at"))
@@ -940,7 +987,13 @@ pub fn parse_import(value: Value) -> Result<Account, String> {
         last_error: None,
         revision: uuid::Uuid::new_v4().to_string(),
         management: super::maintenance::Management::default(),
-        client: super::identity::ClientIdentity::default(),
+        client: value
+            .get("client")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "Invalid WorkBuddy client profile")?
+            .unwrap_or_default(),
     };
     validate(&account)?;
     Ok(account)
@@ -965,6 +1018,11 @@ impl Drop for Lease {
     }
 }
 impl Lease {
+    /// The native model this lease was admitted for: the first of the request's targets
+    /// the account supports and can schedule.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
     pub fn success(&self) {
         if self
             .finished
@@ -1054,7 +1112,7 @@ impl Lease {
 #[cfg(test)]
 pub fn acquire(model: &str) -> Result<Lease, String> {
     scheduling::try_acquire(
-        model,
+        &[model],
         "",
         &scheduling::Policy {
             sticky: crate::proxy::sticky_config::StickySessionConfig {
@@ -1089,7 +1147,7 @@ mod tests {
         assert!(!public.contains("token"));
         assert_eq!(get(&view.id).unwrap().access_token, "secret_access");
         let fingerprint = get(&view.id).unwrap();
-        assert!(!fingerprint.device_token.is_empty());
+        assert!(fingerprint.device_token.is_empty());
         assert!(!fingerprint.client.machine_id.is_empty());
         set_enabled(&view.id, false).unwrap();
         let mut reauth = parse_import(value).unwrap();
@@ -1102,9 +1160,8 @@ mod tests {
         assert_eq!(updated.models.len(), 1);
         assert_eq!(updated.candidate_model_count, 1);
         let kept = get(&view.id).unwrap();
-        assert_eq!(kept.device_token, fingerprint.device_token);
+        assert_eq!(kept.device_token, "replacement-device-token");
         assert_eq!(kept.client.machine_id, fingerprint.client.machine_id);
-        assert_ne!(kept.device_token, "replacement-device-token");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1363,7 +1420,14 @@ mod tests {
         )
         .unwrap()
         .id;
-        configure(&unmanaged, Some(false), None, None, None, None).unwrap();
+        configure(
+            &unmanaged,
+            Preferences {
+                managed: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let _ = fresh_before(
             &unmanaged,
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
