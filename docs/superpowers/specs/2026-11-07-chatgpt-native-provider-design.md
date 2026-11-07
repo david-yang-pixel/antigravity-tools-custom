@@ -248,6 +248,15 @@ sessions are master-key only, so no per-turn user billing is introduced.
   no turn is in flight; a mid-turn drop sends an `error` event and the client retries.
   An upstream `previous_response_not_found` on the same account (upstream state expired) is
   recovered the same way: one transparent replay from the transcript.
+- Liveness: before a turn on an upstream socket idle for ≥ 20 s the relay sends a ping and
+  waits up to 5 s for the pong; a failed ping reconnects (same account) before the turn is sent.
+  A client idle for 300 s between turns is closed with code 1000.
+- A rebuilt request whose transcript contains a `function_call_output` with no matching call
+  (e.g. history dropped by the memory bound) is not sent; the turn gets an `error` event.
+- `invalid_encrypted_content` (or "encrypted content … could not be verified") on the same
+  account: the relay strips the encrypted reasoning items from that turn, retries once, records
+  SHA-256 digests of the rejected ciphertexts for the connection (max 512) and strips matching
+  items from later turns and from the transcript.
 - Each completed turn records success/failure on the lease and the account runtime counters
   (`successes`, `failures`, `last_error`). Master-key WebSocket turns are not written to the
   monitor log, matching the existing Antigravity WebSocket path.
@@ -287,7 +296,9 @@ Mock upstream (local axum server) — no live chatgpt.com calls in tests:
   quota headers, mid-turn drop; account switch rebuilds the full input from the transcript
   without `previous_response_id` and without encrypted reasoning; unknown
   `previous_response_id` forwarded unchanged; same-account `previous_response_not_found`
-  recovered once; transcript memory bound.
+  recovered once; transcript memory bound; idle ping/reconnect and 300 s client idle close;
+  orphaned `function_call_output` refusal; `invalid_encrypted_content` strip-and-retry with
+  digest lineage.
 - Frontend: `registryLogic.test.mjs` protocol list; `npm run build`.
 
 ## Risks and rollback
