@@ -6,6 +6,7 @@ pub(crate) mod chat_relay;
 pub mod client;
 pub mod native;
 pub mod openai_compat;
+pub mod responses_wire;
 pub mod retry;
 pub mod workbuddy;
 
