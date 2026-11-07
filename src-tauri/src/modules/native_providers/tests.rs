@@ -1664,6 +1664,29 @@ async fn lease_settle_disable_turns_account_off() {
 }
 
 #[tokio::test]
+async fn lease_settle_disable_skips_a_reimported_account() {
+    let _sandbox = Sandbox::new();
+    let (a, mut lease) = settle_lease("settle-disable-stale", true).await;
+    // The account is re-imported while the request is in flight.
+    let reimported = store::upsert(account(Provider::Qoder, "settle-disable-stale"), None).unwrap();
+    assert_eq!(reimported.id, a.id);
+    assert_ne!(reimported.revision, lease.account.revision);
+    lease.settle(&http::Failure::classified(
+        401,
+        "q",
+        http::Penalty::Disable {
+            message: "dead".into(),
+        },
+        true,
+    ));
+    drop(lease);
+    let stored = store::get(Provider::Qoder, &a.id).unwrap();
+    assert!(stored.enabled);
+    assert!(!stored.credential_dead);
+    assert_eq!(stored.auth_error, None);
+}
+
+#[tokio::test]
 async fn lease_settle_without_penalty_matches_failure_after() {
     let _sandbox = Sandbox::new();
     let (a, mut lease) = settle_lease("settle-plain-a", true).await;

@@ -294,7 +294,9 @@ impl Lease {
             }
             Some(Penalty::Neutral) => self.finished = true,
             Some(Penalty::Disable { message }) => {
-                let _ = store::update(self.account.provider, &self.account.id, None, |a| {
+                // A re-import changes the revision; a stale request must not disable it.
+                let revision = Some(self.account.revision.as_str());
+                let _ = store::update(self.account.provider, &self.account.id, revision, |a| {
                     a.enabled = false;
                     a.credential_dead = true;
                     a.auth_error = Some(message.clone());
