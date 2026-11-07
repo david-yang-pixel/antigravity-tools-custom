@@ -576,30 +576,13 @@ async fn open(
         let attempt = attempt_payload(&payload, &model);
         super::recapture(capture, &mut captured, &model, &attempt);
         let mut response = send(&lease.account, &model, attempt.clone(), remaining, call).await;
-        // ChatGPT reads a 403 before refreshing: a Cloudflare/HTML challenge is a route
-        // problem, so the account is neither refreshed nor charged and another one serves.
-        if provider == Provider::ChatGpt {
-            response = match response {
-                Ok(r) => match chatgpt::screen(r).await {
-                    Ok(r) => Ok(r),
-                    Err(route) => {
-                        lease.settle(&route);
-                        if !route.failover {
-                            return Err(route.into());
-                        }
-                        tracing::warn!(
-                            "ChatGPT route answered HTTP 403 before output; trying another account"
-                        );
-                        last = Some(route.into());
-                        continue;
-                    }
-                },
-                failed => failed,
-            };
-        }
-        let upstream_answered = response
-            .as_ref()
-            .is_ok_and(|r| matches!(r.status().as_u16(), 401 | 403));
+        // Only an authorization rejection earns a same-account refresh: Qoder on 401/403,
+        // ChatGPT on 401. A ChatGPT 403 (a Cloudflare challenge or an account refusal) is
+        // classified below and follows the failover rule without rotating the token.
+        let upstream_answered = response.as_ref().is_ok_and(|r| match provider {
+            Provider::Qoder => matches!(r.status().as_u16(), 401 | 403),
+            Provider::ChatGpt => r.status().as_u16() == 401,
+        });
         if upstream_answered {
             let refresh_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
             match tokio::time::timeout(refresh_budget, accounts::fresh(provider, &id, true)).await {
@@ -614,7 +597,7 @@ async fn open(
                 Ok(Err(error)) => {
                     // The upstream already answered 401/403 for this account.
                     charge(&mut lease, &error);
-                    // ChatGPT classifies every 401/403 as another account's request.
+                    // ChatGPT classifies every 401 as another account's request.
                     if provider == Provider::ChatGpt {
                         last = Some(error.into());
                         continue;

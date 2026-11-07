@@ -151,35 +151,6 @@ pub(in crate::proxy::upstream) async fn rejection(
     (errors::classify(status, &headers, &body, now()), upstream)
 }
 
-/// Reads a 403 before the same-account refresh. A 403 the classification does not charge
-/// to the account (a Cloudflare/HTML challenge: a route problem) is returned classified,
-/// so it skips the refresh; any other answer continues unchanged.
-pub(super) async fn screen(response: reqwest::Response) -> Result<reqwest::Response, Failure> {
-    if response.status() != reqwest::StatusCode::FORBIDDEN {
-        return Ok(response);
-    }
-    let (status, version, headers) = (
-        response.status(),
-        response.version(),
-        response.headers().clone(),
-    );
-    let body = read_capped(response).await;
-    let failure = errors::classify(
-        status.as_u16(),
-        &headers,
-        &String::from_utf8_lossy(&body),
-        now(),
-    );
-    if matches!(failure.penalty, Some(Penalty::Neutral)) {
-        return Err(failure);
-    }
-    let mut rebuilt = axum::http::Response::new(body);
-    *rebuilt.status_mut() = status;
-    *rebuilt.version_mut() = version;
-    *rebuilt.headers_mut() = headers;
-    Ok(reqwest::Response::from(rebuilt))
-}
-
 /// The upstream's own error object carried by a raw failure event.
 pub(super) fn event_error(data: &str) -> Option<Value> {
     serde_json::from_str::<Value>(data)

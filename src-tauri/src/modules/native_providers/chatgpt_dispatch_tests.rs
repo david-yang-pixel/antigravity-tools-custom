@@ -680,6 +680,37 @@ async fn chatgpt_cloudflare_403_fails_over_without_refresh() {
 }
 
 #[tokio::test]
+async fn chatgpt_forbidden_json_fails_over_without_refresh() {
+    let _sandbox = Sandbox::new();
+    let accounts = setup(2);
+    let server = upstream(vec![
+        reply(
+            403,
+            json!({"error":{"message":"You do not have access to this resource."}}),
+        ),
+        hello(),
+    ])
+    .await;
+    let (status, _, body) = call("/v1/chat/completions", chat(true), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Hel"));
+    let requests = server.requests();
+    let paths: Vec<&str> = requests.iter().map(|(p, _, _)| p.as_str()).collect();
+    // Only a 401 earns a same-account token refresh; a 403 follows its classification.
+    assert_eq!(
+        paths,
+        [
+            "/backend-api/codex/responses",
+            "/backend-api/codex/responses"
+        ]
+    );
+    let (first, second) = (account_of(&requests[0].1), account_of(&requests[1].1));
+    assert_ne!(first, second);
+    let forbidden = accounts::runtime(&by_chatgpt_id(&accounts, &first).id);
+    assert_eq!(forbidden.failures, 1);
+}
+
+#[tokio::test]
 async fn chatgpt_responses_client_gets_upstream_error_before_output() {
     let _sandbox = Sandbox::new();
     setup(2);
