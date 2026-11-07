@@ -545,6 +545,16 @@ async fn chatgpt_post_output_failure_is_not_replayed() {
     let (name, data) = received.last().unwrap();
     assert_eq!(name, "response.failed");
     assert_eq!(data["response"]["model"], PUBLIC);
+    // The upstream's own failure is forwarded as-is, not replaced by a synthesized one.
+    assert_eq!(data["response"]["error"]["code"], "server_error");
+    assert_eq!(data["response"]["error"]["message"], "boom");
+    assert_eq!(
+        received
+            .iter()
+            .filter(|(n, _)| n == "response.failed")
+            .count(),
+        1
+    );
     assert_eq!(server.requests().len(), 1);
 }
 
@@ -636,4 +646,92 @@ async fn chatgpt_unauthorized_after_refresh_retry_fails_over() {
     assert_eq!(account_of(&requests[0].1), account_of(&requests[2].1));
     assert_eq!(requests[2].1["authorization"], "Bearer access-renewed");
     assert_ne!(account_of(&requests[2].1), account_of(&requests[3].1));
+}
+
+#[tokio::test]
+async fn chatgpt_cloudflare_403_fails_over_without_refresh() {
+    let _sandbox = Sandbox::new();
+    let accounts = setup(2);
+    let challenge = Reply {
+        status: 403,
+        headers: vec![("cf-mitigated".into(), "challenge".into())],
+        content_type: "text/html",
+        body: "<html><title>Just a moment...</title></html>".into(),
+    };
+    let server = upstream(vec![challenge, hello()]).await;
+    let (status, _, body) = call("/v1/chat/completions", chat(true), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let requests = server.requests();
+    let paths: Vec<&str> = requests.iter().map(|(p, _, _)| p.as_str()).collect();
+    // A route challenge is not an account problem: no token refresh, no penalty.
+    assert_eq!(
+        paths,
+        [
+            "/backend-api/codex/responses",
+            "/backend-api/codex/responses"
+        ]
+    );
+    let (first, second) = (account_of(&requests[0].1), account_of(&requests[1].1));
+    assert_ne!(first, second);
+    let challenged = accounts::runtime(&by_chatgpt_id(&accounts, &first).id);
+    assert_eq!(challenged.failures, 0);
+    assert_eq!(challenged.cooldown_until, 0);
+    assert!(challenged.last_error.is_none());
+}
+
+#[tokio::test]
+async fn chatgpt_responses_client_gets_upstream_error_before_output() {
+    let _sandbox = Sandbox::new();
+    setup(2);
+    let error = json!({"type":"invalid_request_error","code":"context_length_exceeded",
+        "message":"Your input exceeds the context window"});
+    let server = upstream(vec![
+        reply(400, json!({ "error": error })),
+        sse(&[
+            created(),
+            json!({"type":"response.failed","response":{"id":"resp_1","model":NATIVE,
+                "status":"failed","error":error}}),
+        ]),
+    ])
+    .await;
+    // Once as an HTTP answer, once as a stream event before output.
+    for expected_requests in [1, 2] {
+        let (status, _, body) = call(
+            "/v1/responses",
+            json!({"model":PUBLIC,"stream":true,"input":"hi"}),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["error"]["code"], "context_length_exceeded", "{body}");
+        assert_eq!(value["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            value["error"]["message"],
+            "Your input exceeds the context window"
+        );
+        assert_eq!(server.requests().len(), expected_requests);
+    }
+}
+
+#[tokio::test]
+async fn chatgpt_cancelled_stream_is_neutral() {
+    let _sandbox = Sandbox::new();
+    let accounts = setup(1);
+    let _server = upstream(vec![sse(&[
+        created(),
+        delta("par"),
+        json!({"type":"response.cancelled","response":{"id":"resp_1","model":NATIVE,"status":"cancelled"}}),
+    ])])
+    .await;
+    let (status, _, body) = call(
+        "/v1/responses",
+        json!({"model":PUBLIC,"stream":true,"input":"hi"}),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let runtime = accounts::runtime(&accounts[0].id);
+    assert_eq!(runtime.failures, 0);
+    assert_eq!(runtime.cooldown_until, 0);
 }

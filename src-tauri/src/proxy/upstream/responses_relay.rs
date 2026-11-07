@@ -32,6 +32,25 @@ fn rename(value: &mut Value, alias: &str) {
     }
 }
 
+/// The error object of a Responses failure event: `response.failed` carries it in
+/// `response.error`, an `error` event in `error` or as its own top-level fields.
+pub(crate) fn failure_error(event: &Value) -> Option<Value> {
+    let object = |v: Option<&Value>| v.filter(|e| e.is_object()).cloned();
+    match responses_wire::event_type(event)? {
+        "response.failed" => object(event.pointer("/response/error")),
+        "error" => object(event.get("error")).or_else(|| {
+            let mut error = serde_json::Map::new();
+            for key in ["code", "message", "param"] {
+                if let Some(value) = event.get(key).filter(|v| !v.is_null()) {
+                    error.insert(key.into(), value.clone());
+                }
+            }
+            error.contains_key("message").then(|| Value::Object(error))
+        }),
+        _ => None,
+    }
+}
+
 fn frame(value: &Value) -> bytes::Bytes {
     let kind = responses_wire::event_type(value).unwrap_or("message");
     bytes::Bytes::from(format!("event: {kind}\ndata: {value}\n\n"))
@@ -49,6 +68,11 @@ impl ResponsesRelay {
             "The upstream response failed or was incomplete.",
         )
     }
+    /// A failure the upstream reported in its own words, after output started.
+    fn failed_upstream(&self, error: Value) -> Response {
+        tracing::warn!("Responses upstream response failed after output started");
+        self.decorate((StatusCode::BAD_GATEWAY, Json(json!({ "error": error }))).into_response())
+    }
     fn decorate(&self, mut response: Response) -> Response {
         response.headers_mut().extend(self.headers.clone());
         response
@@ -65,7 +89,12 @@ impl ResponsesRelay {
             while let Some(data) = events.next().await {
                 let data = match data {
                     Ok(data) => data,
-                    Err(message) => return self.failed(&message),
+                    Err(message) => {
+                        return match collected.iter().rev().find_map(failure_error) {
+                            Some(error) => self.failed_upstream(error),
+                            None => self.failed(&message),
+                        }
+                    }
                 };
                 if data == "[DONE]" {
                     break;
@@ -91,13 +120,17 @@ impl ResponsesRelay {
         let (alias, code) = (self.alias.clone(), self.error_code);
         let body = async_stream::stream! {
             let mut pending = Some(first);
+            // The upstream's own failure event already reached the client.
+            let mut reported = false;
             loop {
                 let data = match pending.take() {
                     Some(data) => data,
                     None => match events.next().await {
                         Some(Ok(data)) => data,
                         Some(Err(message)) => {
-                            yield frame(&Self::failure_event(&alias, code, &message));
+                            if !reported {
+                                yield frame(&Self::failure_event(&alias, code, &message));
+                            }
                             break;
                         }
                         None => break,
@@ -110,6 +143,10 @@ impl ResponsesRelay {
                     continue;
                 };
                 rename(&mut value, &alias);
+                reported |= matches!(
+                    responses_wire::event_type(&value),
+                    Some("error" | "response.failed")
+                );
                 yield frame(&value);
             }
         };

@@ -70,6 +70,20 @@ struct Prepared {
     /// Key of provider-side session ids (ChatGPT: `prompt_cache_key`, else `session`).
     conversation: String,
 }
+/// Why `open` gave up: the classified failure and, when the upstream answered with its own
+/// error object, that object for clients that speak the upstream protocol.
+struct Refusal {
+    failure: Failure,
+    upstream: Option<Value>,
+}
+impl From<Failure> for Refusal {
+    fn from(failure: Failure) -> Self {
+        Self {
+            failure,
+            upstream: None,
+        }
+    }
+}
 /// Accounts one ChatGPT request may try when answers are classified as failover.
 const MAX_CHATGPT_ACCOUNTS: usize = 3;
 /// Leases one Qoder request may take (unchanged).
@@ -178,7 +192,7 @@ pub async fn route(
     .await
     {
         Ok(v) => v,
-        Err(e) => return failed(e),
+        Err(refusal) => return refused(refusal, prepared.mode),
     };
     let mut headers = HeaderMap::new();
     for (key, value) in [
@@ -271,14 +285,36 @@ fn representable(provider: Provider, chat: &Value) -> Result<(), Failure> {
     }
     Ok(())
 }
-fn failed(e: Failure) -> Response {
-    let status = match e.status {
-        400 | 404 | 413 | 422 | 504 => StatusCode::from_u16(e.status).unwrap(),
+fn client_status(status: u16) -> StatusCode {
+    match status {
+        400 | 404 | 413 | 422 | 504 => StatusCode::from_u16(status).unwrap(),
         429 => StatusCode::TOO_MANY_REQUESTS,
         503 => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::BAD_GATEWAY,
-    };
-    error_response(status, "native_upstream_failed", &e.message)
+    }
+}
+fn failed(e: Failure) -> Response {
+    error_response(
+        client_status(e.status),
+        "native_upstream_failed",
+        &e.message,
+    )
+}
+/// A Responses passthrough client receives the upstream's own error object (with the
+/// mapped status); every other client the generic error.
+fn refused(refusal: Refusal, mode: WireMode) -> Response {
+    match refusal.upstream {
+        Some(mut error) if mode == WireMode::Passthrough => {
+            if error.get("message").is_none() {
+                error["message"] = json!(refusal.failure.message);
+            }
+            axum::response::IntoResponse::into_response((
+                client_status(refusal.failure.status),
+                axum::Json(json!({ "error": error })),
+            ))
+        }
+        _ => failed(refusal.failure),
+    }
 }
 async fn send(
     account: &Account,
@@ -393,6 +429,16 @@ async fn until_output(
     carries_output: fn(&str) -> bool,
 ) -> Result<Vec<String>, Failure> {
     let mut prelude = Vec::new();
+    buffer_until_output(events, carries_output, &mut prelude)
+        .await
+        .map(|()| prelude)
+}
+/// `until_output` into a caller's buffer, which keeps what arrived before a failure.
+async fn buffer_until_output(
+    events: &mut NativeEvents,
+    carries_output: fn(&str) -> bool,
+    prelude: &mut Vec<String>,
+) -> Result<(), Failure> {
     while let Some(event) = events.next().await {
         let chunk = event?;
         if chunk == "[DONE]" {
@@ -401,7 +447,7 @@ async fn until_output(
         let output = carries_output(&chunk);
         prelude.push(chunk);
         if output {
-            return Ok(prelude);
+            return Ok(());
         }
         if prelude.len() > 64 {
             return Err(Failure::new(
@@ -476,7 +522,7 @@ async fn open(
     policy: &AccountSchedulingPolicy,
     capture: Option<&crate::proxy::monitor::UpstreamRequestBodyHolder>,
     call: Call<'_>,
-) -> Result<(Events, Account, String, HeaderMap), Failure> {
+) -> Result<(Events, Account, String, HeaderMap), Refusal> {
     // `dispatch` captured the body stamped with the primary ID.
     let mut captured = targets.first().cloned().unwrap_or_default();
     let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
@@ -502,7 +548,7 @@ async fn open(
         .await
         {
             Ok(a) => a,
-            Err(e) => return Err(last.unwrap_or(e)),
+            Err(e) => return Err(last.unwrap_or_else(|| e.into())),
         };
         let id = lease.account.id.clone();
         excluded.insert(id.clone());
@@ -513,24 +559,44 @@ async fn open(
                 Ok(Ok(a)) => a,
                 Ok(Err(e)) => {
                     charge(&mut lease, &e);
-                    last = Some(e);
+                    last = Some(e.into());
                     continue;
                 }
                 Err(_) => {
-                    return Err(Failure::new(
-                        504,
-                        "Account refresh exceeded the request timeout",
-                    ))
+                    return Err(
+                        Failure::new(504, "Account refresh exceeded the request timeout").into(),
+                    )
                 }
             };
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err(Failure::new(504, "Native upstream request timed out"));
+            return Err(Failure::new(504, "Native upstream request timed out").into());
         }
         let model = lease.model.clone();
         let attempt = attempt_payload(&payload, &model);
         super::recapture(capture, &mut captured, &model, &attempt);
         let mut response = send(&lease.account, &model, attempt.clone(), remaining, call).await;
+        // ChatGPT reads a 403 before refreshing: a Cloudflare/HTML challenge is a route
+        // problem, so the account is neither refreshed nor charged and another one serves.
+        if provider == Provider::ChatGpt {
+            response = match response {
+                Ok(r) => match chatgpt::screen(r).await {
+                    Ok(r) => Ok(r),
+                    Err(route) => {
+                        lease.settle(&route);
+                        if !route.failover {
+                            return Err(route.into());
+                        }
+                        tracing::warn!(
+                            "ChatGPT route answered HTTP 403 before output; trying another account"
+                        );
+                        last = Some(route.into());
+                        continue;
+                    }
+                },
+                failed => failed,
+            };
+        }
         let upstream_answered = response
             .as_ref()
             .is_ok_and(|r| matches!(r.status().as_u16(), 401 | 403));
@@ -541,7 +607,7 @@ async fn open(
                     lease.account = account;
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
-                        return Err(Failure::new(504, "Native upstream request timed out"));
+                        return Err(Failure::new(504, "Native upstream request timed out").into());
                     }
                     response = send(&lease.account, &model, attempt.clone(), remaining, call).await;
                 }
@@ -550,16 +616,15 @@ async fn open(
                     charge(&mut lease, &error);
                     // ChatGPT classifies every 401/403 as another account's request.
                     if provider == Provider::ChatGpt {
-                        last = Some(error);
+                        last = Some(error.into());
                         continue;
                     }
-                    return Err(error);
+                    return Err(error.into());
                 }
                 Err(_) => {
-                    return Err(Failure::new(
-                        504,
-                        "Account refresh exceeded the request timeout",
-                    ))
+                    return Err(
+                        Failure::new(504, "Account refresh exceeded the request timeout").into(),
+                    )
                 }
             }
         }
@@ -572,23 +637,30 @@ async fn open(
         let response = match response {
             Ok(r) if r.status().is_success() => r,
             result => {
-                let (error, reached) = match result {
-                    Ok(r) => (
-                        match provider {
-                            Provider::Qoder => Failure::new(
-                                r.status().as_u16(),
-                                format!(
-                                    "{} returned HTTP {}",
-                                    provider.name(),
-                                    r.status().as_u16()
+                let (error, reached, upstream) = match result {
+                    Ok(r) => {
+                        let (error, upstream) = match provider {
+                            Provider::Qoder => (
+                                Failure::new(
+                                    r.status().as_u16(),
+                                    format!(
+                                        "{} returned HTTP {}",
+                                        provider.name(),
+                                        r.status().as_u16()
+                                    ),
                                 ),
+                                None,
                             ),
                             Provider::ChatGpt => chatgpt::rejection(&lease.account, r).await,
-                        },
-                        Reached::Upstream,
-                    ),
-                    Err(e) => dispatch_failure(e, upstream_answered),
+                        };
+                        (error, Reached::Upstream, upstream)
+                    }
+                    Err(e) => {
+                        let (error, reached) = dispatch_failure(e, upstream_answered);
+                        (error, reached, None)
+                    }
                 };
+                let refusal = |failure| Refusal { failure, upstream };
                 if provider == Provider::ChatGpt {
                     lease.settle(&error);
                 }
@@ -598,24 +670,24 @@ async fn open(
                         provider.name(),
                         error.status
                     );
-                    last = Some(error);
+                    last = Some(refusal(error));
                     continue;
                 }
                 if matches!(error.status, 400 | 413 | 422) {
-                    return Err(error);
+                    return Err(refusal(error));
                 }
                 if provider == Provider::Qoder {
                     lease.failure_after(error.status, retry_after);
                 }
                 if !allow_failover(reached, &mut connection_failovers) {
-                    return Err(error);
+                    return Err(refusal(error));
                 }
                 tracing::warn!(
                     "{} account attempt failed at {:?}; trying another account",
                     provider.name(),
                     reached
                 );
-                last = Some(error);
+                last = Some(refusal(error));
                 continue;
             }
         };
@@ -623,22 +695,30 @@ async fn open(
         let mut events = events_for(provider, call.mode, response);
         // Nothing reaches the client until generation starts, so a failure before then
         // is still returned as a typed error instead of a broken stream.
-        let prelude = match until_output(&mut events, call.mode.carries_output()).await {
-            Ok(prelude) => prelude,
-            Err(e) => {
-                charge(&mut lease, &e);
-                // Unclassified: another account would receive the same request.
-                if !e.failover {
-                    return Err(e);
-                }
-                tracing::warn!(
-                    "{} stream failed before output; trying another account",
-                    provider.name()
-                );
-                last = Some(e);
-                continue;
+        let mut prelude = Vec::new();
+        if let Err(e) =
+            buffer_until_output(&mut events, call.mode.carries_output(), &mut prelude).await
+        {
+            charge(&mut lease, &e);
+            // A ChatGPT failure event names the upstream's own error.
+            let refusal = Refusal {
+                upstream: match provider {
+                    Provider::Qoder => None,
+                    Provider::ChatGpt => prelude.last().and_then(|e| chatgpt::event_error(e)),
+                },
+                failure: e,
+            };
+            // Unclassified: another account would receive the same request.
+            if !refusal.failure.failover {
+                return Err(refusal);
             }
-        };
+            tracing::warn!(
+                "{} stream failed before output; trying another account",
+                provider.name()
+            );
+            last = Some(refusal);
+            continue;
+        }
         let account = lease.account.clone();
         let guarded = async_stream::stream! {
             for chunk in prelude { yield Ok(chunk); }
@@ -651,8 +731,9 @@ async fn open(
         };
         return Ok((guarded.boxed(), account, model, upstream));
     }
-    Err(last
-        .unwrap_or_else(|| Failure::new(429, "All eligible accounts are temporarily unavailable")))
+    Err(last.unwrap_or_else(|| {
+        Failure::new(429, "All eligible accounts are temporarily unavailable").into()
+    }))
 }
 
 /// Deliberately one account and one inference attempt. The registry owns user consent,
@@ -703,7 +784,7 @@ pub async fn probe(
     if !response.status().is_success() {
         match provider {
             Provider::Qoder => lease.failure(response.status().as_u16()),
-            Provider::ChatGpt => lease.settle(&chatgpt::rejection(&a, response).await),
+            Provider::ChatGpt => lease.settle(&chatgpt::rejection(&a, response).await.0),
         }
         return Ok((
             "failed".into(),
