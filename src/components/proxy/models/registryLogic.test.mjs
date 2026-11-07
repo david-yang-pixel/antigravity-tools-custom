@@ -247,3 +247,11 @@ test('realm selection stays limited to WorkBuddy and Qoder; ChatGPT is always gl
     assert.match(upstream, /\['workbuddy', 'qoder'\]\.includes\(/);
     assert.doesNotMatch(upstream, /hasRealm[^\n]*chatgpt/);
 });
+
+test('every account-pool source asks for test content, as the backend requires', async () => {
+    const upstream = await readFile(new URL('./UpstreamModels.tsx', import.meta.url), 'utf8');
+    // The backend requires a system and user message for every source that pools native
+    // accounts (WorkBuddy, Qoder, ChatGPT); the editor follows the same backend flag.
+    assert.match(upstream, /const ownPrompt = !!report && pooledSource\(view, report\.source_id\)/);
+    assert.doesNotMatch(upstream, /= !!report && hasRealm\(/);
+});

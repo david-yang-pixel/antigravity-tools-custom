@@ -2,7 +2,7 @@
 use crate::modules::native_providers::Provider;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-pub const DEFAULT_CLIENT_VERSION: &str = "0.146.0";
+pub const DEFAULT_CLIENT_VERSION: &str = "0.167.0";
 /// The upstream answers 404 below this version.
 const MIN_CLIENT_VERSION: (u64, u64, u64) = (0, 144, 0);
 const ORIGINATOR: &str = "codex_cli_rs";

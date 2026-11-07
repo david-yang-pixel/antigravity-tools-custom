@@ -72,10 +72,10 @@ fn client_version_respects_floor() {
     for (configured, expected) in [
         (Some("0.150.1"), "0.150.1"),
         (Some("0.144.0"), "0.144.0"),
-        (Some("0.100.0"), "0.146.0"),
-        (Some("garbage"), "0.146.0"),
-        (Some("1.2"), "0.146.0"),
-        (None, "0.146.0"),
+        (Some("0.100.0"), "0.167.0"),
+        (Some("garbage"), "0.167.0"),
+        (Some("1.2"), "0.167.0"),
+        (None, "0.167.0"),
     ] {
         assert_eq!(
             headers::pick_version(configured),
@@ -83,11 +83,11 @@ fn client_version_respects_floor() {
             "{configured:?}"
         );
     }
-    assert_eq!(headers::DEFAULT_CLIENT_VERSION, "0.146.0");
+    assert_eq!(headers::DEFAULT_CLIENT_VERSION, "0.167.0");
     std::env::set_var("ABV_CHATGPT_CLIENT_VERSION", "0.150.1");
     assert_eq!(headers::client_version(), "0.150.1");
     std::env::set_var("ABV_CHATGPT_CLIENT_VERSION", "0.100.0");
-    assert_eq!(headers::client_version(), "0.146.0");
+    assert_eq!(headers::client_version(), "0.167.0");
     std::env::remove_var("ABV_CHATGPT_CLIENT_VERSION");
 }
 
