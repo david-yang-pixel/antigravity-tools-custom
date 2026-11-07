@@ -447,9 +447,87 @@ pub async fn import(
             chatgpt::auth::refresh(&client, &mut a)
                 .await
                 .map_err(|e| e.to_string())?;
-            chatgpt::identity::apply(&mut a).map_err(|e| e.to_string())?;
+            // The pasted refresh token is spent from here on.
+            chatgpt::identity::apply(&mut a)
+                .map_err(|e| salvage_chatgpt(&a, &pasted, e.to_string()))?;
         }
     }
+    let a = match provider {
+        Provider::Qoder => save_import(
+            provider,
+            a,
+            &value,
+            account_id,
+            route.node.as_deref(),
+            &pasted,
+        )?,
+        Provider::ChatGpt => save_import(
+            provider,
+            a.clone(),
+            &value,
+            account_id,
+            route.node.as_deref(),
+            &pasted,
+        )
+        .map_err(|error| salvage_chatgpt(&a, &pasted, error))?,
+    };
+    drop(route);
+    let id = a.id.clone();
+    tokio::spawn(async move {
+        let _ = accounts::sync(provider, &id, false).await;
+    });
+    Ok((&a).into())
+}
+
+/// After a ChatGPT token exchange the pasted refresh token is spent. When the import then
+/// fails, the rotated credentials are kept on the saved account the new tokens identify
+/// (under its revision, egress binding unchanged); without one, the administrator learns
+/// that a new Codex sign-in is needed.
+fn salvage_chatgpt(a: &Account, pasted: &str, error: String) -> String {
+    let owner = store::all(Provider::ChatGpt).ok().and_then(|all| {
+        all.into_iter()
+            .find(|saved| !a.uid.is_empty() && saved.uid == a.uid && saved.realm == a.realm)
+    });
+    if let Some(owner) = owner {
+        let saved = store::update(Provider::ChatGpt, &owner.id, Some(&owner.revision), |s| {
+            s.credentials.access_token = a.credentials.access_token.clone();
+            s.credentials.refresh_token = a.credentials.refresh_token.clone();
+            s.credentials.id_token = a.credentials.id_token.clone();
+            s.credentials.chatgpt_account_id = a.credentials.chatgpt_account_id.clone();
+            s.expires_at = a.expires_at;
+            if !pasted.is_empty() {
+                store::add_fingerprints(
+                    &mut s.credentials.imported_refresh_sha256,
+                    [fingerprint(pasted)],
+                );
+            }
+        });
+        if saved.is_ok() {
+            let name = if owner.nickname.is_empty() {
+                &owner.uid
+            } else {
+                &owner.nickname
+            };
+            return format!(
+                "This token belongs to ChatGPT account {name}; its credentials were updated there"
+            );
+        }
+    }
+    format!(
+        "{error}. The pasted refresh token was consumed; sign in to Codex again to get a new one"
+    )
+}
+
+/// Validates an authorized import against its row, its egress binding and the vault, then
+/// saves it on `node`.
+fn save_import(
+    provider: Provider,
+    mut a: Account,
+    value: &Value,
+    account_id: Option<&str>,
+    node: Option<&str>,
+    pasted: &str,
+) -> Result<Account, String> {
     if let Some(id) = account_id {
         let previous = store::get(provider, id)?;
         if previous.uid != a.uid || previous.realm != a.realm {
@@ -459,17 +537,14 @@ pub async fn import(
             ));
         }
     }
-    if bound_elsewhere(provider, &a, route.node.as_deref())? {
+    if bound_elsewhere(provider, &a, node)? {
         return Err(match provider {
             Provider::Qoder => BOUND_ELSEWHERE,
             Provider::ChatGpt => CHATGPT_BOUND_ELSEWHERE,
         }
         .into());
     }
-    let root = value
-        .get("auth")
-        .filter(|v| v.is_object())
-        .unwrap_or(&value);
+    let root = value.get("auth").filter(|v| v.is_object()).unwrap_or(value);
     // Only Qoder accounts carry a device identity worth keeping across imports.
     let previous = match provider {
         Provider::Qoder => store::all(provider)?
@@ -488,16 +563,11 @@ pub async fn import(
     if provider == Provider::ChatGpt && !pasted.is_empty() {
         a.credentials
             .imported_refresh_sha256
-            .push(fingerprint(&pasted));
+            .push(fingerprint(pasted));
     }
     let a = store::upsert(a, account_id)?;
-    egress::adopt(Pool::Native(provider), &a.id, route.node.as_deref());
-    drop(route);
-    let id = a.id.clone();
-    tokio::spawn(async move {
-        let _ = accounts::sync(provider, &id, false).await;
-    });
-    Ok((&a).into())
+    egress::adopt(Pool::Native(provider), &a.id, node);
+    Ok(a)
 }
 
 #[cfg(test)]

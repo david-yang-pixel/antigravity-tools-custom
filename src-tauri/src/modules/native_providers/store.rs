@@ -69,6 +69,16 @@ pub fn update(
     write(provider, &accounts)?;
     Ok(result)
 }
+/// Appends import fingerprints not yet recorded, keeping the newest 32.
+pub fn add_fingerprints(imported: &mut Vec<String>, digests: impl IntoIterator<Item = String>) {
+    for digest in digests {
+        if !imported.contains(&digest) {
+            imported.push(digest);
+        }
+    }
+    let excess = imported.len().saturating_sub(MAX_IMPORTED_FINGERPRINTS);
+    imported.drain(..excess);
+}
 pub fn upsert(mut account: Account, expected: Option<&str>) -> Result<Account, String> {
     if account.uid.trim().is_empty() || account.credentials.access_token.is_empty() {
         return Err("Authorization returned no usable account identity".into());
@@ -94,13 +104,10 @@ pub fn upsert(mut account: Account, expected: Option<&str>) -> Result<Account, S
         // one the administrator turned off.
         account.enabled = previous.enabled || previous.credential_dead;
         let mut imported = previous.credentials.imported_refresh_sha256.clone();
-        for digest in std::mem::take(&mut account.credentials.imported_refresh_sha256) {
-            if !imported.contains(&digest) {
-                imported.push(digest);
-            }
-        }
-        let excess = imported.len().saturating_sub(MAX_IMPORTED_FINGERPRINTS);
-        imported.drain(..excess);
+        add_fingerprints(
+            &mut imported,
+            std::mem::take(&mut account.credentials.imported_refresh_sha256),
+        );
         account.credentials.imported_refresh_sha256 = imported;
         account.auto_refresh = previous.auto_refresh;
         account.quota = previous.quota.clone();

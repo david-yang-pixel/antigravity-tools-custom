@@ -1180,6 +1180,12 @@ async fn chatgpt_reimport_keeps_a_manually_disabled_account_off() {
     assert!(!view.enabled);
 }
 
+fn sha256(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+/// The import consumed the pasted token, but no saved account can take the rotated one.
 #[tokio::test]
 async fn chatgpt_row_reimport_rejects_a_token_of_another_account() {
     use crate::modules::native_providers::login;
@@ -1196,11 +1202,67 @@ async fn chatgpt_row_reimport_rejects_a_token_of_another_account() {
     .await
     .err()
     .unwrap();
-    assert_eq!(error, "This token belongs to a different ChatGPT account");
+    assert!(
+        error.starts_with("This token belongs to a different ChatGPT account"),
+        "{error}"
+    );
+    assert!(error.contains("consumed"), "{error}");
+    assert!(error.contains("sign in to Codex again"), "{error}");
     assert_eq!(
         before,
         serde_json::to_value(store::all(Provider::ChatGpt).unwrap()).unwrap()
     );
+}
+
+#[tokio::test]
+async fn chatgpt_wrong_row_reimport_persists_onto_the_matching_account() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let row = saved_chatgpt("other:u9");
+    let owner = saved_chatgpt("acc:u1");
+    store::update(Provider::ChatGpt, &owner.id, None, |a| {
+        a.nickname = "owner@example.com".into()
+    })
+    .unwrap();
+    let row_before = serde_json::to_value(store::get(Provider::ChatGpt, &row.id).unwrap()).unwrap();
+    let server = mock(200, &[], import_token_response(true), false).await;
+    let error = login::import(
+        Provider::ChatGpt,
+        Realm::Global,
+        json!("new-rt"),
+        Some(&row.id),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(
+        error,
+        "This token belongs to ChatGPT account owner@example.com; its credentials were updated there"
+    );
+    // The targeted row is untouched; the token's own account holds the rotated credentials.
+    assert_eq!(
+        row_before,
+        serde_json::to_value(store::get(Provider::ChatGpt, &row.id).unwrap()).unwrap()
+    );
+    let tokens = import_token_response(true);
+    let stored = store::get(Provider::ChatGpt, &owner.id).unwrap();
+    assert_eq!(stored.revision, owner.revision);
+    assert_eq!(stored.credentials.refresh_token, "rotated");
+    assert_eq!(stored.credentials.access_token, tokens["access_token"]);
+    assert_eq!(stored.credentials.id_token, tokens["id_token"]);
+    assert_eq!(stored.credentials.chatgpt_account_id, "acc");
+    assert!(stored.expires_at > crate::modules::native_providers::now() + 3000);
+    assert!(stored
+        .credentials
+        .imported_refresh_sha256
+        .contains(&sha256("new-rt")));
+    // The spent token is now recognized before any network request.
+    let again = login::import(Provider::ChatGpt, Realm::Global, json!("new-rt"), None)
+        .await
+        .err()
+        .unwrap();
+    assert!(again.contains("already saved"), "{again}");
+    assert_eq!(token_requests(&server), 1);
 }
 
 #[tokio::test]
@@ -1242,15 +1304,29 @@ async fn chatgpt_bound_elsewhere_import_points_to_the_account_row() {
         .await
         .err()
         .unwrap();
-    assert!(error.contains("ChatGPT"), "{error}");
-    assert!(error.contains("own row"), "{error}");
+    // The exchange already spent the pasted token: the rotated credentials land on the
+    // account the token belongs to, whose egress binding stays as it is.
+    assert!(
+        error.contains("belongs to ChatGPT account acc:u1"),
+        "{error}"
+    );
+    assert!(error.contains("updated there"), "{error}");
     assert!(!error.contains("reauthorize"), "{error}");
+    let stored = store::get(Provider::ChatGpt, &saved.id).unwrap();
+    assert_eq!(stored.credentials.refresh_token, "rotated");
+    assert!(stored
+        .credentials
+        .imported_refresh_sha256
+        .contains(&sha256("new-rt")));
+    assert_eq!(store::all(Provider::ChatGpt).unwrap().len(), 1);
     assert_eq!(
-        store::get(Provider::ChatGpt, &saved.id)
-            .unwrap()
-            .credentials
-            .refresh_token,
-        "old-rt"
+        crate::modules::egress::bound_node(
+            crate::modules::egress::Pool::Native(Provider::ChatGpt),
+            &saved.id
+        )
+        .unwrap()
+        .as_deref(),
+        Some("DIRECT")
     );
 }
 
