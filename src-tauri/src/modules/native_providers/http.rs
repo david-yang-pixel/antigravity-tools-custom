@@ -13,6 +13,9 @@ pub struct Failure {
     pub penalty: Option<Penalty>,
     /// Another account may serve the request.
     pub failover: bool,
+    /// The request never reached the upstream (connection could not be opened), so
+    /// nothing was sent and retrying it elsewhere cannot repeat a side effect.
+    pub unreached: bool,
 }
 /// A provider's own verdict on what a failure means for the account that served it.
 #[derive(Clone, Debug)]
@@ -33,6 +36,14 @@ impl Failure {
             message: message.into(),
             penalty: None,
             failover: false,
+            unreached: false,
+        }
+    }
+    /// A send error: `unreached` only when the connection itself could not be opened.
+    pub fn sending(error: &reqwest::Error, message: impl Into<String>) -> Self {
+        Self {
+            unreached: error.is_connect(),
+            ..Self::new(502, message)
         }
     }
     pub fn classified(

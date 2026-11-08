@@ -76,7 +76,7 @@ pub async fn refresh(client: &reqwest::Client, a: &mut Account) -> Result<(), Fa
         ])
         .send()
         .await
-        .map_err(|_| Failure::new(502, "ChatGPT token refresh connection failed"))?;
+        .map_err(|e| Failure::sending(&e, "ChatGPT token refresh connection failed"))?;
     let status = response.status().as_u16();
     let body = super::client::read_bytes(response).await?;
     if !(200..300).contains(&status) {

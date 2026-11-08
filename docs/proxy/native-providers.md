@@ -167,6 +167,14 @@ redirects.
   different services. mihomo tests every node once in the background after it
   starts, and an assignment whose pick is still untested tests all nodes first
   (concurrently, at most 20 s), so a restart cannot hand a new account a dead node.
+- With **auto-rebind** on (per source, `pools.chatgpt.auto_rebind`, default off), an
+  hourly check moves accounts off a node that failed two tests 30 s apart onto the
+  healthy node with the fewest accounts and lowest delay; their exit IP changes.
+  Accounts on working nodes and `DIRECT` accounts never move.
+- A new account's import that cannot open a connection through its auto-chosen node
+  (nothing reached OpenAI, so the credential is untouched) marks that node
+  unavailable for 15 minutes and retries on another node, up to 3 nodes. Any answer
+  from OpenAI, or a failure after the connection opened, is never retried.
 - Credential import validation, refresh, model and inference requests all use the
   account's node. An import claims a free node and the new account keeps it; a
   re-import uses the account's bound node. An import of a saved account through a

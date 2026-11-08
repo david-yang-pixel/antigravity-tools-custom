@@ -2442,7 +2442,9 @@
       "timeout": "timed out",
       "max_accounts": "Max accounts per node",
       "max_accounts_hint": "How many accounts of one source a node may serve (1–20); WorkBuddy and ChatGPT accounts are counted separately. Only later assignments are affected; existing bindings stay.",
-      "node_accounts": "{{count}}/{{max}} accounts"
+      "node_accounts": "{{count}}/{{max}} accounts",
+      "auto_rebind": "Move accounts off a node that stays unusable to a working low-latency node (hourly, this source only)",
+      "auto_rebind_hint": "Nodes are tested hourly (first about 2 minutes after start). When an account's node fails two tests 30 seconds apart, the account moves to the working node with the fewest accounts and lowest latency, so its exit IP changes. Accounts on working nodes never move; DIRECT accounts are unaffected; with no working node free, the account stays and a warning is logged."
     }
   }
 }

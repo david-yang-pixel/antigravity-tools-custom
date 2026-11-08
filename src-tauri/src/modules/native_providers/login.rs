@@ -197,6 +197,9 @@ async fn authorize_chatgpt(
     Ok(true)
 }
 
+/// Nodes a new account's import tries when a node cannot reach the upstream.
+const IMPORT_NODES: usize = 3;
+
 pub async fn import(
     provider: Provider,
     value: Value,
@@ -216,14 +219,31 @@ pub async fn import(
         }
         None => None,
     };
-    let route = egress::login_route(Pool::Native(provider), preferred.as_deref()).await?;
-    // Another import may have saved these credentials while we waited for the
-    // serialized login route. Recheck under that route's guard before using them.
-    reject_saved_credentials(&a, &store::all(provider)?)?;
-    let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
-    let refreshed = authorize_chatgpt(&client, &mut a)
-        .await
-        .map_err(|e| e.to_string())?;
+    // A new account's auto-chosen node that cannot reach the upstream is reported and
+    // the import moves to another node. Only connection failures move: nothing was sent,
+    // so the pasted credentials are untouched.
+    let mut attempt = 1;
+    let (route, refreshed) = loop {
+        let route = egress::login_route(Pool::Native(provider), preferred.as_deref()).await?;
+        // Another import may have saved these credentials while we waited for the
+        // serialized login route. Recheck under that route's guard before using them.
+        reject_saved_credentials(&a, &store::all(provider)?)?;
+        let client = http::login_client(provider, &route.exit).map_err(|e| e.to_string())?;
+        match authorize_chatgpt(&client, &mut a).await {
+            Ok(refreshed) => break (route, refreshed),
+            Err(error) if error.unreached && route.hold.is_some() && attempt < IMPORT_NODES => {
+                if let Some(node) = route.node.as_deref() {
+                    tracing::warn!(
+                        "{} import could not reach the upstream through node {node}; trying another node",
+                        provider.name()
+                    );
+                    egress::report_unreachable(Pool::Native(provider), node);
+                }
+                attempt += 1;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     // From a token exchange on, the pasted refresh token is spent.
     if refreshed {
         chatgpt::identity::apply(&mut a)
