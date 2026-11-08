@@ -72,17 +72,61 @@ pub fn configure(
     Ok((&a).into())
 }
 pub async fn fresh(provider: Provider, id: &str, force: bool) -> Result<Account, Failure> {
+    renew(provider, id, force, None).await
+}
+/// Reuse a rotation that already replaced the access token rejected by this request.
+pub async fn after_rejection(account: &Account) -> Result<Account, Failure> {
+    renew(
+        account.provider,
+        &account.id,
+        true,
+        Some(account.credentials.access_token.clone()),
+    )
+    .await
+}
+async fn renew(
+    provider: Provider,
+    id: &str,
+    force: bool,
+    rejected: Option<String>,
+) -> Result<Account, Failure> {
     // A cancelled HTTP request must not cancel a rotating-token exchange before its new
     // refresh token reaches disk. The owned task finishes persistence under the account lock.
     let id = id.to_owned();
-    tokio::spawn(async move { refresh_owned(provider, &id, force).await })
+    tokio::spawn(async move { refresh_owned(provider, &id, force, rejected).await })
         .await
         .map_err(|_| Failure::new(503, "Account refresh task failed"))?
 }
-async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Account, Failure> {
+async fn refresh_owned(
+    provider: Provider,
+    id: &str,
+    force: bool,
+    rejected: Option<String>,
+) -> Result<Account, Failure> {
+    let observed = store::get(provider, id)?;
     let lock = refresh_lock(id)?;
     let _guard = lock.lock().await;
     let mut a = store::get(provider, id)?;
+    if a.credential_dead {
+        return Err(Failure::new(
+            401,
+            a.auth_error
+                .clone()
+                .unwrap_or_else(|| "Account requires reauthorization".into()),
+        ));
+    }
+    // Concurrent 401s may all request a forced renewal of the same old access token.
+    // Once the first caller rotates it, the waiters reuse the persisted replacement.
+    if force
+        && (a.revision != observed.revision
+            || a.credentials.access_token
+                != *rejected
+                    .as_ref()
+                    .unwrap_or(&observed.credentials.access_token))
+        && (a.expires_at == 0 || a.expires_at > now() + 300)
+    {
+        return Ok(a);
+    }
     if !force && (a.expires_at == 0 || a.expires_at > now() + 300) {
         return Ok(a);
     }
@@ -105,11 +149,19 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
         // A dead credential turns the account off instead of retrying it every minute;
         // the administrator has to authorize it again.
         let dead = matches!(error.penalty, Some(http::Penalty::Disable { .. }));
+        tracing::warn!(
+            account_id = id,
+            status = error.status,
+            credential_dead = dead,
+            forced = force,
+            "Native account token renewal failed"
+        );
         let _ = store::update(provider, id, Some(&a.revision), |a| {
             a.auth_error = Some(error.to_string());
             if dead {
                 a.enabled = false;
                 a.credential_dead = true;
+                a.reauthorization.needed = error.status == 401;
             } else {
                 a.next_sync_at = now() + 60;
             }
@@ -122,6 +174,7 @@ async fn refresh_owned(provider: Provider, id: &str, force: bool) -> Result<Acco
         stored.credentials = a.credentials.clone();
         stored.expires_at = a.expires_at;
         stored.auth_error = None;
+        stored.reauthorization.needed = false;
     })?)
 }
 /// Makes every account's catalog due on the next maintenance pass, e.g. after the
@@ -174,7 +227,7 @@ async fn sync_metadata(
             .is_some_and(|r| r.as_ref().is_err_and(|e| e.status == 401))
     }
     if unauthorized(&models) || unauthorized(&quota) {
-        a = fresh(provider, id, true).await.map_err(|e| e.to_string())?;
+        a = after_rejection(&a).await.map_err(|e| e.to_string())?;
         (models, quota) = fetch_metadata(&client, &a, catalog).await;
     }
     // A metadata answer can declare the credential dead just like a refresh can.
@@ -185,14 +238,15 @@ async fn sync_metadata(
     .into_iter()
     .flatten()
     .find_map(|e| match &e.penalty {
-        Some(http::Penalty::Disable { message }) => Some(message.clone()),
+        Some(http::Penalty::Disable { message }) => Some((message.clone(), e.status)),
         _ => None,
     });
     let updated = store::update(provider, id, Some(&a.revision), |stored| {
-        if let Some(message) = dead {
+        if let Some((message, status)) = dead {
             stored.enabled = false;
             stored.credential_dead = true;
             stored.auth_error = Some(message);
+            stored.reauthorization.needed = status == 401;
         }
         match models {
             Some(Ok(models)) => {
@@ -284,6 +338,7 @@ impl Lease {
                     a.enabled = false;
                     a.credential_dead = true;
                     a.auth_error = Some(message.clone());
+                    a.reauthorization.needed = failure.status == 401;
                 });
                 self.failure_after(failure.status, None);
             }
@@ -436,6 +491,7 @@ pub fn start() {
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
+    super::reauthorize::start();
     // Desktop setup may run outside a Tokio context; use the application's runtime just
     // like the existing WorkBuddy maintenance service.
     tauri::async_runtime::spawn(async {

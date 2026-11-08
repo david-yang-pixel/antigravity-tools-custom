@@ -1086,6 +1086,34 @@ impl AxumServer {
                 post(admin_import_native_accounts_batch),
             )
             .route("/native-accounts/update", post(admin_update_native_account))
+            .route(
+                "/native-accounts/login/save",
+                post(admin_save_native_login_credentials),
+            )
+            .route(
+                "/native-accounts/login/get",
+                post(admin_get_native_login_credentials),
+            )
+            .route(
+                "/native-accounts/reauthorize",
+                post(admin_reauthorize_native_account),
+            )
+            .route(
+                "/native-accounts/login/import",
+                post(admin_import_native_login_accounts),
+            )
+            .route(
+                "/native-accounts/login/imports",
+                post(admin_list_native_login_imports),
+            )
+            .route(
+                "/native-accounts/login/imports/retry",
+                post(admin_retry_native_login_import),
+            )
+            .route(
+                "/native-accounts/login/imports/remove",
+                post(admin_remove_native_login_import),
+            )
             .route("/native-accounts/delete", post(admin_delete_native_account))
             .route(
                 "/native-providers/settings",
@@ -2902,6 +2930,62 @@ async fn admin_update_native_account(
     Json(payload): Json<crate::commands::native_providers::AccountRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::native_providers::update_native_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_save_native_login_credentials(
+    Json(payload): Json<crate::commands::native_providers::LoginCredentialsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::save_native_login_credentials(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_get_native_login_credentials(
+    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::get_native_login_credentials(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_reauthorize_native_account(
+    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::reauthorize_native_account(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_import_native_login_accounts(
+    Json(payload): Json<crate::commands::native_providers::LoginCredentialsRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::import_native_login_accounts(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_list_native_login_imports(
+    Json(payload): Json<crate::commands::native_providers::ProviderRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::list_native_login_imports(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_retry_native_login_import(
+    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::retry_native_login_import(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_remove_native_login_import(
+    Json(payload): Json<crate::commands::native_providers::SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::remove_native_login_import(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

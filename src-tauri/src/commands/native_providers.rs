@@ -34,6 +34,7 @@ pub struct AccountRequest {
     pub id: String,
     pub enabled: Option<bool>,
     pub auto_refresh: Option<bool>,
+    pub auto_reauthorize: Option<bool>,
     #[serde(default)]
     pub refresh: bool,
 }
@@ -79,6 +80,12 @@ pub async fn import_native_account(request: ImportRequest) -> Result<AccountView
 }
 #[tauri::command]
 pub async fn update_native_account(request: AccountRequest) -> Result<AccountView, String> {
+    if let Some(auto) = request.auto_reauthorize {
+        let a = native::store::update(request.provider, &request.id, None, |a| {
+            a.reauthorization.auto = auto
+        })?;
+        return Ok((&a).into());
+    }
     if request.enabled.is_some() || request.auto_refresh.is_some() {
         native::accounts::configure(
             request.provider,
@@ -89,6 +96,57 @@ pub async fn update_native_account(request: AccountRequest) -> Result<AccountVie
     } else {
         native::accounts::sync(request.provider, &request.id, request.refresh).await
     }
+}
+
+#[derive(Deserialize)]
+pub struct LoginCredentialsRequest {
+    pub provider: Provider,
+    pub id: Option<String>,
+    pub input: String,
+    #[serde(default)]
+    pub auto_reauthorize: bool,
+}
+#[tauri::command]
+pub async fn save_native_login_credentials(
+    request: LoginCredentialsRequest,
+) -> Result<usize, String> {
+    native::reauthorize::bind(
+        request.provider,
+        request.id.as_deref(),
+        &request.input,
+        request.auto_reauthorize,
+    )
+}
+/// Only the authenticated administrator explicitly requesting one row receives its secrets.
+#[tauri::command]
+pub async fn get_native_login_credentials(
+    request: SessionRequest,
+) -> Result<Option<native::reauthorize::LoginCredentials>, String> {
+    Ok(native::store::get(request.provider, &request.id)?.login_credentials)
+}
+#[tauri::command]
+pub async fn reauthorize_native_account(request: SessionRequest) -> Result<AccountView, String> {
+    native::reauthorize::request(request.provider, &request.id)
+}
+#[tauri::command]
+pub async fn import_native_login_accounts(
+    request: LoginCredentialsRequest,
+) -> Result<native::login_imports::Report, String> {
+    native::login_imports::enqueue(request.provider, &request.input, request.auto_reauthorize)
+}
+#[tauri::command]
+pub async fn list_native_login_imports(
+    request: ProviderRequest,
+) -> Result<Vec<native::login_imports::View>, String> {
+    native::login_imports::list(request.provider)
+}
+#[tauri::command]
+pub async fn retry_native_login_import(request: SessionRequest) -> Result<(), String> {
+    native::login_imports::retry(request.provider, &request.id)
+}
+#[tauri::command]
+pub async fn remove_native_login_import(request: SessionRequest) -> Result<(), String> {
+    native::login_imports::remove(request.provider, &request.id)
 }
 #[tauri::command]
 pub async fn delete_native_account(request: AccountRequest) -> Result<(), String> {

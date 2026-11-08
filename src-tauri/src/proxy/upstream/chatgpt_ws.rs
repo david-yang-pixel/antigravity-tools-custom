@@ -620,7 +620,7 @@ impl Relay {
                     refreshed = true;
                     match tokio::time::timeout_at(
                         deadline,
-                        accounts::fresh(Provider::ChatGpt, &lease.account.id, true),
+                        accounts::after_rejection(&lease.account),
                     )
                     .await
                     {

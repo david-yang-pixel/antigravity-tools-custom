@@ -9,6 +9,10 @@ pub mod chatgpt;
 pub mod http;
 #[path = "native_providers/login.rs"]
 pub mod login;
+#[path = "native_providers/login_imports.rs"]
+pub mod login_imports;
+#[path = "native_providers/reauthorize.rs"]
+pub mod reauthorize;
 #[path = "native_providers/store.rs"]
 pub mod store;
 
@@ -165,6 +169,10 @@ pub struct Account {
     pub auto_refresh: bool,
     pub expires_at: i64,
     pub credentials: Credentials,
+    #[serde(default)]
+    pub login_credentials: Option<reauthorize::LoginCredentials>,
+    #[serde(default)]
+    pub reauthorization: reauthorize::State,
     pub models: Vec<Model>,
     pub verified_models: BTreeMap<String, i64>,
     pub models_updated_at: i64,
@@ -193,6 +201,8 @@ impl Account {
             auto_refresh: true,
             expires_at: 0,
             credentials: Credentials::default(),
+            login_credentials: None,
+            reauthorization: reauthorize::State::default(),
             models: Vec::new(),
             verified_models: BTreeMap::new(),
             models_updated_at: 0,
@@ -219,6 +229,11 @@ pub struct AccountView {
     pub auto_refresh: bool,
     pub expires_at: i64,
     pub can_refresh: bool,
+    pub has_login_credentials: bool,
+    pub auto_reauthorize: bool,
+    pub reauthorizing: bool,
+    pub reauthorization_error: Option<String>,
+    pub credential_dead: bool,
     pub models: Vec<Model>,
     pub models_updated_at: i64,
     pub quota: Option<Quota>,
@@ -246,6 +261,11 @@ impl From<&Account> for AccountView {
             auto_refresh: a.auto_refresh,
             expires_at: a.expires_at,
             can_refresh: !a.credentials.refresh_token.is_empty(),
+            has_login_credentials: a.login_credentials.is_some(),
+            auto_reauthorize: a.reauthorization.auto,
+            reauthorizing: a.reauthorization.requested || a.reauthorization.batch.is_some(),
+            reauthorization_error: a.reauthorization.error.clone(),
+            credential_dead: a.credential_dead,
             models: a.models.clone(),
             models_updated_at: a.models_updated_at,
             quota: a.quota.clone(),

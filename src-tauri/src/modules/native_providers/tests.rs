@@ -20,6 +20,7 @@ impl Sandbox {
             "ABV_CHATGPT_MAX_CONCURRENCY",
             "ABV_CHATGPT_EGRESS_ENABLED",
             "ABV_CHATGPT_CLIENT_VERSION",
+            "ABV_CHATGPT_REAUTH_URL",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -95,7 +96,13 @@ fn account(provider: Provider, uid: &str) -> Account {
 #[test]
 fn account_vault_and_public_projection_never_expose_tokens() {
     let _sandbox = Sandbox::new();
-    let a = store::upsert(account(Provider::ChatGpt, "private-user"), None).unwrap();
+    let mut a = account(Provider::ChatGpt, "private-user");
+    a.login_credentials = Some(reauthorize::LoginCredentials {
+        email: "private@example.com".into(),
+        password: "test-password-private".into(),
+        two_factor: "PRIVATEBASE32".into(),
+    });
+    let a = store::upsert(a, None).unwrap();
     let disk = std::fs::read_to_string(
         crate::modules::account::get_data_dir()
             .unwrap()
@@ -107,7 +114,13 @@ fn account_vault_and_public_projection_never_expose_tokens() {
     let view = serde_json::to_string(&AccountView::from(&a)).unwrap();
     assert!(!view.contains("test-access-private"));
     assert!(!view.contains("test-refresh-private"));
-    assert!(!view.contains("credentials"));
+    assert!(serde_json::from_str::<serde_json::Value>(&view)
+        .unwrap()
+        .get("credentials")
+        .is_none());
+    assert!(!view.contains("test-password-private"));
+    assert!(!view.contains("PRIVATEBASE32"));
+    assert!(!disk.contains("test-password-private"));
     assert_eq!(
         store::get(Provider::ChatGpt, &a.id)
             .unwrap()
