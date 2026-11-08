@@ -231,7 +231,7 @@ ten accounts at a time.
 | `ABV_CHATGPT_ENABLED` | `true` | Override source enablement; the UI then treats its source settings as read-only |
 | `ABV_CHATGPT_MAX_CONCURRENCY` | `5` | Active requests per account, clamped to 1–8 |
 | `ABV_CHATGPT_EGRESS_ENABLED` | `true`/`false` | Locks ChatGPT's egress switch |
-| `ABV_CHATGPT_CLIENT_VERSION` | `0.167.0` | Advertised Codex client version; semver, must be `>= 0.144.0`. The model catalog depends on it: an old version is offered fewer, older models (e.g. no `gpt-6-*`), so raise it when Codex releases add models |
+| `ABV_CHATGPT_CLIENT_VERSION` | `0.167.0` | Advertised Codex client version; semver, must be `>= 0.144.0`. The model catalog depends on it: an old version is offered fewer, older models (e.g. no `gpt-6-*`), so raise it when Codex releases add models. Without it, the ChatGPT accounts page shows the advertised version, checks the latest Codex release (npm, GitHub fallback) and can switch to it; that choice is saved in `chatgpt_client.json` in the data directory. A valid value here takes precedence and locks the page |
 
 ### Endpoints served
 

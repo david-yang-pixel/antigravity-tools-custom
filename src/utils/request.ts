@@ -166,6 +166,8 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_native_provider_settings': { url: '/api/native-providers/settings', method: 'POST' },
   'check_workbuddy_client_version': { url: '/api/workbuddy-client-version', method: 'POST' },
   'save_native_provider_settings': { url: '/api/native-providers/settings/save', method: 'POST' },
+  'check_chatgpt_client_version': { url: '/api/chatgpt-client-version', method: 'POST' },
+  'save_chatgpt_client_version': { url: '/api/chatgpt-client-version/save', method: 'POST' },
   'get_native_egress': { url: '/api/native-egress', method: 'POST' },
   'save_native_egress': { url: '/api/native-egress/save', method: 'POST' },
   'refresh_native_egress': { url: '/api/native-egress/refresh', method: 'POST' },

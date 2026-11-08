@@ -69,6 +69,16 @@ pub fn update(
     write(provider, &accounts)?;
     Ok(result)
 }
+/// Applies `change` to every account in one vault write.
+pub fn update_all(provider: Provider, mut change: impl FnMut(&mut Account)) -> Result<(), String> {
+    let _guard = LOCK.lock().map_err(|_| "Account vault unavailable")?;
+    let mut accounts = read(provider)?;
+    if accounts.is_empty() {
+        return Ok(());
+    }
+    accounts.iter_mut().for_each(&mut change);
+    write(provider, &accounts)
+}
 /// Appends import fingerprints not yet recorded, keeping the newest 32.
 pub fn add_fingerprints(imported: &mut Vec<String>, digests: impl IntoIterator<Item = String>) {
     for digest in digests {

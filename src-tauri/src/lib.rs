@@ -828,6 +828,8 @@ pub fn run() {
             commands::native_providers::list_native_accounts,
             commands::native_providers::get_native_provider_settings,
             commands::native_providers::save_native_provider_settings,
+            commands::native_providers::check_chatgpt_client_version,
+            commands::native_providers::save_chatgpt_client_version,
             commands::native_providers::import_native_account,
             commands::native_providers::import_native_accounts_batch,
             commands::native_providers::update_native_account,

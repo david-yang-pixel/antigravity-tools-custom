@@ -1110,6 +1110,14 @@ impl AxumServer {
                 get(admin_get_workbuddy_settings).post(admin_save_workbuddy_settings),
             )
             .route(
+                "/chatgpt-client-version",
+                post(admin_check_chatgpt_client_version),
+            )
+            .route(
+                "/chatgpt-client-version/save",
+                post(admin_save_chatgpt_client_version),
+            )
+            .route(
                 "/workbuddy-client-version",
                 post(admin_check_workbuddy_client_version),
             )
@@ -2969,6 +2977,23 @@ async fn admin_test_native_account_egress(
 async fn admin_get_workbuddy_settings(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     crate::commands::workbuddy::get_workbuddy_settings()
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+
+async fn admin_check_chatgpt_client_version(
+    Json(payload): Json<crate::commands::native_providers::ClientVersionCheck>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::check_chatgpt_client_version(payload)
+        .await
+        .map(Json)
+        .map_err(portal_admin_error)
+}
+async fn admin_save_chatgpt_client_version(
+    Json(payload): Json<crate::commands::native_providers::ClientVersionSave>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    crate::commands::native_providers::save_chatgpt_client_version(payload)
         .await
         .map(Json)
         .map_err(portal_admin_error)

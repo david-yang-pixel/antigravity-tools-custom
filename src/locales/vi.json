@@ -1620,6 +1620,26 @@
       "windowDays": "{{count}}-day window",
       "reset": "Resets {{time}}",
       "used": "{{percent}}% used"
+    },
+    "clientVersion": {
+      "title": "Phiên bản Codex CLI",
+      "source_default": "Mặc định tích hợp",
+      "source_saved": "Đã cập nhật thủ công",
+      "source_env": "Khóa bởi biến môi trường",
+      "latest": "Mới nhất chính thức {{version}}",
+      "checking": "Đang kiểm tra",
+      "failed": "Kiểm tra thất bại",
+      "available": "Có bản mới",
+      "current": "Đã mới nhất",
+      "unknown": "Chưa kiểm tra",
+      "check": "Kiểm tra cập nhật",
+      "update": "Cập nhật lên {{version}}",
+      "reset": "Khôi phục mặc định {{version}}",
+      "saved": "Đã chuyển phiên bản Codex sang {{version}}",
+      "hint": "Phiên bản Codex CLI khai báo với ChatGPT quyết định danh mục mô hình mà máy chủ cung cấp (mô hình mới thường cần phiên bản mới hơn). Thay đổi có hiệu lực ngay; danh mục mô hình của từng tài khoản sẽ làm mới ở lần bảo trì nền tiếp theo, hoặc ngay lập tức bằng “Đồng bộ số dư và mô hình”. Chỉ đổi phiên bản khai báo: không tải xuống hay cài đặt gì.",
+      "envLocked": "Phiên bản bị khóa bởi biến môi trường ABV_CHATGPT_CLIENT_VERSION nên không thể đổi ở đây; hãy sửa cấu hình triển khai rồi khởi động lại.",
+      "checkedAt": "Lần kiểm tra thành công gần nhất: {{time}}",
+      "failureHint": "Hiện không thể truy vấn phiên bản chính thức (npm / GitHub). Hãy kiểm tra mạng hoặc proxy upstream trong API Proxy rồi thử lại."
     }
   }
 }
