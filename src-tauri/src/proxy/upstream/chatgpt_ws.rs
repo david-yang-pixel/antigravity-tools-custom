@@ -11,7 +11,7 @@ mod upstream;
 use crate::modules::model_registry::PublishedModel;
 use crate::modules::native_providers::{
     accounts::{self, Lease},
-    chatgpt::{client, errors, payload},
+    chatgpt::{client, errors, payload, quota},
     http::{Failure, Penalty},
     now, Provider,
 };
@@ -752,6 +752,10 @@ impl Relay {
             {
                 // The second half of the refusal this socket already reported.
                 continue;
+            }
+            if kind == "codex.rate_limits" {
+                // A reused socket sends no new headers: this event is the turn's usage.
+                quota::record_event(&lease.account, &event);
             }
             super::responses_relay::rename(&mut event, alias);
             if matches!(kind.as_str(), "error" | "response.failed") {
