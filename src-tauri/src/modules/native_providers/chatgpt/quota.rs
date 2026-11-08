@@ -10,8 +10,17 @@ use std::{
 
 struct Window {
     used: f64,
+    /// Absolute reset time (epoch seconds), when reported.
+    reset_at: Option<i64>,
     reset_after: Option<i64>,
     minutes: Option<i64>,
+}
+impl Window {
+    fn resets(&self, at: i64) -> Option<i64> {
+        self.reset_at
+            .filter(|t| *t > 0)
+            .or_else(|| Some(at + self.reset_after?))
+    }
 }
 
 fn header(h: &HeaderMap, name: &str) -> Option<f64> {
@@ -27,6 +36,7 @@ fn header(h: &HeaderMap, name: &str) -> Option<f64> {
 fn window(h: &HeaderMap, which: &str) -> Option<Window> {
     Some(Window {
         used: header(h, &format!("x-codex-{which}-used-percent"))?,
+        reset_at: header(h, &format!("x-codex-{which}-reset-at")).map(|n| n as i64),
         reset_after: header(h, &format!("x-codex-{which}-reset-after-seconds")).map(|n| n as i64),
         minutes: header(h, &format!("x-codex-{which}-window-minutes")).map(|n| n as i64),
     })
@@ -46,7 +56,26 @@ fn length_name(minutes: i64) -> String {
 /// by it; one that does not falls back to its rank: the smaller known window is "5h", a single
 /// known window of at most 360 minutes is "5h", and with no lengths known primary is "7d".
 fn labelled(h: &HeaderMap) -> Vec<(String, Window)> {
-    let (primary, secondary) = (window(h, "primary"), window(h, "secondary"));
+    name_windows(window(h, "primary"), window(h, "secondary"))
+}
+
+/// Windows of a `codex.rate_limits` event, which a WebSocket turn carries instead of
+/// per-request headers: `rate_limits.{primary,secondary}.{used_percent,window_minutes,reset_at}`.
+fn event_windows(event: &Value) -> Vec<(String, Window)> {
+    let limits = &event["rate_limits"];
+    let window = |which: &str| {
+        let w = &limits[which];
+        Some(Window {
+            used: w["used_percent"].as_f64().filter(|n| n.is_finite())?,
+            reset_at: w["reset_at"].as_i64(),
+            reset_after: w["reset_after_seconds"].as_i64(),
+            minutes: w["window_minutes"].as_i64(),
+        })
+    };
+    name_windows(window("primary"), window("secondary"))
+}
+
+fn name_windows(primary: Option<Window>, secondary: Option<Window>) -> Vec<(String, Window)> {
     let minutes = |w: &Option<Window>| w.as_ref().and_then(|w| w.minutes);
     let primary_is_short = match (minutes(&primary), minutes(&secondary)) {
         (Some(p), Some(s)) => p < s,
@@ -73,7 +102,18 @@ fn labelled(h: &HeaderMap) -> Vec<(String, Window)> {
 }
 
 pub fn from_headers(h: &HeaderMap, at: i64) -> Option<Quota> {
-    let packs: Vec<QuotaPack> = labelled(h)
+    snapshot(labelled(h), at)
+}
+
+/// Quota of a `codex.rate_limits` event; `None` for any other event.
+pub fn from_event(event: &Value, at: i64) -> Option<Quota> {
+    (event["type"].as_str() == Some("codex.rate_limits"))
+        .then(|| snapshot(event_windows(event), at))
+        .flatten()
+}
+
+fn snapshot(windows: Vec<(String, Window)>, at: i64) -> Option<Quota> {
+    let packs: Vec<QuotaPack> = windows
         .into_iter()
         .map(|(name, w)| QuotaPack {
             name,
@@ -81,7 +121,7 @@ pub fn from_headers(h: &HeaderMap, at: i64) -> Option<Quota> {
             used: Some(w.used),
             remaining: Some(100.0 - w.used),
             unlimited: false,
-            expires_at: w.reset_after.map(|s| at + s),
+            expires_at: w.resets(at),
         })
         .collect();
     // Percent windows do not add up: the account is as constrained as its fullest window.
@@ -117,31 +157,54 @@ pub fn exhausted_until(h: &HeaderMap, body: &Value, at: i64) -> Option<i64> {
             .into_iter()
             .rev()
             .find(|(_, w)| w.used >= 100.0)
-            .and_then(|(_, w)| Some(at + w.reset_after?))
+            .and_then(|(_, w)| w.resets(at))
     })
 }
 
-/// Seconds between persisted snapshots of one account.
+/// Seconds between persisted snapshots of one account whose usage did not change.
 const WRITE_INTERVAL: i64 = 30;
-static LAST_WRITE: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(Default::default);
+/// Last persisted snapshot per account: when, and the used percentage of each window.
+type Written = (i64, Vec<(String, u64)>);
+static LAST_WRITE: LazyLock<Mutex<HashMap<String, Written>>> = LazyLock::new(Default::default);
 
-/// Stores the quota windows an answer reported, at most once per 30 s per account unless a
-/// window just filled up. Only `quota` is written.
+/// Stores the quota windows an answer reported. A change in any window's usage is written at
+/// once, so the newest usage of a burst is never dropped; an unchanged snapshot is refreshed
+/// at most once per 30 s per account. Only `quota` is written.
 pub fn record(a: &Account, h: &HeaderMap) {
     let at = now();
-    let Some(quota) = from_headers(h, at) else {
-        return;
-    };
-    let full = quota
+    if let Some(quota) = from_headers(h, at) {
+        persist(a, quota, at);
+    }
+}
+
+/// Stores the windows of a `codex.rate_limits` event; any other event is ignored.
+pub fn record_event(a: &Account, event: &Value) {
+    let at = now();
+    if let Some(quota) = from_event(event, at) {
+        persist(a, quota, at);
+    }
+}
+
+fn persist(a: &Account, quota: Quota, at: i64) {
+    let usage: Vec<(String, u64)> = quota
         .packs
         .iter()
-        .any(|p| p.used.is_some_and(|u| u >= 100.0));
+        .map(|p| {
+            (
+                p.name.clone(),
+                (p.used.unwrap_or(0.0) * 100.0).round() as u64,
+            )
+        })
+        .collect();
     {
         let mut last = LAST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
-        if !full && last.get(&a.id).is_some_and(|t| at - t < WRITE_INTERVAL) {
+        if last
+            .get(&a.id)
+            .is_some_and(|(t, used)| *used == usage && at - t < WRITE_INTERVAL)
+        {
             return;
         }
-        last.insert(a.id.clone(), at);
+        last.insert(a.id.clone(), (at, usage));
     }
     let _ = store::update(a.provider, &a.id, None, |account| {
         account.quota = Some(quota)

@@ -943,6 +943,44 @@ mod relay {
     }
 
     #[tokio::test]
+    async fn ws_rate_limits_event_updates_quota_on_a_reused_socket() {
+        let _sandbox = Sandbox::new();
+        let accounts = setup(1);
+        let server = upstream_with(
+            accept_all(),
+            Box::new(|call, _| {
+                if call.nth == 0 {
+                    return Step::Events(answer("resp_1", "a"));
+                }
+                let mut events = vec![json!({"type":"codex.rate_limits","rate_limits":{
+                    "primary":{"used_percent":55.0,"window_minutes":300,"reset_at":2_000_000_000}}})];
+                events.extend(answer("resp_2", "b"));
+                Step::Events(events)
+            }),
+            vec![("x-codex-primary-used-percent", "40"), ("x-codex-primary-window-minutes", "300")],
+        )
+        .await;
+        let mut client = connect().await;
+        client.turn(create(vec![user("u1")])).await;
+        let events = client.turn(continue_from("resp_1", vec![user("u2")])).await;
+        assert!(
+            events.iter().any(|e| e["type"] == "codex.rate_limits"),
+            "{events:?}"
+        );
+        assert_eq!(
+            server.handshakes().len(),
+            1,
+            "the second turn reused the socket"
+        );
+        let quota = store::get(Provider::ChatGpt, &accounts[0].id)
+            .unwrap()
+            .quota
+            .unwrap();
+        assert_eq!(quota.packs[0].used, Some(55.0));
+        assert_eq!(quota.packs[0].expires_at, Some(2_000_000_000));
+    }
+
+    #[tokio::test]
     async fn ws_forbidden_handshake_fails_over_without_refresh() {
         let _sandbox = Sandbox::new();
         let accounts = setup(2);

@@ -1072,24 +1072,71 @@ async fn send_records_quota_headers() {
 }
 
 #[test]
-fn quota_record_is_throttled_unless_a_window_is_full() {
+fn quota_record_writes_usage_changes_and_throttles_repeats() {
     let _sandbox = Sandbox::new();
     let a = store::upsert(chatgpt_account(), None).unwrap();
     let used = |n: &str| map(&[("x-codex-primary-used-percent", n)]);
-    let stored = || {
-        store::get(Provider::ChatGpt, &a.id)
-            .unwrap()
-            .quota
-            .unwrap()
-            .packs[0]
-            .used
-            .unwrap()
-    };
+    let stored = || store::get(Provider::ChatGpt, &a.id).unwrap().quota.unwrap();
     quota::record(&a, &used("10"));
-    quota::record(&a, &used("20"));
-    assert_eq!(stored(), 10.0);
+    let first = stored().updated_at;
+    // The newest usage of a burst is never dropped.
+    quota::record(&a, &used("12"));
+    assert_eq!(stored().packs[0].used, Some(12.0));
+    // An unchanged snapshot within 30 s is not rewritten.
+    store::update(Provider::ChatGpt, &a.id, None, |s| {
+        s.quota.as_mut().unwrap().updated_at = first - 1000
+    })
+    .unwrap();
+    quota::record(&a, &used("12"));
+    assert_eq!(stored().updated_at, first - 1000);
     quota::record(&a, &used("100"));
-    assert_eq!(stored(), 100.0);
+    assert_eq!(stored().packs[0].used, Some(100.0));
+}
+
+#[test]
+fn quota_from_websocket_rate_limits_event() {
+    let _sandbox = Sandbox::new();
+    let a = store::upsert(chatgpt_account(), None).unwrap();
+    let event = json!({
+        "type": "codex.rate_limits",
+        "plan_type": "free",
+        "rate_limits": {
+            "primary": {"used_percent": 3.0, "window_minutes": 300, "reset_at": 2_000_000_000},
+            "secondary": {"used_percent": 1.0, "window_minutes": 43200, "reset_at": 2_100_000_000}
+        }
+    });
+    let q = quota::from_event(&event, 1_000).unwrap();
+    let packs: Vec<_> = q
+        .packs
+        .iter()
+        .map(|p| (p.name.as_str(), p.used, p.expires_at))
+        .collect();
+    assert_eq!(
+        packs,
+        [
+            ("5h", Some(3.0), Some(2_000_000_000)),
+            ("30d", Some(1.0), Some(2_100_000_000))
+        ]
+    );
+    assert_eq!(q.remaining, Some(97.0));
+    assert!(quota::from_event(&json!({"type": "response.created"}), 1_000).is_none());
+    quota::record_event(&a, &event);
+    let stored = store::get(Provider::ChatGpt, &a.id).unwrap().quota.unwrap();
+    assert_eq!(stored.packs[0].used, Some(3.0));
+}
+
+#[test]
+fn quota_headers_prefer_absolute_reset_time() {
+    let h = map(&[
+        ("x-codex-primary-used-percent", "5"),
+        ("x-codex-primary-window-minutes", "300"),
+        ("x-codex-primary-reset-at", "2000000000"),
+        ("x-codex-primary-reset-after-seconds", "60"),
+    ]);
+    assert_eq!(
+        quota::from_headers(&h, 1_000).unwrap().packs[0].expires_at,
+        Some(2_000_000_000)
+    );
 }
 
 #[tokio::test]
