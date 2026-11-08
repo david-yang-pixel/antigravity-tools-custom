@@ -145,6 +145,7 @@ fn publish(models: &[(&str, Provider, &str)]) {
                     source_id: provider.source().into(),
                     native_model: (*native).into(),
                     extra_native_models: Vec::new(),
+                    extra_targets: Vec::new(),
                     enabled: true,
                     legacy: false,
                 })

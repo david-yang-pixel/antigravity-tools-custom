@@ -60,6 +60,7 @@ fn publication(public: &str, source: &str, native: &str) -> PublishedModel {
         source_id: source.into(),
         native_model: native.into(),
         extra_native_models: Vec::new(),
+        extra_targets: Vec::new(),
         enabled: true,
         legacy: false,
     }
@@ -660,6 +661,7 @@ fn verification_consent_selection_and_limits_are_enforced_without_io() {
                 last_verified_at: None,
                 ignored: false,
                 capabilities: Vec::new(),
+                channels: Vec::new(),
             })
             .collect(),
     };
@@ -1177,6 +1179,7 @@ fn extra_native_ids_reject_invalid_bindings() {
         (
             PublishedModel {
                 extra_native_models: many.clone(),
+                extra_targets: Vec::new(),
                 ..wb(&[])
             },
             "binds 17 extra native IDs; at most 16 are allowed",
@@ -1198,6 +1201,7 @@ fn extra_native_ids_reject_invalid_bindings() {
     draft.allow_unverified = true;
     draft.published_models.push(PublishedModel {
         extra_native_models: many[..MAX_EXTRA_NATIVE_MODELS].to_vec(),
+        extra_targets: Vec::new(),
         ..wb(&[])
     });
     save(draft, &[], &HashMap::new()).unwrap();
@@ -1258,4 +1262,129 @@ fn legacy_publication_keeps_exemption_when_an_extra_id_is_added() {
     let updated = resolve_existing("Legacy").unwrap().unwrap();
     assert!(updated.legacy);
     assert_eq!(updated.native_models(), vec!["Flash", "Flash-sg"]);
+}
+
+const CHATGPT: &str = "chatgpt:default";
+
+/// Adds discovered candidate identities of `source` straight to the stored registry.
+fn seed_candidates(source: &str, natives: &[&str]) {
+    let mut store = stored();
+    for native in natives {
+        store.candidates.push(CandidateRecord {
+            id: candidate_id(source, native),
+            source_id: source.into(),
+            native_model: (*native).into(),
+        });
+    }
+    write_atomic(
+        &registry_path().unwrap(),
+        &serde_json::to_vec(&store).unwrap(),
+    )
+    .unwrap();
+}
+fn target(source: &str, native: &str) -> ModelTarget {
+    ModelTarget {
+        source_id: source.into(),
+        native_model: native.into(),
+    }
+}
+
+#[test]
+fn cross_source_targets_round_trip_and_narrow_per_source() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb("cross", &["Flash", "Flash-sg"], &["Flash", "Flash-sg"], &[]);
+    view(&[], &HashMap::new()).unwrap();
+    seed_candidates(CHATGPT, &["gpt-x", "gpt-y"]);
+    let registry = view(&[], &HashMap::new()).unwrap();
+    let mut draft = request(&registry);
+    draft.allow_unverified = true;
+    let mut model = extra(
+        publication("Flash", WORKBUDDY_SOURCE, "Flash"),
+        &["Flash-sg"],
+    );
+    model.extra_targets = vec![target(CHATGPT, "gpt-x"), target(CHATGPT, "gpt-y")];
+    draft.published_models.push(model);
+    save(draft, &[], &HashMap::new()).unwrap();
+    let resolved = resolve_existing("Flash").unwrap().unwrap();
+    assert_eq!(resolved.sources(), vec![WORKBUDDY_SOURCE, CHATGPT]);
+    let own = resolved.for_source(WORKBUDDY_SOURCE).unwrap();
+    assert_eq!(own.native_models(), vec!["Flash", "Flash-sg"]);
+    assert!(own.extra_targets.is_empty());
+    let chatgpt = resolved.for_source(CHATGPT).unwrap();
+    assert_eq!(chatgpt.native_models(), vec!["gpt-x", "gpt-y"]);
+    assert_eq!(chatgpt.public_id, "Flash");
+    assert_eq!(publication_count(CHATGPT).unwrap(), 1);
+}
+
+#[test]
+fn cross_source_targets_reject_invalid_bindings_and_are_gated() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb("cross-bad", &["Flash", "Flash-sg"], &["Flash"], &[]);
+    seed_ag(&["same-name"]);
+    view(&ids(&["same-name"]), &HashMap::new()).unwrap();
+    seed_candidates(CHATGPT, &["gpt-x"]);
+    let registry = view(&[], &HashMap::new()).unwrap();
+    let wb = |targets: Vec<ModelTarget>| PublishedModel {
+        extra_targets: targets,
+        ..publication("Flash", WORKBUDDY_SOURCE, "Flash")
+    };
+    let cases = vec![
+        (
+            wb(vec![target(WORKBUDDY_SOURCE, "Flash-sg")]),
+            "is on the publication's own source",
+        ),
+        (
+            wb(vec![target(ANTIGRAVITY_SOURCE, "same-name")]),
+            "source antigravity:default binds exactly one native ID and cannot serve as a cross-source target",
+        ),
+        (
+            wb(vec![target(CHATGPT, "gpt-x"), target(CHATGPT, "gpt-x")]),
+            "target gpt-x of source chatgpt:default is listed more than once",
+        ),
+        (
+            wb(vec![target(CHATGPT, "missing")]),
+            "target missing is not a discovered model of source chatgpt:default",
+        ),
+        (
+            PublishedModel {
+                extra_targets: vec![target(CHATGPT, "gpt-x")],
+                ..publication("AgPub", ANTIGRAVITY_SOURCE, "same-name")
+            },
+            "cross-source targets need a source that pools accounts per native ID",
+        ),
+    ];
+    for (model, expected) in cases {
+        let mut draft = request(&registry);
+        draft.allow_unverified = true;
+        draft.published_models.push(model.clone());
+        let error = save(draft, &[], &HashMap::new()).unwrap_err();
+        assert!(error.contains(expected), "{model:?}: {error}");
+    }
+    // An unverified cross-source target needs explicit consent, like the primary.
+    let mut draft = request(&registry);
+    draft
+        .published_models
+        .push(wb(vec![target(CHATGPT, "gpt-x")]));
+    let error = save(draft, &[], &HashMap::new()).unwrap_err();
+    assert!(error.contains("allow_unverified"), "{error}");
+    assert_eq!(
+        view(&[], &HashMap::new()).unwrap().revision,
+        registry.revision
+    );
+}
+
+#[test]
+fn workbuddy_candidates_report_the_channels_that_list_them() {
+    let _dir = Sandbox::new();
+    view(&[], &HashMap::new()).unwrap();
+    seed_wb("realm", &["Flash", "Denied"], &[], &["Denied"]);
+    seed_candidates(CHATGPT, &["gpt-x"]);
+    let registry = view(&[], &HashMap::new()).unwrap();
+    assert_eq!(find(&registry, WORKBUDDY_SOURCE, "Flash").channels, ["cn"]);
+    assert!(find(&registry, WORKBUDDY_SOURCE, "Denied")
+        .channels
+        .is_empty());
+    assert!(find(&registry, CHATGPT, "gpt-x").channels.is_empty());
 }

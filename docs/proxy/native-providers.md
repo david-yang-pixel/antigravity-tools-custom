@@ -51,6 +51,39 @@ request a single public ID:
 }
 ```
 
+## Routing one public name to several sources
+
+A publication on a pooled source (WorkBuddy or a native account provider) may also
+bind native IDs of *other* pooled sources in `extra_targets`, for example a
+WorkBuddy model that also uses ChatGPT accounts. In the admin UI these appear in
+**Also route to** next to the own source's IDs, each labeled with its source and
+channel (`WorkBuddy 国内版 / CN`, `WorkBuddy 国际版 / Global`, `ChatGPT`).
+
+- Each source keeps its own dispatcher and account pool. Successive requests of the
+  publication start at successive sources (round-robin: own source, then the others
+  in order of first appearance in `extra_targets`), spreading load across them.
+- When a source refuses for a reason about the source itself (401, 403, 408, 429 or
+  5xx, e.g. every account rate-limited), the request moves on to the next source. A
+  request-level refusal (400, 413) or a response that already started is returned
+  as is.
+- Round-robin is per request, so consecutive turns of one conversation can land on
+  different sources and miss that source's prompt cache.
+- Own-source and cross-source extras share the limit of 16, and every newly bound
+  target needs basic-text evidence or `allow_unverified`, like the primary.
+- A Responses WebSocket session serves a publication's ChatGPT targets only.
+- Downgrade: as with extra IDs, clear `extra_targets` before downgrading to a build
+  that does not know the field.
+
+```json
+{
+  "public_id": "deepseek-v4.1-flash",
+  "source_id": "workbuddy:default",
+  "native_model": "deepseek-v4.1-flash",
+  "extra_native_models": ["deepseek-v4.1-flash-sg"],
+  "extra_targets": [{ "source_id": "chatgpt:default", "native_model": "gpt-model" }]
+}
+```
+
 ## Maintenance and rotation
 
 - Enabled accounts follow the global **API Proxy → Account Rotation & Scheduling**

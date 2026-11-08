@@ -1,4 +1,4 @@
-import type { CandidateModel, ModelCapability, ModelRegistryView, ModelSource, PublishedModel, RegistryCatalogModel, RegistryProtocol, SaveModelRegistryRequest } from '../../../types/modelRegistry';
+import type { CandidateModel, ModelCapability, ModelRegistryView, ModelSource, ModelTarget, PublishedModel, RegistryCatalogModel, RegistryProtocol, SaveModelRegistryRequest } from '../../../types/modelRegistry';
 
 export const verificationLabels = {
     unverified: '未验证 / Unverified', verified: '基础文本已验证 / Text verified', unavailable: '不可用 / Unavailable', failed: '验证失败 / Failed',
@@ -14,11 +14,44 @@ export const candidateFor = (view: ModelRegistryView, model: PublishedModel) =>
 export const pooledSource = (view: ModelRegistryView, sourceId: string) =>
     view.sources.find(s => s.id === sourceId)?.pools_native_models === true;
 export const nativeTargets = (model: PublishedModel) => [model.native_model, ...(model.extra_native_models ?? [])];
+/** Every target a publication routes to: own-source IDs first, then other sources' as `Source · ID`. */
+export const routedTargets = (view: ModelRegistryView, model: PublishedModel) => [...nativeTargets(model),
+    ...(model.extra_targets ?? []).map(t => `${view.sources.find(s => s.id === t.source_id)?.display_name || t.source_id} · ${t.native_model}`)];
+export const extraTargetCount = (model: PublishedModel) => (model.extra_native_models?.length ?? 0) + (model.extra_targets?.length ?? 0);
+
+const channelNames: Record<string, string> = { cn: '国内版 / CN', global: '国际版 / Global' };
+/** Upstream channels of a candidate, e.g. `WorkBuddy 国内版 / CN`; the source name alone without channels. */
+export function channelLabels(view: ModelRegistryView, candidate: CandidateModel): string[] {
+    const source = view.sources.find(s => s.id === candidate.source_id)?.display_name || candidate.source_id;
+    return candidate.channels?.length ? candidate.channels.map(c => `${source} ${channelNames[c] ?? c}`) : [source];
+}
+
+/** Whether `candidate` is routed by the draft besides its primary target. */
+export const isExtraTarget = (draft: PublishedModel, candidate: CandidateModel) => candidate.source_id === draft.source_id
+    ? !!draft.extra_native_models?.includes(candidate.native_model)
+    : !!draft.extra_targets?.some(t => t.source_id === candidate.source_id && t.native_model === candidate.native_model);
+
+/**
+ * Candidates a pooled publication may also route to: its own source's other IDs, then the IDs of
+ * every other pooled source. Ignored or unavailable candidates stay hidden unless already chosen.
+ */
 export function extraTargetOptions(view: ModelRegistryView, draft: PublishedModel): CandidateModel[] {
-    const chosen = new Set(draft.extra_native_models ?? []);
-    return view.candidates.filter(c => c.source_id === draft.source_id && c.native_model !== draft.native_model
-        && (chosen.has(c.native_model) || (!c.ignored && c.verification_status !== 'unavailable')))
-        .sort((a, b) => a.native_model.localeCompare(b.native_model));
+    if (!pooledSource(view, draft.source_id)) return [];
+    const order = (c: CandidateModel) => c.source_id === draft.source_id ? -1 : view.sources.findIndex(s => s.id === c.source_id);
+    return view.candidates.filter(c => pooledSource(view, c.source_id)
+        && !(c.source_id === draft.source_id && c.native_model === draft.native_model)
+        && (isExtraTarget(draft, c) || (!c.ignored && c.verification_status !== 'unavailable')))
+        .sort((a, b) => order(a) - order(b) || a.native_model.localeCompare(b.native_model));
+}
+
+/** Checks or unchecks an extra target; same-source IDs and other sources' targets keep separate lists. */
+export function withExtraTarget(draft: PublishedModel, candidate: CandidateModel, checked: boolean): PublishedModel {
+    const { extra_native_models: extras = [], extra_targets: targets = [], ...rest } = draft;
+    const same = candidate.source_id === draft.source_id;
+    const nextExtras = same ? extras.filter(id => id !== candidate.native_model).concat(checked ? [candidate.native_model] : []) : extras;
+    const nextTargets: ModelTarget[] = same ? targets : targets.filter(t => !(t.source_id === candidate.source_id && t.native_model === candidate.native_model))
+        .concat(checked ? [{ source_id: candidate.source_id, native_model: candidate.native_model }] : []);
+    return { ...rest, ...(nextExtras.length ? { extra_native_models: nextExtras } : {}), ...(nextTargets.length ? { extra_targets: nextTargets } : {}) };
 }
 
 /** Same-source candidates a publication may take as its primary target; the current one stays listed. */
@@ -51,7 +84,7 @@ export function filterCandidates(candidates: CandidateModel[], source: string, q
 
 export function filterPublications(view: ModelRegistryView, source: string, query: string, verification: string, state: string) {
     const text = query.trim().toLocaleLowerCase();
-    return view.published_models.filter(p => (!source || p.source_id === source)
+    return view.published_models.filter(p => (!source || p.source_id === source || !!p.extra_targets?.some(t => t.source_id === source))
         && (!state || p.enabled === (state === 'enabled'))
         && (!verification || (candidateFor(view, p)?.verification_status ?? 'unverified') === verification)
         && (!text || [p.public_id, p.display_name, p.native_model, p.source_id, view.sources.find(s => s.id === p.source_id)?.display_name ?? ''].some(value => value.toLocaleLowerCase().includes(text))));
@@ -90,12 +123,19 @@ const sameBinding = (previous: PublishedModel | undefined, draft: PublishedModel
 const newlyExposed = (previous: PublishedModel | undefined, draft: PublishedModel) => !sameBinding(previous, draft)
     || (!!previous && !previous.enabled && draft.enabled);
 
-// Extras are gated like the primary, except those already held by an unchanged, still-enabled record.
+// Extras (own-source IDs and other sources' targets) are gated like the primary, except
+// those already held by an unchanged, still-enabled record.
+const extraBindings = (model: PublishedModel): ModelTarget[] => [
+    ...(model.extra_native_models ?? []).map(native_model => ({ source_id: model.source_id, native_model })),
+    ...(model.extra_targets ?? []),
+];
+const targetKey = (t: ModelTarget) => JSON.stringify([t.source_id, t.native_model]);
 const gatedExtras = (previous: PublishedModel | undefined, draft: PublishedModel) => {
-    const held = newlyExposed(previous, draft) ? new Set<string>() : new Set(previous?.extra_native_models ?? []);
-    return (draft.extra_native_models ?? []).filter(id => !held.has(id));
+    const held = new Set(previous && !newlyExposed(previous, draft) ? extraBindings(previous).map(targetKey) : []);
+    return extraBindings(draft).filter(t => !held.has(targetKey(t)));
 };
-const extraCandidate = (view: ModelRegistryView, draft: PublishedModel, id: string) => candidateFor(view, { ...draft, native_model: id });
+const extraCandidate = (view: ModelRegistryView, target: ModelTarget) =>
+    view.candidates.find(c => c.source_id === target.source_id && c.native_model === target.native_model);
 
 export function publicationError(view: ModelRegistryView, drafts: PublishedModel[]): string | null {
     const ids = new Set(drafts.map(d => d.id));
@@ -110,7 +150,7 @@ export function publicationError(view: ModelRegistryView, drafts: PublishedModel
         const candidate = candidateFor(view, model);
         if (!existing && !candidate) return '候选已变化或移除，草稿保留。 / Candidate changed or removed; draft retained.';
         if (!(existing?.legacy && sameBinding(existing, model)) && newlyExposed(existing, model) && candidate?.verification_status === 'unavailable') return '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.';
-        if (gatedExtras(existing, model).some(id => extraCandidate(view, model, id)?.verification_status === 'unavailable')) return '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.';
+        if (gatedExtras(existing, model).some(t => extraCandidate(view, t)?.verification_status === 'unavailable')) return '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.';
         if (!existing && !view.sources.some(s => s.id === model.source_id && s.enabled)) return '来源未启用，不能新增上架。 / Enable the source before publishing.';
     }
     return null;
@@ -121,7 +161,7 @@ export function needsUnverifiedConfirmation(view: ModelRegistryView, drafts: Pub
         const previous = view.published_models.find(p => p.id === draft.id);
         const grandfathered = previous?.legacy && sameBinding(previous, draft);
         return (newlyExposed(previous, draft) && !grandfathered && candidateFor(view, draft)?.verification_status !== 'verified')
-            || gatedExtras(previous, draft).some(id => extraCandidate(view, draft, id)?.verification_status !== 'verified');
+            || gatedExtras(previous, draft).some(t => extraCandidate(view, t)?.verification_status !== 'verified');
     });
 }
 

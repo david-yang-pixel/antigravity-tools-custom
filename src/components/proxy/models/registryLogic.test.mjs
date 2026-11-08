@@ -255,3 +255,40 @@ test('every account-pool source asks for test content, as the backend requires',
     assert.match(upstream, /const ownPrompt = !!report && pooledSource\(view, report\.source_id\)/);
     assert.doesNotMatch(upstream, /= !!report && hasRealm\(/);
 });
+
+test('extra targets span every pooled source with channel labels; own-source IDs stay in extra_native_models', () => {
+    const chatgpt = { ...wb, id: 'chatgpt:default', provider_type: 'chatgpt', display_name: 'ChatGPT' };
+    const registry = view({ sources: [ag, wb, chatgpt], candidates: [candidate('c1', wb.id, 'a', { channels: ['cn'] }), candidate('c2', wb.id, 'a-sg', { channels: ['global'] }), candidate('c3', chatgpt.id, 'gpt-x'), candidate('c4', chatgpt.id, 'gpt-off', { verification_status: 'unavailable' }), candidate('c5', ag.id, 'ag-x')] });
+    const draft = publication('p', wb.id, 'a', 'alias');
+    const options = logic.extraTargetOptions(registry, draft);
+    assert.deepEqual(options.map(c => c.native_model), ['a-sg', 'gpt-x']);
+    assert.deepEqual(logic.channelLabels(registry, options[0]), ['WB source 国际版 / Global']);
+    assert.deepEqual(logic.channelLabels(registry, options[1]), ['ChatGPT']);
+    // Single-target sources offer nothing, so an Antigravity publication never routes elsewhere.
+    assert.deepEqual(logic.extraTargetOptions(registry, publication('q', ag.id, 'ag-x', 'ag')), []);
+    const both = logic.withExtraTarget(logic.withExtraTarget(draft, options[0], true), options[1], true);
+    assert.deepEqual(both.extra_native_models, ['a-sg']);
+    assert.deepEqual(both.extra_targets, [{ source_id: chatgpt.id, native_model: 'gpt-x' }]);
+    assert.equal(logic.isExtraTarget(both, options[1]), true);
+    assert.equal(logic.extraTargetCount(both), 2);
+    assert.deepEqual(logic.routedTargets(registry, both), ['a', 'a-sg', 'ChatGPT · gpt-x']);
+    const cleared = logic.withExtraTarget(logic.withExtraTarget(both, options[1], false), options[0], false);
+    assert.equal('extra_targets' in cleared || 'extra_native_models' in cleared, false);
+    // The source filter finds a publication through any of its sources.
+    const listed = view({ ...registry, published_models: [both] });
+    assert.equal(logic.filterPublications(listed, chatgpt.id, '', '', '').length, 1);
+});
+
+test('cross-source targets are gated like the primary', () => {
+    const chatgpt = { ...wb, id: 'chatgpt:default', provider_type: 'chatgpt', display_name: 'ChatGPT' };
+    const base = publication('p', wb.id, 'a', 'alias');
+    const candidates = [candidate('c1', wb.id, 'a', { verification_status: 'verified' }), candidate('c2', chatgpt.id, 'gpt-x'), candidate('c3', chatgpt.id, 'gpt-off', { verification_status: 'unavailable' }), candidate('c4', chatgpt.id, 'gpt-ok', { verification_status: 'verified' })];
+    const registry = view({ sources: [ag, wb, chatgpt], candidates, published_models: [base] });
+    const target = native_model => ({ source_id: chatgpt.id, native_model });
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [{ ...base, extra_targets: [target('gpt-ok')] }]), false);
+    assert.equal(logic.needsUnverifiedConfirmation(registry, [{ ...base, extra_targets: [target('gpt-x')] }]), true);
+    assert.equal(logic.publicationError(registry, [{ ...base, extra_targets: [target('gpt-off')] }]), '明确不可用的候选不能上架。 / Unavailable candidates cannot be published.');
+    // A held target stays exempt while the binding is unchanged.
+    const held = view({ sources: registry.sources, candidates, published_models: [{ ...base, extra_targets: [target('gpt-x')] }] });
+    assert.equal(logic.needsUnverifiedConfirmation(held, [{ ...base, extra_targets: [target('gpt-x')] }]), false);
+});

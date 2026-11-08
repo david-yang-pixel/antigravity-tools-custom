@@ -27,6 +27,13 @@ export interface CandidateModel {
     last_verified_at: number | null;
     ignored: boolean;
     capabilities: ModelCapability[];
+    /** Upstream channels whose accounts list this model (WorkBuddy realms: cn, global). */
+    channels?: string[];
+}
+/** One native ID on a named source. */
+export interface ModelTarget {
+    source_id: string;
+    native_model: string;
 }
 export interface PublishedModel {
     id: string;
@@ -36,6 +43,9 @@ export interface PublishedModel {
     native_model: string;
     // Extra same-source IDs scheduled with native_model; WorkBuddy/ChatGPT only, omitted when empty.
     extra_native_models?: string[];
+    // Native IDs on other pooled sources; requests alternate between the sources and skip
+    // a source that cannot serve. Omitted when empty.
+    extra_targets?: ModelTarget[];
     enabled: boolean;
     legacy: boolean;
 }
