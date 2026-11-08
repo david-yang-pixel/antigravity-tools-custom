@@ -89,20 +89,56 @@ pub fn add_fingerprints(imported: &mut Vec<String>, digests: impl IntoIterator<I
     let excess = imported.len().saturating_sub(MAX_IMPORTED_FINGERPRINTS);
     imported.drain(..excess);
 }
-pub fn upsert(mut account: Account, expected: Option<&str>) -> Result<Account, String> {
+pub fn upsert(account: Account, expected: Option<&str>) -> Result<Account, String> {
+    upsert_checked(account, expected, None)
+}
+pub(super) fn upsert_checked(
+    account: Account,
+    expected: Option<&str>,
+    revision: Option<&str>,
+) -> Result<Account, String> {
+    upsert_mode(account, expected, revision, None)
+}
+pub(super) fn upsert_new(
+    account: Account,
+    job_id: &str,
+    revision: &str,
+) -> Result<Account, String> {
+    upsert_mode(account, None, None, Some((job_id, revision)))
+}
+fn upsert_mode(
+    mut account: Account,
+    expected: Option<&str>,
+    revision: Option<&str>,
+    import_job: Option<(&str, &str)>,
+) -> Result<Account, String> {
     if account.uid.trim().is_empty() || account.credentials.access_token.is_empty() {
         return Err("Authorization returned no usable account identity".into());
     }
     let _guard = LOCK.lock().map_err(|_| "Account vault unavailable")?;
     let mut accounts = read(account.provider)?;
+    if let Some((id, revision)) = import_job {
+        if !read_imports(account.provider)?
+            .iter()
+            .any(|job| job.id == id && job.revision == revision)
+        {
+            return Err("Login import was removed or restarted".into());
+        }
+    }
     let position = accounts
         .iter()
         .position(|a| a.realm == account.realm && a.uid == account.uid);
+    if import_job.is_some() && position.is_some() {
+        return Err("This account was already imported; use its own row to reauthorize".into());
+    }
     if let Some(id) = expected {
         let previous = accounts
             .iter()
             .find(|a| a.id == id)
             .ok_or("Account was removed while authorizing")?;
+        if revision.is_some_and(|revision| revision != previous.revision) {
+            return Err("Account was reauthorized; discard the older operation".into());
+        }
         if previous.uid != account.uid || previous.realm != account.realm {
             return Err("Authorization belongs to a different account".into());
         }
@@ -120,6 +156,12 @@ pub fn upsert(mut account: Account, expected: Option<&str>) -> Result<Account, S
         );
         account.credentials.imported_refresh_sha256 = imported;
         account.auto_refresh = previous.auto_refresh;
+        if account.login_credentials.is_none() {
+            account.login_credentials = previous.login_credentials.clone();
+        }
+        if previous.login_credentials.is_some() {
+            account.reauthorization.auto = previous.reauthorization.auto;
+        }
         account.quota = previous.quota.clone();
         account.models = previous.models.clone();
         account.verified_models = previous.verified_models.clone();
@@ -134,6 +176,78 @@ pub fn upsert(mut account: Account, expected: Option<&str>) -> Result<Account, S
     }
     write(account.provider, &accounts)?;
     Ok(account)
+}
+/// All bindings are validated under the same vault lock, so a mismatch changes nothing.
+pub(super) fn bind_logins(
+    provider: Provider,
+    updates: &[(String, String, super::reauthorize::LoginCredentials)],
+    auto: bool,
+) -> Result<(), String> {
+    let _guard = LOCK.lock().map_err(|_| "Account vault unavailable")?;
+    let mut accounts = read(provider)?;
+    for (id, revision, _) in updates {
+        if !accounts
+            .iter()
+            .any(|a| a.id == *id && a.revision == *revision)
+        {
+            return Err("Account changed while binding login credentials; reload and retry".into());
+        }
+    }
+    for (id, _, login) in updates {
+        let a = accounts
+            .iter_mut()
+            .find(|a| a.id == *id)
+            .ok_or("Account no longer exists")?;
+        a.login_credentials = Some(login.clone());
+        a.reauthorization.auto = auto;
+        a.reauthorization.attempts = 0;
+        a.reauthorization.retry_at = 0;
+        a.reauthorization.error = None;
+    }
+    write(provider, &accounts)
+}
+fn imports_path(provider: Provider) -> Result<PathBuf, String> {
+    Ok(crate::modules::account::get_data_dir()?
+        .join(format!("{}_login_imports.enc", provider.key())))
+}
+fn read_imports(provider: Provider) -> Result<Vec<super::login_imports::Pending>, String> {
+    let raw = match std::fs::read_to_string(imports_path(provider)?) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("Cannot read login import vault".into()),
+    };
+    let decoded = crate::utils::crypto::decrypt_string(&raw)
+        .map_err(|_| "Cannot decrypt login import vault")?;
+    let jobs: Vec<super::login_imports::Pending> =
+        serde_json::from_str(&decoded).map_err(|_| "Invalid login import vault")?;
+    if jobs.len() > 500 {
+        return Err("Invalid login import vault".into());
+    }
+    Ok(jobs)
+}
+pub(super) fn imports(provider: Provider) -> Result<Vec<super::login_imports::Pending>, String> {
+    let _guard = LOCK.lock().map_err(|_| "Account vault unavailable")?;
+    read_imports(provider)
+}
+pub(super) fn change_imports<T>(
+    provider: Provider,
+    change: impl FnOnce(&mut Vec<super::login_imports::Pending>) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = LOCK.lock().map_err(|_| "Account vault unavailable")?;
+    let mut jobs = read_imports(provider)?;
+    let result = change(&mut jobs)?;
+    if jobs.len() > 500 {
+        return Err("At most 500 pending login imports".into());
+    }
+    let path = imports_path(provider)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| "Cannot create account directory")?;
+    }
+    let encoded = crate::utils::crypto::encrypt_string(
+        &serde_json::to_string(&jobs).map_err(|_| "Cannot encode login import vault")?,
+    )?;
+    crate::utils::fs::write_atomic_private(path, encoded.as_bytes())?;
+    Ok(result)
 }
 pub fn remove(provider: Provider, id: &str) -> Result<(), String> {
     let _guard = LOCK.lock().map_err(|_| "Account vault unavailable")?;

@@ -501,7 +501,9 @@ async fn open(
         });
         if upstream_answered {
             let refresh_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match tokio::time::timeout(refresh_budget, accounts::fresh(provider, &id, true)).await {
+            match tokio::time::timeout(refresh_budget, accounts::after_rejection(&lease.account))
+                .await
+            {
                 Ok(Ok(account)) => {
                     lease.account = account;
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

@@ -56,6 +56,8 @@ fn imported_chatgpt(value: &Value) -> Result<Account, String> {
     if a.credentials.refresh_token.is_empty() && a.credentials.access_token.is_empty() {
         return Err("Paste a ChatGPT refresh token, a {\"refresh_token\": \"...\"} object, a sub2api export or a Codex auth.json".into());
     }
+    a.login_credentials = super::reauthorize::from_json(value)?;
+    a.reauthorization.auto = a.login_credentials.is_some();
     Ok(a)
 }
 
@@ -205,9 +207,38 @@ pub async fn import(
     value: Value,
     account_id: Option<&str>,
 ) -> Result<AccountView, String> {
+    import_checked(provider, value, account_id, None).await
+}
+pub(super) async fn import_checked(
+    provider: Provider,
+    value: Value,
+    account_id: Option<&str>,
+    revision: Option<&str>,
+) -> Result<AccountView, String> {
+    import_inner(provider, value, account_id, revision, None).await
+}
+pub(super) async fn import_new(
+    provider: Provider,
+    value: Value,
+    auto: bool,
+    id: &str,
+    revision: &str,
+) -> Result<AccountView, String> {
+    import_inner(provider, value, None, None, Some((auto, id, revision))).await
+}
+async fn import_inner(
+    provider: Provider,
+    value: Value,
+    account_id: Option<&str>,
+    revision: Option<&str>,
+    new_login_auto: Option<(bool, &str, &str)>,
+) -> Result<AccountView, String> {
     let mut a = match provider {
         Provider::ChatGpt => imported_chatgpt(&value)?,
     };
+    if let Some((auto, _, _)) = new_login_auto {
+        a.reauthorization.auto = auto;
+    }
     let pasted = a.credentials.refresh_token.clone();
     reject_saved_credentials(&a, &store::all(provider)?)?;
     // A row re-import goes through that account's own node. A new account is validated
@@ -246,8 +277,13 @@ pub async fn import(
     };
     // From a token exchange on, the pasted refresh token is spent.
     if refreshed {
-        chatgpt::identity::apply(&mut a)
-            .map_err(|e| salvage_chatgpt(&a, &pasted, e.to_string()))?;
+        chatgpt::identity::apply(&mut a).map_err(|e| {
+            if revision.is_some() || new_login_auto.is_some() {
+                e.to_string()
+            } else {
+                salvage_chatgpt(&a, &pasted, e.to_string())
+            }
+        })?;
     }
     let a = save_import(
         provider,
@@ -255,9 +291,11 @@ pub async fn import(
         account_id,
         route.node.as_deref(),
         &pasted,
+        revision,
+        new_login_auto.map(|(_, id, revision)| (id, revision)),
     )
     .map_err(|error| {
-        if refreshed {
+        if refreshed && revision.is_none() && new_login_auto.is_none() {
             salvage_chatgpt(&a, &pasted, error)
         } else {
             error
@@ -325,6 +363,8 @@ fn save_import(
     account_id: Option<&str>,
     node: Option<&str>,
     pasted: &str,
+    revision: Option<&str>,
+    import_job: Option<(&str, &str)>,
 ) -> Result<Account, String> {
     if let Some(id) = account_id {
         let previous = store::get(provider, id)?;
@@ -343,7 +383,14 @@ fn save_import(
             .imported_refresh_sha256
             .push(fingerprint(pasted));
     }
-    let a = store::upsert(a, account_id)?;
+    if let Some(login) = &a.login_credentials {
+        super::reauthorize::check_email(&a, login)?;
+    }
+    let a = if let Some((id, revision)) = import_job {
+        store::upsert_new(a, id, revision)?
+    } else {
+        store::upsert_checked(a, account_id, revision)?
+    };
     egress::adopt(Pool::Native(provider), &a.id, node);
     Ok(a)
 }

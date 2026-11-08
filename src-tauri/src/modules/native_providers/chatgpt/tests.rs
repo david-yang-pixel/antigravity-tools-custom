@@ -1705,6 +1705,23 @@ async fn chatgpt_dead_refresh_disables_account() {
 }
 
 #[tokio::test]
+async fn concurrent_and_late_401s_reuse_the_first_rotated_credential() {
+    use crate::modules::native_providers::accounts;
+    let _sandbox = Sandbox::new();
+    let server = mock(200, &[], token_response(), false).await;
+    let a = store::upsert(chatgpt_account(), None).unwrap();
+    let (first, second) =
+        tokio::join!(accounts::after_rejection(&a), accounts::after_rejection(&a));
+    let first = first.unwrap();
+    assert_eq!(
+        first.credentials.access_token,
+        second.unwrap().credentials.access_token
+    );
+    accounts::after_rejection(&a).await.unwrap(); // an older HTTP/WS reply arrived later
+    assert_eq!(token_requests(&server), 1);
+}
+
+#[tokio::test]
 async fn chatgpt_sync_keeps_quota_and_updates_models() {
     use crate::modules::native_providers::{accounts, Model, Quota, QuotaPack};
     let _sandbox = Sandbox::new();

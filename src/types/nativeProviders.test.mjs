@@ -22,6 +22,7 @@ test('official free models stay ready at zero credits without bypassing other ac
     assert.equal(nativeAccountStatus({ ...account, models: [{ id: 'unknown-model' }] }, 1000), 'exhausted');
     assert.equal(nativeAccountStatus({ ...account, in_flight: 1 }, 1000), 'busy');
     assert.equal(nativeAccountStatus({ ...account, cooldown_until: 1010 }, 1000), 'cooldown');
-    assert.equal(nativeAccountStatus({ ...account, auth_error: 'expired' }, 1000), 'reauthorize');
+    assert.equal(nativeAccountStatus({ ...account, auth_error: 'expired', credential_dead: true }, 1000), 'reauthorize');
+    assert.equal(nativeAccountStatus({ ...account, auth_error: 'connection failed', credential_dead: false }, 1000), 'ready');
     assert.equal(nativeAccountStatus({ ...account, enabled: false }, 1000), 'disabled');
 });

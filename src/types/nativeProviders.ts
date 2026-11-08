@@ -6,6 +6,8 @@ export interface NativeQuota { unit: string; total: number | null; remaining: nu
 export interface NativeAccount {
     id: string; provider: NativeProvider; realm: NativeRealm; uid: string; nickname: string;
     enabled: boolean; auto_refresh: boolean; expires_at: number; can_refresh: boolean;
+    has_login_credentials: boolean; auto_reauthorize: boolean; reauthorizing: boolean; reauthorization_error: string | null;
+    credential_dead: boolean;
     models: NativeModel[]; models_updated_at: number; quota: NativeQuota | null;
     quota_error: string | null; models_error: string | null; auth_error: string | null;
     last_sync_at: number; next_sync_at: number; in_flight: number; cooldown_until: number;
@@ -13,10 +15,12 @@ export interface NativeAccount {
 }
 /** One account of a batch import (e.g. a sub2api export). */
 export interface BatchItem { label: string; status: 'imported' | 'skipped' | 'failed'; message: string; account: NativeAccount | null }
+export interface LoginImportJob { id: string; email: string; status: 'queued' | 'running' | 'failed'; error: string | null; created_at: number }
+export interface LoginImportReport { queued: LoginImportJob[]; skipped: string[] }
 export interface NativeSettings { provider: NativeProvider; enabled: boolean; preferred_account_id: string | null; env_locked: boolean }
 export function nativeAccountStatus(account: NativeAccount, now: number): 'disabled' | 'reauthorize' | 'exhausted' | 'cooldown' | 'busy' | 'ready' {
     if (!account.enabled) return 'disabled';
-    if (account.auth_error || (account.expires_at > 0 && account.expires_at <= now && !account.can_refresh)) return 'reauthorize';
+    if (account.credential_dead || (account.expires_at > 0 && account.expires_at <= now && !account.can_refresh)) return 'reauthorize';
     if (account.quota && !account.quota.unlimited && account.quota.remaining !== null && account.quota.remaining <= 0 && now - account.quota.updated_at < 900 && !account.models?.some(model => model.is_free)) return 'exhausted';
     if (account.cooldown_until > now) return 'cooldown';
     return account.in_flight > 0 ? 'busy' : 'ready';

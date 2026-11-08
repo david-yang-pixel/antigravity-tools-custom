@@ -132,6 +132,63 @@ repository/req_client_pool.go:20,53-59). Headers: `Authorization: Bearer <access
 - If the access token has expired and no refresh token exists, the account is disabled immediately
   (openai_token_provider.go:159-167).
 
+### Local account recovery integration
+
+The import dialog also accepts `email----password----2fa`, one account per line,
+without an existing account or a JSON file. It queues encrypted, persistent login
+tasks and adds each account after service authorization and OpenAI identity
+verification. The task list shows progress, failures, retry and removal. Repeated
+submissions reuse active tasks; existing emails are skipped. A removed or restarted
+task cannot commit its late result, and new imports cannot overwrite an existing
+account. Successful tasks are removed from the pending vault; no downloaded JSON
+files accumulate. New imports retain login material for subsequent recovery.
+
+The account table labels `expires_at` as **access token expiry**. An earlier
+`refresh_token_invalidated` answer means the issuer revoked the refresh credential;
+the future access-token date does not establish that the authorization is usable.
+The answer alone cannot identify who revoked it. Credentials supplied by a third
+party may also be refreshed or revoked outside this gateway.
+
+Imports retain `email`, `password` and `2fa` (also `two_factor` / `totp_secret`) when
+complete login material is present in CPA JSON. Sub2 exports from aisend currently
+omit password and 2FA. Import that JSON first, then use **Add login credentials** to
+bind its TXT format two (`email----password----2fa`) by the verified email. Binding
+validates the entire batch before writing to the existing encrypted vault.
+
+The authenticated Web admin and desktop commands share these operations:
+
+- `POST /api/native-accounts/login/save`: `{provider:"chatgpt", id?:string,
+  input:string, auto_reauthorize:boolean}`. Omit `id` to bind multiple saved accounts.
+- `POST /api/native-accounts/login/get`: `{provider:"chatgpt", id:string}`. Explicitly
+  reads one account's login material; ordinary account lists never return secrets.
+- `POST /api/native-accounts/reauthorize`: `{provider:"chatgpt", id:string}`. Starts
+  or resumes a job and returns immediately. The UI can show/copy the credential line.
+- `POST /api/native-accounts/update` also accepts `auto_reauthorize:boolean`.
+- `POST /api/native-accounts/login/import`: `{provider:"chatgpt", input:string,
+  auto_reauthorize:boolean}` creates/resumes new-account tasks and reports queued
+  jobs plus skipped emails. Jobs contain no passwords in their public projection.
+- `POST /api/native-accounts/login/imports`: `{provider:"chatgpt"}` lists tasks.
+- `POST /api/native-accounts/login/imports/retry` and `/remove` take
+  `{provider:"chatgpt", id:string}`. Failed tasks need an explicit retry; interrupted
+  submissions with an unknown result are never automatically posted again.
+
+Normal refresh-token renewal runs first. With automatic reauthorization enabled
+and background maintenance on, a revoked refresh credential (or an expired access
+token without a refresh token) schedules a recovery job. Administrator-disabled
+accounts are excluded. HTTP, WebSocket and metadata requests reuse a token already
+rotated for the rejected access token, instead of rotating again for late 401s.
+
+Recovery uses `https://login.dbc2api.top` by default. Set `ABV_CHATGPT_REAUTH_URL` to
+an HTTPS base URL implementing its `/api/batches` API; HTTP is accepted only on
+loopback for local integration tests. Login material is sent to that service, which
+performs the actual sign-in using its own infrastructure. Job IDs and bearer tokens
+are encrypted with the account vault and survive restarts. The worker polls jobs,
+downloads `?format=sub2`, verifies the returned identity through the saved account's
+egress route, and replaces that account's tokens. It preserves its ID, login material,
+egress binding and administrator preferences. A stale job cannot overwrite a newer
+authorization. Failed automatic submissions are delayed one hour, capped at three;
+an explicit recovery request resets the limit. Jobs time out after one hour.
+
 ## 3. Identity (JWT claims)
 
 The JWT payload is decoded without verifying the signature. OpenAI-specific claims are nested under
