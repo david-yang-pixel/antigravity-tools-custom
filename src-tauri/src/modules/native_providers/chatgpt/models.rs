@@ -62,7 +62,7 @@ pub async fn fetch(client: &reqwest::Client, a: &Account) -> Result<Vec<Model>, 
         .timeout(TIMEOUT)
         .send()
         .await
-        .map_err(|_| Failure::new(502, "ChatGPT model list connection failed"))?;
+        .map_err(|e| Failure::sending(&e, "ChatGPT model list connection failed"))?;
     let status = response.status().as_u16();
     let response_headers = response.headers().clone();
     let body = client::read_bytes(response).await?;

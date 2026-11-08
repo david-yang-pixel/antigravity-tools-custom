@@ -1754,3 +1754,69 @@ async fn chatgpt_sync_keeps_quota_and_updates_models() {
     assert_eq!(seen.len(), 1);
     assert!(seen[0].0.starts_with("/backend-api/codex/models"));
 }
+
+/// A SOCKS5 proxy that accepts the handshake and then reports the target unreachable,
+/// the way mihomo answers when an exit node cannot reach chatgpt.com.
+async fn unreachable_socks() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 512];
+                // Greeting -> "no authentication".
+                if socket.read(&mut buf).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let _ = socket.write_all(&[5, 0]).await;
+                // CONNECT request -> "host unreachable".
+                if socket.read(&mut buf).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let _ = socket.write_all(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+            });
+        }
+    });
+    format!("socks5h://{addr}")
+}
+
+#[tokio::test]
+async fn only_a_connection_that_never_opened_counts_as_unreached() {
+    use crate::modules::native_providers::http::Failure;
+    let through = |proxy: &str| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(proxy).unwrap())
+            .build()
+            .unwrap()
+    };
+    // The exit node cannot reach the target: nothing was sent upstream.
+    let proxy = unreachable_socks().await;
+    let error = through(&proxy)
+        .get("https://chatgpt.com/backend-api/codex/models")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(Failure::sending(&error, "x").unreached, "{error:?}");
+    // A server that accepted the connection but never answered was reached: the request
+    // may have been processed, so it must not be retried elsewhere.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _hold = tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            open.push(socket);
+        }
+    });
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(300))
+        .build()
+        .unwrap()
+        .get(format!("http://{addr}/"))
+        .send()
+        .await
+        .unwrap_err();
+    assert!(!Failure::sending(&error, "x").unreached, "{error:?}");
+}

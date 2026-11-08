@@ -3,7 +3,9 @@
 //! upstream traffic (inference, refresh, models, quota, login) leaves through one node
 //! of an airport subscription, served by a managed mihomo process. An account bound to
 //! a node fails closed when that node is unusable: it never falls back to the server's
-//! own address, and it is never moved onto another node.
+//! own address. It stays on its node unless the pool's `auto_rebind` is on: then an
+//! hourly check moves accounts off a node that failed two tests in a row onto the
+//! healthy node with the fewest accounts and lowest delay.
 //!
 //! All pools share one subscription and one mihomo process; each pool has its own
 //! switch and bindings. Within a pool a node serves at most `max_accounts_per_node`
@@ -105,6 +107,8 @@ fn all_users() -> HashSet<String> {
 #[serde(default)]
 pub struct PoolSettings {
     pub enabled: bool,
+    /// Move this pool's accounts off a node that keeps failing (see [`rebind_dead_nodes`]).
+    pub auto_rebind: bool,
     /// Account id -> node name, or `DIRECT`.
     pub bindings: BTreeMap<String, String>,
 }
@@ -127,6 +131,8 @@ pub struct Settings {
     /// Executable to run. Config file / `ABV_MIHOMO_PATH` only: the admin API can
     /// never choose what the server executes.
     pub mihomo_path: String,
+    /// WorkBuddy's `auto_rebind`; other pools keep theirs in `pools`.
+    pub auto_rebind: bool,
     /// WorkBuddy account id -> node name, or `DIRECT`.
     pub bindings: BTreeMap<String, String>,
     /// Other pools by [`Pool::key`].
@@ -142,6 +148,7 @@ impl Default for Settings {
             auto_assign: true,
             max_accounts_per_node: DEFAULT_MAX_ACCOUNTS_PER_NODE,
             mihomo_path: String::new(),
+            auto_rebind: false,
             bindings: BTreeMap::new(),
             pools: BTreeMap::new(),
         }
@@ -159,6 +166,18 @@ impl Settings {
         match pool {
             Pool::WorkBuddy => self.enabled = enabled,
             _ => self.pools.entry(pool.key().into()).or_default().enabled = enabled,
+        }
+    }
+    pub fn auto_rebind(&self, pool: Pool) -> bool {
+        match pool {
+            Pool::WorkBuddy => self.auto_rebind,
+            _ => self.pools.get(pool.key()).is_some_and(|p| p.auto_rebind),
+        }
+    }
+    fn set_auto_rebind(&mut self, pool: Pool, on: bool) {
+        match pool {
+            Pool::WorkBuddy => self.auto_rebind = on,
+            _ => self.pools.entry(pool.key().into()).or_default().auto_rebind = on,
         }
     }
     pub fn bindings(&self, pool: Pool) -> &BTreeMap<String, String> {
@@ -192,6 +211,8 @@ pub struct Update {
     pub exclude: Option<String>,
     pub auto_assign: Option<bool>,
     pub max_accounts_per_node: Option<usize>,
+    /// This pool's automatic move off failing nodes.
+    pub auto_rebind: Option<bool>,
 }
 #[derive(Serialize)]
 pub struct NodeView {
@@ -213,6 +234,7 @@ pub struct View {
     pub exclude: String,
     pub auto_assign: bool,
     pub max_accounts_per_node: usize,
+    pub auto_rebind: bool,
     pub env_locked: Vec<&'static str>,
     pub running: bool,
     pub binary: Option<String>,
@@ -487,6 +509,35 @@ fn choose(nodes: &[Node], settings: &Settings, pool: Pool) -> Option<String> {
         .map(|(_, n)| n.name.clone())
 }
 
+/// Nodes an authorization could not reach upstream through, per pool, until the time
+/// they may be offered again. Auto-assignment treats them as failed meanwhile.
+static UNREACHABLE: LazyLock<Mutex<HashMap<(&'static str, String), i64>>> =
+    LazyLock::new(Default::default);
+const UNREACHABLE_SECS: i64 = 15 * 60;
+
+/// Keeps `node` out of this pool's auto-assignment for 15 minutes after a request
+/// through it never reached the upstream.
+pub fn report_unreachable(pool: Pool, node: &str) {
+    if node == DIRECT {
+        return;
+    }
+    if let Ok(mut marks) = UNREACHABLE.lock() {
+        marks.insert((pool.key(), node.to_owned()), now() + UNREACHABLE_SECS);
+    }
+}
+fn mark_unreachable(pool: Pool, nodes: &mut [Node]) {
+    let now = now();
+    let Ok(mut marks) = UNREACHABLE.lock() else {
+        return;
+    };
+    marks.retain(|_, until| *until > now);
+    for node in nodes {
+        if marks.contains_key(&(pool.key(), node.name.clone())) {
+            node.alive = Some(false);
+        }
+    }
+}
+
 /// Longest wait for the bulk test that gives untested nodes a result before assignment.
 const ASSIGN_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -504,13 +555,17 @@ fn needs_test(nodes: &[Node], settings: &Settings, pool: Pool) -> bool {
 /// prefers nodes that passed and skips those that failed. If the test cannot run, the
 /// untested list is used as before.
 async fn assignable_nodes(settings: &Settings, pool: Pool) -> Result<Vec<Node>, String> {
-    let nodes = mihomo::nodes(settings).await?;
+    let mut nodes = mihomo::nodes(settings).await?;
+    mark_unreachable(pool, &mut nodes);
     if !needs_test(&nodes, settings, pool) {
         return Ok(nodes);
     }
     match tokio::time::timeout(ASSIGN_TEST_TIMEOUT, mihomo::test_all(settings)).await {
         Ok(Ok(())) => match mihomo::nodes(settings).await {
-            Ok(tested) => Ok(tested),
+            Ok(mut tested) => {
+                mark_unreachable(pool, &mut tested);
+                Ok(tested)
+            }
             Err(error) => {
                 tracing::warn!(
                     "Egress: reloading tested nodes failed ({error}); assigning untested"
@@ -744,6 +799,7 @@ pub async fn view(pool: Pool) -> Result<View, String> {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let (include, exclude) = filters(&settings);
+    let auto_rebind = settings.auto_rebind(pool);
     let nodes: Vec<NodeView> = nodes
         .into_iter()
         .map(|node| NodeView {
@@ -763,6 +819,7 @@ pub async fn view(pool: Pool) -> Result<View, String> {
         exclude: settings.exclude,
         auto_assign: settings.auto_assign,
         max_accounts_per_node: settings.max_accounts_per_node,
+        auto_rebind,
         env_locked: locks.fields(pool),
         running: status.running,
         binary: status.binary,
@@ -793,6 +850,9 @@ pub async fn save(pool: Pool, update: Update) -> Result<View, String> {
         }
         if let Some(auto) = update.auto_assign {
             s.auto_assign = auto;
+        }
+        if let Some(on) = update.auto_rebind {
+            s.set_auto_rebind(pool, on);
         }
         if let Some(max) = update
             .max_accounts_per_node
@@ -909,6 +969,108 @@ pub async fn refresh(pool: Pool) -> Result<View, String> {
     view(pool).await
 }
 
+const REBIND_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(120);
+const REBIND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Gap between the two tests a node must fail before its accounts move.
+const REBIND_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+const REBIND_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Bound subscription nodes of pools with `auto_rebind` whose last test failed.
+fn failing_bound(nodes: &[Node], settings: &Settings) -> HashSet<String> {
+    let failed: HashSet<&str> = nodes
+        .iter()
+        .filter(|n| n.alive == Some(false))
+        .map(|n| n.name.as_str())
+        .collect();
+    Pool::all()
+        .filter(|pool| settings.enabled(*pool) && settings.auto_rebind(*pool))
+        .flat_map(|pool| settings.bindings(pool).values())
+        .filter(|node| failed.contains(node.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Moves one account from `from` to what auto-assignment picks now, unless its binding
+/// changed since the test or no healthy node has room. Returns the new node.
+fn rebind_one(
+    settings: &mut Settings,
+    pool: Pool,
+    nodes: &[Node],
+    id: &str,
+    from: &str,
+) -> Option<String> {
+    if settings.bindings(pool).get(id).map(String::as_str) != Some(from) {
+        return None;
+    }
+    let to = choose(nodes, settings, pool)?;
+    settings
+        .bindings_mut(pool)
+        .insert(id.to_owned(), to.clone());
+    Some(to)
+}
+
+/// Moves accounts of `auto_rebind` pools off nodes that failed two bulk tests
+/// `REBIND_RECHECK` apart, onto what auto-assignment would pick (healthy, fewest
+/// accounts, lowest delay, within the per-node limit). Accounts on working nodes,
+/// `DIRECT` accounts and accounts with nowhere better to go stay where they are.
+/// Returns `(account id, from, to)` for every move.
+pub async fn rebind_dead_nodes() -> Result<Vec<(String, String, String)>, String> {
+    let settings = load()?;
+    if !settings.routing()
+        || !Pool::all().any(|pool| settings.enabled(pool) && settings.auto_rebind(pool))
+    {
+        return Ok(Vec::new());
+    }
+    let test = || async {
+        tokio::time::timeout(REBIND_TEST_TIMEOUT, mihomo::test_all(&settings))
+            .await
+            .map_err(|_| "Egress node test timed out".to_string())??;
+        mihomo::nodes(&settings).await
+    };
+    let suspects = failing_bound(&test().await?, &settings);
+    if suspects.is_empty() {
+        return Ok(Vec::new());
+    }
+    tokio::time::sleep(REBIND_RECHECK).await;
+    let nodes = test().await?;
+    let dead: HashSet<String> = failing_bound(&nodes, &settings)
+        .intersection(&suspects)
+        .cloned()
+        .collect();
+    let mut moved = Vec::new();
+    for pool in Pool::all() {
+        let current = load()?;
+        if !current.enabled(pool) || !current.auto_rebind(pool) {
+            continue;
+        }
+        let ids: HashSet<String> = pool.account_ids()?.into_iter().collect();
+        let stranded: Vec<(String, String)> = current
+            .bindings(pool)
+            .iter()
+            .filter(|(id, node)| ids.contains(*id) && dead.contains(*node))
+            .map(|(id, node)| (id.clone(), node.clone()))
+            .collect();
+        for (id, from) in stranded {
+            let _guard = ASSIGN_LOCK.lock().await;
+            let to = edit(|s| Ok(rebind_one(s, pool, &nodes, &id, &from)))?;
+            if let Some(to) = to {
+                mihomo::forget_selection(&pool.user(&id)).await;
+                tracing::info!(
+                    "Egress: moved {} account {id} from failing node {from} to {to}",
+                    pool.key()
+                );
+                moved.push((id, from, to));
+            } else {
+                tracing::warn!(
+                    "Egress: {} account {id} stays on failing node {from}: no healthy node has room",
+                    pool.key()
+                );
+            }
+        }
+    }
+    Ok(moved)
+}
+
 /// Keeps mihomo running while any pool routes through the subscription and restarts
 /// it after a crash.
 pub fn start() {
@@ -921,6 +1083,15 @@ pub fn start() {
         loop {
             reconcile().await;
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+    tauri::async_runtime::spawn(async {
+        tokio::time::sleep(REBIND_FIRST_CHECK).await;
+        loop {
+            if let Err(error) = rebind_dead_nodes().await {
+                tracing::warn!("Egress: hourly node check failed: {error}");
+            }
+            tokio::time::sleep(REBIND_INTERVAL).await;
         }
     });
 }
@@ -1138,6 +1309,100 @@ mod tests {
         let failed = [node("dead", None, Some(false))];
         assert!(!needs_test(&failed, &settings, NATIVE));
         assert_eq!(choose(&failed, &settings, NATIVE), None);
+    }
+
+    #[test]
+    fn auto_rebind_is_per_pool_and_only_failing_bound_nodes_count() {
+        let mut settings = Settings::default();
+        settings.set_enabled(NATIVE, true);
+        settings.set_enabled(WB, true);
+        settings
+            .bindings_mut(NATIVE)
+            .insert("c1".into(), "dead".into());
+        settings
+            .bindings_mut(NATIVE)
+            .insert("c2".into(), "ok".into());
+        settings
+            .bindings_mut(NATIVE)
+            .insert("c3".into(), DIRECT.into());
+        settings
+            .bindings_mut(WB)
+            .insert("w1".into(), "dead-wb".into());
+        let nodes = [
+            node("dead", None, Some(false)),
+            node("dead-wb", None, Some(false)),
+            node("ok", Some(60), Some(true)),
+            node("spare", Some(90), Some(true)),
+        ];
+        assert!(
+            failing_bound(&nodes, &settings).is_empty(),
+            "off by default"
+        );
+        settings.set_auto_rebind(NATIVE, true);
+        assert!(settings.auto_rebind(NATIVE) && !settings.auto_rebind(WB));
+        // WorkBuddy keeps its node: only the ChatGPT account's failing node counts.
+        let failing = failing_bound(&nodes, &settings);
+        assert_eq!(failing, HashSet::from(["dead".to_string()]));
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["pools"]["chatgpt"]["auto_rebind"], true);
+        assert_eq!(value["auto_rebind"], false);
+    }
+
+    #[test]
+    fn a_rebind_moves_to_the_least_loaded_healthy_node_and_respects_concurrent_changes() {
+        let mut settings = Settings::default();
+        settings
+            .bindings_mut(NATIVE)
+            .insert("a".into(), "dead".into());
+        settings
+            .bindings_mut(NATIVE)
+            .insert("b".into(), "busy".into());
+        let nodes = [
+            node("dead", Some(10), Some(false)),
+            node("busy", Some(20), Some(true)),
+            node("idle", Some(80), Some(true)),
+        ];
+        // `idle` has no accounts, so it wins over the faster but loaded `busy`.
+        assert_eq!(
+            rebind_one(&mut settings, NATIVE, &nodes, "a", "dead").as_deref(),
+            Some("idle")
+        );
+        assert_eq!(settings.bindings(NATIVE)["a"], "idle");
+        // An account that moved (or was rebound by hand) since the test is left alone.
+        assert_eq!(rebind_one(&mut settings, NATIVE, &nodes, "a", "dead"), None);
+        // Nowhere with room: the account stays on its node.
+        let mut full = exclusive();
+        full.bindings_mut(NATIVE).insert("x".into(), "dead".into());
+        full.bindings_mut(NATIVE).insert("y".into(), "busy".into());
+        full.bindings_mut(NATIVE).insert("z".into(), "idle".into());
+        assert_eq!(rebind_one(&mut full, NATIVE, &nodes, "x", "dead"), None);
+        assert_eq!(full.bindings(NATIVE)["x"], "dead");
+    }
+
+    #[test]
+    fn a_node_an_import_could_not_reach_is_skipped_for_a_while() {
+        let mut nodes = vec![
+            node("unreach-a", Some(10), Some(true)),
+            node("unreach-b", Some(50), Some(true)),
+        ];
+        report_unreachable(NATIVE, "unreach-a");
+        mark_unreachable(NATIVE, &mut nodes);
+        assert_eq!(nodes[0].alive, Some(false));
+        assert_eq!(
+            choose(&nodes, &Settings::default(), NATIVE).as_deref(),
+            Some("unreach-b")
+        );
+        // Other pools are unaffected; the mark lapses.
+        let mut other = vec![node("unreach-a", Some(10), Some(true))];
+        mark_unreachable(WB, &mut other);
+        assert_eq!(other[0].alive, Some(true));
+        UNREACHABLE
+            .lock()
+            .unwrap()
+            .insert((NATIVE.key(), "unreach-a".into()), now() - 1);
+        let mut later = vec![node("unreach-a", Some(10), Some(true))];
+        mark_unreachable(NATIVE, &mut later);
+        assert_eq!(later[0].alive, Some(true));
     }
 
     #[test]

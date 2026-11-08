@@ -7,7 +7,7 @@ import { showToast } from '../common/ToastContainer';
 export interface EgressNode { name: string; type: string; delay: number | null; alive: boolean | null; eligible: boolean; accounts: number; full: boolean }
 export interface EgressView {
     enabled: boolean; subscription_configured: boolean; subscription_host: string | null;
-    include: string; exclude: string; auto_assign: boolean; max_accounts_per_node: number; env_locked: string[];
+    include: string; exclude: string; auto_assign: boolean; max_accounts_per_node: number; auto_rebind: boolean; env_locked: string[];
     running: boolean; binary: string | null; error: string | null;
     nodes: EgressNode[]; bindings: Record<string, string>;
 }
@@ -105,7 +105,9 @@ export default function WorkBuddyEgressPanel({ view, onChange, api = WORKBUDDY_E
                             onBlur={() => { const max = Number(maxAccounts); if (Number.isInteger(max) && max >= 1 && max <= 20 && max !== view.max_accounts_per_node) void save({ max_accounts_per_node: max }); else setMaxAccounts(String(view.max_accounts_per_node)); }} /></label>
                 </div>
                 <p className="leading-relaxed text-gray-500">{t('workbuddy.egress.max_accounts_hint')}</p>
-                <p className="leading-relaxed text-gray-500">{t('workbuddy.egress.fail_closed_hint')}</p>
+                <label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" checked={view.auto_rebind} disabled={!!busy}
+                    onChange={e => void save({ auto_rebind: e.target.checked })} />{t('workbuddy.egress.auto_rebind')}</label>
+                <p className="leading-relaxed text-gray-500">{t(view.auto_rebind ? 'workbuddy.egress.auto_rebind_hint' : 'workbuddy.egress.fail_closed_hint')}</p>
                 {view.binary && <p className="break-all text-gray-500">{t('workbuddy.egress.binary', { path: view.binary })}</p>}
                 {view.env_locked.length > 0 && <p className="text-amber-600">{t('workbuddy.env_locked')}</p>}
             </>}
