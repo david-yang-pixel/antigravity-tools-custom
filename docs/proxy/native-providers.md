@@ -161,8 +161,10 @@ redirects.
   airport subscription, like WorkBuddy (see `docs/WORKBUDDY_UPSTREAM.md`). The
   subscription link, node filters and auto-assign are shared with WorkBuddy, and
   one mihomo process serves both; the switch and bindings are per source. Within
-  ChatGPT a node serves one account; a WorkBuddy account and a ChatGPT account may
-  share a node because they talk to different services.
+  ChatGPT a node serves at most `max_accounts_per_node` accounts (default 3,
+  1–20, counted per source; auto-assign fills the least-loaded node first); a
+  WorkBuddy account and a ChatGPT account may share a node because they talk to
+  different services.
 - Credential import validation, refresh, model and inference requests all use the
   account's node. An import claims a free node and the new account keeps it; a
   re-import uses the account's bound node. An import of a saved account through a
@@ -182,6 +184,7 @@ redirects.
 | `ABV_CHATGPT_EGRESS_ENABLED` | `true`/`false`; locks ChatGPT's egress switch |
 | `ABV_EGRESS_SUBSCRIPTION` | Shared subscription link (`ABV_WORKBUDDY_EGRESS_SUBSCRIPTION` is still read) |
 | `ABV_MIHOMO_PATH` | mihomo executable |
+| `ABV_EGRESS_MAX_ACCOUNTS_PER_NODE` | `1`–`20`; accounts of one source per node (default 3); locks the panel field |
 
 ## Headless admin API
 
