@@ -11,7 +11,10 @@ push main, deploy, or make real upstream inference calls during development.
 - A public model explicitly binds one source and an ordered list of native IDs
   of that source: the primary `native_model` plus up to 16 `extra_native_models`
   (WorkBuddy and native account providers only). Same-name providers do not
-  silently steal each other's routes.
+  silently steal each other's routes. Such a publication may also name
+  `extra_targets` on other pooled sources (e.g. WorkBuddy + ChatGPT); requests
+  rotate across the sources and skip to the next one on a source refusal
+  (401/403/408/429/5xx). See `docs/proxy/native-providers.md`.
 - Initial migration preserves legacy public IDs, their effective provider, and
   existing billing identity. Prices/free-model rules and balances are untouched.
 - Unpublished models are denied at inference entry points, for master and user
@@ -41,11 +44,13 @@ interface CandidateModel {
   verification_status: 'unverified' | 'verified' | 'unavailable' | 'failed';
   last_verified_at: number | null; ignored: boolean;
   capabilities: ModelCapability[];
+  channels: string[]; // WorkBuddy realms (cn, global) of enabled accounts listing it
 }
 interface PublishedModel {
   id: string; public_id: string; display_name: string;
   source_id: string; native_model: string;
   extra_native_models?: string[]; // omitted when empty; same source, unique, != native_model
+  extra_targets?: { source_id: string; native_model: string }[]; // other pooled sources, omitted when empty
   enabled: boolean; legacy: boolean;
 }
 interface ModelRegistryView {

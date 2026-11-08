@@ -697,6 +697,7 @@ async fn native_model_discovery_requires_explicit_publication_and_keeps_source_b
                 source_id: p.source().into(),
                 native_model: "shared-model".into(),
                 extra_native_models: Vec::new(),
+                extra_targets: Vec::new(),
                 enabled: true,
                 legacy: false,
             })
@@ -1253,6 +1254,7 @@ fn publication_targets_lease_the_only_enabled_accounts_native_id() {
         source_id: Provider::ChatGpt.source().into(),
         native_model: "shared-model".into(),
         extra_native_models: vec!["shared-model-sg".into()],
+        extra_targets: Vec::new(),
         enabled: true,
         legacy: false,
     };

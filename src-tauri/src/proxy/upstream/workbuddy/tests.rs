@@ -133,6 +133,7 @@ async fn middleware(State(settings): State<Settings>, request: Request, next: Ne
             .into(),
             native_model: "claude-sonnet-4-6".into(),
             extra_native_models: Vec::new(),
+            extra_targets: Vec::new(),
             enabled: true,
             legacy: false,
         });
@@ -1525,6 +1526,7 @@ async fn workbuddy_group_binding_sends_each_account_its_own_native_id() {
         source_id: crate::modules::model_registry::WORKBUDDY_SOURCE.into(),
         native_model: "claude-sonnet-4-6".into(),
         extra_native_models: vec!["claude-sonnet-4-6-sg".into()],
+        extra_targets: Vec::new(),
         enabled: true,
         legacy: false,
     };
@@ -1608,6 +1610,7 @@ async fn workbuddy_registry_binding_wins_over_colliding_or_missing_settings_alia
         source_id: crate::modules::model_registry::ANTIGRAVITY_SOURCE.into(),
         native_model: "claude-sonnet-4-6".into(),
         extra_native_models: Vec::new(),
+        extra_targets: Vec::new(),
         enabled: true,
         legacy: false,
     };
@@ -1891,6 +1894,7 @@ async fn workbuddy_monitor_capture_names_the_native_id_actually_sent() {
         source_id: crate::modules::model_registry::WORKBUDDY_SOURCE.into(),
         native_model: "claude-sonnet-4-6".into(),
         extra_native_models: vec!["claude-sonnet-4-6-sg".into()],
+        extra_targets: Vec::new(),
         enabled: true,
         legacy: false,
     };

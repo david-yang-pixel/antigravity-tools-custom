@@ -6336,14 +6336,14 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             .await;
         }
 
-        // A connection whose first generating turn names a ChatGPT publication is relayed to
-        // the ChatGPT upstream for the rest of its lifetime.
+        // A connection whose first generating turn names a publication with a ChatGPT target
+        // is relayed to the ChatGPT upstream for the rest of its lifetime.
         let chatgpt = websocket_frame_model(&payload, &session_state)
             .and_then(|model| {
                 crate::proxy::middleware::model_registry::resolve_public_model(&model).ok()
             })
-            .filter(|published| {
-                published.source_id == crate::modules::native_providers::Provider::ChatGpt.source()
+            .and_then(|published| {
+                published.for_source(crate::modules::native_providers::Provider::ChatGpt.source())
             });
         let prewarm = should_handle_prewarm_locally(&payload, &session_state);
         if let Some(published) = chatgpt.as_ref() {

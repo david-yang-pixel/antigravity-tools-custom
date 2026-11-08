@@ -1505,6 +1505,7 @@ mod tests {
                 source_id: crate::modules::model_registry::ANTIGRAVITY_SOURCE.into(),
                 native_model: resolve_legacy_model_route(id, &HashMap::new()),
                 extra_native_models: Vec::new(),
+                extra_targets: Vec::new(),
                 enabled: true,
                 legacy: true,
             };

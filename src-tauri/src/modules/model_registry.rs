@@ -65,6 +65,17 @@ pub struct CandidateModel {
     pub last_verified_at: Option<i64>,
     pub ignored: bool,
     pub capabilities: Vec<ModelCapability>,
+    /// Upstream channels of the source whose accounts list this model (WorkBuddy realms:
+    /// `cn`, `global`); empty when the source has no channels or none lists it.
+    #[serde(default)]
+    pub channels: Vec<String>,
+}
+/// One native ID on a named source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct ModelTarget {
+    pub source_id: String,
+    pub native_model: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -78,6 +89,11 @@ pub struct PublishedModel {
     /// treats `[native_model] + extra_native_models` as one ordered target list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_native_models: Vec<String>,
+    /// Native IDs on other pooled sources. Each source serves a request with its own
+    /// dispatcher; successive requests rotate across the sources (see [`Self::sources`])
+    /// and a source that cannot serve hands the request to the next one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_targets: Vec<ModelTarget>,
     pub enabled: bool,
     pub legacy: bool,
 }
@@ -87,6 +103,41 @@ impl PublishedModel {
         std::iter::once(self.native_model.as_str())
             .chain(self.extra_native_models.iter().map(String::as_str))
             .collect()
+    }
+    /// Sources serving this publication in rotation order: its own source first, then
+    /// every other source of `extra_targets` in order of first appearance.
+    pub fn sources(&self) -> Vec<&str> {
+        let mut sources = vec![self.source_id.as_str()];
+        for target in &self.extra_targets {
+            if !sources.contains(&target.source_id.as_str()) {
+                sources.push(target.source_id.as_str());
+            }
+        }
+        sources
+    }
+    /// The single-source binding a dispatcher of `source_id` serves: the same record and
+    /// public ID, narrowed to that source's targets, without cross-source targets. `None`
+    /// when this publication has no target on that source.
+    pub fn for_source(&self, source_id: &str) -> Option<PublishedModel> {
+        if source_id == self.source_id {
+            return Some(PublishedModel {
+                extra_targets: Vec::new(),
+                ..self.clone()
+            });
+        }
+        let mut natives = self
+            .extra_targets
+            .iter()
+            .filter(|target| target.source_id == source_id)
+            .map(|target| target.native_model.clone());
+        let native_model = natives.next()?;
+        Some(PublishedModel {
+            source_id: source_id.to_string(),
+            native_model,
+            extra_native_models: natives.collect(),
+            extra_targets: Vec::new(),
+            ..self.clone()
+        })
     }
 }
 /// Whether the source's dispatcher pools accounts per native model, so a publication may bind
@@ -226,6 +277,8 @@ struct Discovery {
     sources: Vec<ModelSource>,
     records: BTreeMap<String, CandidateRecord>,
     observations: HashMap<String, Observation>,
+    /// Channels (WorkBuddy realms) of the enabled accounts that list a candidate.
+    channels: HashMap<String, BTreeSet<&'static str>>,
     // Account identifiers are transient and never serialized as discovery data.
     all_accounts: HashMap<String, HashSet<String>>,
     eligible_accounts: HashMap<String, HashSet<String>>,
@@ -386,6 +439,60 @@ fn validate_extra_native_models(
     }
     Ok(())
 }
+/// Checks a publication's cross-source targets against the candidates `known` (by
+/// candidate ID). Both the publication's source and every target source must pool
+/// accounts per native ID, and the extras of all sources share one count limit.
+fn validate_extra_targets(
+    model: &PublishedModel,
+    known: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if model.extra_targets.is_empty() {
+        return Ok(());
+    }
+    let publication = if valid_id(&model.public_id, MAX_ID_BYTES) {
+        format!("Publication {}", model.public_id)
+    } else {
+        "A publication".to_string()
+    };
+    let own = &model.source_id;
+    if !pools_native_models(own) {
+        return Err(format!(
+            "{publication}: source {own} binds exactly one native ID; cross-source targets need a source that pools accounts per native ID"
+        ));
+    }
+    let count = model.extra_native_models.len() + model.extra_targets.len();
+    if count > MAX_EXTRA_NATIVE_MODELS {
+        return Err(format!(
+            "{publication} binds {count} extra native IDs; at most {MAX_EXTRA_NATIVE_MODELS} are allowed"
+        ));
+    }
+    let mut targets = HashSet::new();
+    for target in &model.extra_targets {
+        let (source, native) = (&target.source_id, &target.native_model);
+        validate_native(source, native)?;
+        if source == own {
+            return Err(format!(
+                "{publication}: target {native} is on the publication's own source {own}; list it in extra_native_models"
+            ));
+        }
+        if !pools_native_models(source) {
+            return Err(format!(
+                "{publication}: source {source} binds exactly one native ID and cannot serve as a cross-source target"
+            ));
+        }
+        if !targets.insert(target) {
+            return Err(format!(
+                "{publication}: target {native} of source {source} is listed more than once"
+            ));
+        }
+        if !known(&candidate_id(source, native)) {
+            return Err(format!(
+                "{publication}: target {native} is not a discovered model of source {source}; discover it first"
+            ));
+        }
+    }
+    Ok(())
+}
 fn validate_store(store: &StoredRegistry) -> Result<(), String> {
     if store.schema_version != SCHEMA_VERSION {
         return Err("Unsupported model registry schema version".into());
@@ -426,6 +533,7 @@ fn validate_store(store: &StoredRegistry) -> Result<(), String> {
             return Err("Invalid or duplicate publication/source/target".into());
         }
         validate_extra_native_models(model, |id| candidates.contains(id))?;
+        validate_extra_targets(model, |id| candidates.contains(id))?;
     }
     let mut ignored = HashSet::new();
     for id in &store.ignored_candidate_ids {
@@ -611,6 +719,7 @@ fn discover() -> Result<Discovery, String> {
         settings,
         records: BTreeMap::new(),
         observations: HashMap::new(),
+        channels: HashMap::new(),
         all_accounts: HashMap::new(),
         eligible_accounts: HashMap::new(),
         skipped: Vec::new(),
@@ -692,10 +801,21 @@ fn discover() -> Result<Discovery, String> {
             .chain(a.verified_models.keys().map(String::as_str))
             .chain(a.unavailable_models.iter().map(String::as_str))
             .collect();
+        let realm = match a.realm {
+            workbuddy::accounts::Realm::Cn => "cn",
+            workbuddy::accounts::Realm::Global => "global",
+        };
         for native in natives {
             let Some(id) = discovery.record(WORKBUDDY_SOURCE, native)? else {
                 continue;
             };
+            if a.enabled && a.supports_model(native) {
+                discovery
+                    .channels
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(realm);
+            }
             if eligible {
                 let verified_at = a.verified_models.get(native).copied().filter(|at| *at > 0);
                 let unavailable = a.unavailable_models.contains(native);
@@ -1044,6 +1164,7 @@ fn initialize(
                 source_id,
                 native_model,
                 extra_native_models: Vec::new(),
+                extra_targets: Vec::new(),
                 enabled: true,
                 legacy: true,
             })
@@ -1290,6 +1411,11 @@ fn candidate_view(
         last_verified_at,
         ignored: store.ignored_candidate_ids.contains(&record.id),
         capabilities: capabilities(&record.source_id, status == "verified", &accounts),
+        channels: discovery
+            .channels
+            .get(&record.id)
+            .map(|channels| channels.iter().map(|c| c.to_string()).collect())
+            .unwrap_or_default(),
     }
 }
 fn make_view(store: &StoredRegistry, discovery: &Discovery) -> ModelRegistryView {
@@ -1399,9 +1525,9 @@ pub fn save(
             );
         }
         let reenabled = old.is_some_and(|old| !old.enabled && model.enabled);
-        let gate = |native: &str| -> Result<(), String> {
+        let gate = |source: &str, native: &str| -> Result<(), String> {
             let candidate = candidate_views
-                .get(&candidate_id(&model.source_id, native))
+                .get(&candidate_id(source, native))
                 .ok_or("Unknown source/native candidate; discover it before publishing")?;
             if candidate.verification_status == "unavailable" {
                 return Err("Definitively unavailable candidates cannot be newly published".into());
@@ -1415,8 +1541,9 @@ pub fn save(
             return Err("Unknown source/native candidate; discover it before publishing".into());
         }
         validate_extra_native_models(model, |id| candidate_views.contains_key(id))?;
+        validate_extra_targets(model, |id| candidate_views.contains_key(id))?;
         if (!same_binding || reenabled) && !grandfathered {
-            gate(&model.native_model)?;
+            gate(&model.source_id, &model.native_model)?;
         }
         // The legacy exemption covers the primary target only: every extra ID bound by this
         // save (or all of them on a new binding / re-enable) is gated like a fresh target.
@@ -1425,7 +1552,15 @@ pub fn save(
                 && !reenabled
                 && old.is_some_and(|old| old.extra_native_models.contains(extra));
             if !unchanged {
-                gate(extra)?;
+                gate(&model.source_id, extra)?;
+            }
+        }
+        for target in &model.extra_targets {
+            let unchanged = same_binding
+                && !reenabled
+                && old.is_some_and(|old| old.extra_targets.contains(target));
+            if !unchanged {
+                gate(&target.source_id, &target.native_model)?;
             }
         }
     }
@@ -1469,7 +1604,7 @@ pub fn publication_count(source_id: &str) -> Result<usize, String> {
             .store
             .published_models
             .iter()
-            .filter(|model| model.source_id == source_id)
+            .filter(|model| model.sources().contains(&source_id))
             .count()
     }))
 }

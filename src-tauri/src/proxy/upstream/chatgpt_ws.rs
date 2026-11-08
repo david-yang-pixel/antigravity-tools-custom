@@ -340,9 +340,12 @@ impl Relay {
             .filter(|m| !m.is_empty())
             .unwrap_or(&self.public)
             .to_owned();
-        let published = match resolve_public_model(&model) {
-            Ok(p) if p.source_id == Provider::ChatGpt.source() => p,
-            Ok(_) => {
+        // Only the publication's ChatGPT targets are served on this connection.
+        let published = match resolve_public_model(&model)
+            .map(|p| p.for_source(Provider::ChatGpt.source()))
+        {
+            Ok(Some(p)) => p,
+            Ok(None) => {
                 return self
                     .reply(error_event(
                         400,
