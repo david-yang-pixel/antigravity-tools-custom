@@ -15,6 +15,9 @@ pub(super) const ALL_GROUP: &str = "wb-all";
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTART_BACKOFF: Duration = Duration::from_secs(15);
+const TEST_URL: &str = "https://www.gstatic.com/generate_204";
+/// Per-node timeout of a bulk test; nodes are tested concurrently.
+const TEST_TIMEOUT_MS: &str = "5000";
 
 struct Runtime {
     child: tokio::process::Child,
@@ -420,7 +423,14 @@ async fn spawn(
         verified: HashSet::new(),
     };
     state.runtime = Some(runtime);
-    wait_provider(&api).await
+    wait_provider(&api).await?;
+    // A new process has no test history: measure every node once in the background so
+    // the panel and auto-assignment see which nodes work without a manual test.
+    tokio::spawn(async move {
+        test_group(&api).await;
+        tracing::info!("Egress: tested every subscription node after mihomo started");
+    });
+    Ok(())
 }
 
 /// Starts, restarts or reconfigures mihomo so that `users` can route. Returns the API.
@@ -533,21 +543,22 @@ pub(super) async fn delay(
         .filter(|d| *d > 0)
         .ok_or_else(|| "Node timed out or cannot reach the upstream".into())
 }
+/// Tests every subscription node concurrently. Failed nodes are recorded in provider
+/// history as delay 0; the call itself may report an error when every node fails,
+/// which is still a completed test.
+async fn test_group(api: &Api) {
+    let _ = api
+        .get(
+            &["group", ALL_GROUP, "delay"],
+            &[("url", TEST_URL), ("timeout", TEST_TIMEOUT_MS)],
+        )
+        .await;
+}
 pub(super) async fn test_all(settings: &Settings) -> Result<(), String> {
     let mut state = STATE.lock().await;
     let api = ensure(&mut state, settings, &[]).await?;
     drop(state);
-    // Failed nodes are recorded in provider history as delay 0; the call itself may
-    // report an error when every node fails, which is still a completed test.
-    let _ = api
-        .get(
-            &["group", ALL_GROUP, "delay"],
-            &[
-                ("url", "https://www.gstatic.com/generate_204"),
-                ("timeout", "5000"),
-            ],
-        )
-        .await;
+    test_group(&api).await;
     Ok(())
 }
 pub(super) async fn refresh(settings: &Settings) -> Result<(), String> {

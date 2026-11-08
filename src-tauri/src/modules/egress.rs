@@ -487,6 +487,50 @@ fn choose(nodes: &[Node], settings: &Settings, pool: Pool) -> Option<String> {
         .map(|(_, n)| n.name.clone())
 }
 
+/// Longest wait for the bulk test that gives untested nodes a result before assignment.
+const ASSIGN_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Whether the node auto-assignment would pick has never been tested. A pick that
+/// passed a test needs none; failed nodes are never picked.
+fn needs_test(nodes: &[Node], settings: &Settings, pool: Pool) -> bool {
+    choose(nodes, settings, pool)
+        .and_then(|name| nodes.iter().find(|n| n.name == name))
+        .is_some_and(|n| n.alive.is_none())
+}
+/// Nodes for auto-assignment, each with a test result when it matters. After a restart
+/// mihomo has no test history, and an untested node would otherwise be taken in
+/// subscription order even if it cannot connect. When the node `choose` would pick is
+/// untested, every node is tested once first (concurrently, bounded); `choose` then
+/// prefers nodes that passed and skips those that failed. If the test cannot run, the
+/// untested list is used as before.
+async fn assignable_nodes(settings: &Settings, pool: Pool) -> Result<Vec<Node>, String> {
+    let nodes = mihomo::nodes(settings).await?;
+    if !needs_test(&nodes, settings, pool) {
+        return Ok(nodes);
+    }
+    match tokio::time::timeout(ASSIGN_TEST_TIMEOUT, mihomo::test_all(settings)).await {
+        Ok(Ok(())) => match mihomo::nodes(settings).await {
+            Ok(tested) => Ok(tested),
+            Err(error) => {
+                tracing::warn!(
+                    "Egress: reloading tested nodes failed ({error}); assigning untested"
+                );
+                Ok(nodes)
+            }
+        },
+        Ok(Err(error)) => {
+            tracing::warn!(
+                "Egress: node test before assignment failed ({error}); assigning untested"
+            );
+            Ok(nodes)
+        }
+        Err(_) => {
+            tracing::warn!("Egress: node test before assignment timed out; assigning untested");
+            Ok(nodes)
+        }
+    }
+}
+
 /// Keeps a subscription node off the pool's free list until authorization finishes.
 pub struct LoginHold {
     token: String,
@@ -549,7 +593,7 @@ async fn binding(settings: &Settings, pool: Pool, account_id: &str) -> Result<St
     if let Some(node) = settings.bindings(pool).get(account_id) {
         return Ok(node.clone());
     }
-    let nodes = mihomo::nodes(&settings).await?;
+    let nodes = assignable_nodes(&settings, pool).await?;
     let node =
         choose(&nodes, &settings, pool).ok_or("No free egress node is left in the subscription")?;
     let id = account_id.to_owned();
@@ -617,7 +661,7 @@ pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRou
         None => {
             let _assign = ASSIGN_LOCK.lock().await;
             let settings = load()?;
-            let nodes = mihomo::nodes(&settings).await?;
+            let nodes = assignable_nodes(&settings, pool).await?;
             let node = choose(&nodes, &settings, pool)
                 .ok_or("No free egress node is left in the subscription")?;
             let hold = LoginHold::reserve(pool, &node)?;
@@ -1072,6 +1116,28 @@ mod tests {
             choose(&nodes, &Settings::default(), WB).as_deref(),
             Some("A")
         );
+    }
+
+    #[test]
+    fn only_an_untested_pick_triggers_a_test_before_assignment() {
+        let settings = Settings::default();
+        // After a restart nothing is tested: the pick is untested, so test first.
+        let fresh = [node("dead", None, None), node("good", None, None)];
+        assert!(needs_test(&fresh, &settings, NATIVE));
+        // Once tested, the failed node is skipped and the passing one needs no test.
+        let tested = [
+            node("dead", None, Some(false)),
+            node("good", Some(80), Some(true)),
+        ];
+        assert!(!needs_test(&tested, &settings, NATIVE));
+        assert_eq!(choose(&tested, &settings, NATIVE).as_deref(), Some("good"));
+        // A passing free node wins over untested ones, so no test is needed.
+        let mixed = [node("new", None, None), node("good", Some(80), Some(true))];
+        assert!(!needs_test(&mixed, &settings, NATIVE));
+        // Every node failed: nothing to pick and nothing to test.
+        let failed = [node("dead", None, Some(false))];
+        assert!(!needs_test(&failed, &settings, NATIVE));
+        assert_eq!(choose(&failed, &settings, NATIVE), None);
     }
 
     #[test]
