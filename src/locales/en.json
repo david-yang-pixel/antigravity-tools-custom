@@ -16,7 +16,7 @@
     "emptyHint": "Add your {{provider}} account to get started.",
     "account": "Account",
     "egress": "Egress node",
-    "egressDescription": "When enabled, each {{provider}} account stays on one node of your airport subscription. Chat, renewal, model, quota and authorization traffic all leave through that node. The subscription link, node filters and auto-assign are shared with WorkBuddy; the switch and node bindings are separate: within one source a node serves one account, while a WorkBuddy account and a {{provider}} account may use the same node. A binding is not moved later; when its node is unusable the account fails instead of falling back to the server address. When off, the upstream proxy setting in API Proxy applies. Requires mihomo on the server (bundled in the Docker image).",
+    "egressDescription": "When enabled, each {{provider}} account stays on one node of your airport subscription. Chat, renewal, model, quota and authorization traffic all leave through that node. The subscription link, node filters and auto-assign are shared with WorkBuddy; the switch and node bindings are separate: within one source a node serves up to the configured number of accounts (3 by default), while a WorkBuddy account and a {{provider}} account may use the same node. A binding is not moved later; when its node is unusable the account fails instead of falling back to the server address. When off, the upstream proxy setting in API Proxy applies. Requires mihomo on the server (bundled in the Docker image).",
     "balance": "Official balance",
     "health": "Status",
     "authorization": "Authorization expiry",
@@ -2412,14 +2412,14 @@
     },
     "egress": {
       "title": "Egress nodes (airport subscription)",
-      "description": "When enabled, each WorkBuddy account stays on one node of your airport subscription. Chat, refresh, model, credit, check-in and login traffic all leave through that node. Auto-assign only takes a node no account is using, and the binding is not moved later. A new account cannot be assigned when no free node remains. The exit address is whatever that node currently uses, and it comes from the subscription. Requires mihomo on the server (bundled in the Docker image).",
+      "description": "When enabled, each WorkBuddy account stays on one node of your airport subscription. Chat, refresh, model, credit, check-in and login traffic all leave through that node. Each node serves at most the configured number of accounts (3 by default); auto-assign prefers the node with the fewest accounts, and the binding is not moved later. A new account cannot be assigned when every node is full. The exit address is whatever that node currently uses, and it comes from the subscription. Requires mihomo on the server (bundled in the Docker image).",
       "subscription": "Subscription link",
       "subscription_kept": "Configured ({{host}}); leave empty to keep",
       "link_required": "Add a subscription link first",
       "include": "Auto-assign only from (regex, optional)",
       "include_placeholder": "e.g. HK|Hong Kong|JP",
       "exclude": "Auto-assign excludes (regex)",
-      "auto_assign": "Give each unbound account its own free node",
+      "auto_assign": "Assign each unbound account to a node that is not full",
       "fail_closed_hint": "If a node is unusable, that account's requests fail and move to another account. They are not moved to a different node and never fall back to a direct connection. Choose \"Direct\" for accounts that should connect directly. Direct accounts share this server's address.",
       "binary": "mihomo: {{path}}",
       "status_off": "Off",
@@ -2436,10 +2436,13 @@
       "auto": "Auto-assign",
       "direct": "Direct",
       "missing": "{{name}} (not in the current subscription)",
-      "taken": "in use",
+      "taken": "full",
       "test_account": "Test this account's node latency",
       "latency": "{{ms}} ms",
-      "timeout": "timed out"
+      "timeout": "timed out",
+      "max_accounts": "Max accounts per node",
+      "max_accounts_hint": "How many accounts of one source a node may serve (1–20); WorkBuddy and ChatGPT accounts are counted separately. Only later assignments are affected; existing bindings stay.",
+      "node_accounts": "{{count}}/{{max}} accounts"
     }
   }
 }

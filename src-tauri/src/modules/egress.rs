@@ -6,10 +6,11 @@
 //! own address, and it is never moved onto another node.
 //!
 //! All pools share one subscription and one mihomo process; each pool has its own
-//! switch and bindings. A node is exclusive within a pool: auto-assignment and manual
-//! assignment both refuse a node another account of the same pool already holds. Pools
-//! talk to unrelated upstream services, so a WorkBuddy account and a ChatGPT account may
-//! use the same node. The exit address is whatever that node currently uses; this
+//! switch and bindings. Within a pool a node serves at most `max_accounts_per_node`
+//! accounts (default 3): auto-assignment and manual assignment both refuse a full node,
+//! and auto-assignment fills the least-loaded node first. Pools are counted separately:
+//! they talk to unrelated upstream services, so WorkBuddy and ChatGPT accounts may share
+//! a node. The exit address is whatever that node currently uses; this
 //! process does not allocate public addresses. `DIRECT` is an explicit per-account
 //! choice and shares this server's address.
 //!
@@ -28,6 +29,10 @@ use std::{
 };
 
 pub const DIRECT: &str = "DIRECT";
+/// Accounts of one pool a node serves unless configured otherwise.
+pub const DEFAULT_MAX_ACCOUNTS_PER_NODE: usize = 3;
+const MAX_ACCOUNTS_PER_NODE_LIMIT: usize = 20;
+const MAX_ACCOUNTS_ENV: &str = "ABV_EGRESS_MAX_ACCOUNTS_PER_NODE";
 /// Airport placeholder entries (quota, expiry, website) are not real exits.
 const DEFAULT_EXCLUDE: &str =
     r"(?i)(剩余|流量|到期|过期|套餐|官网|网址|expire|traffic|remaining|reset)";
@@ -115,8 +120,10 @@ pub struct Settings {
     /// Auto-assignment only considers nodes matching `include` and not `exclude`.
     pub include: String,
     pub exclude: String,
-    /// New or unbound accounts take one unused healthy node on first use.
+    /// New or unbound accounts take one healthy node that is not full on first use.
     pub auto_assign: bool,
+    /// Accounts of one pool a single node may serve (1-20).
+    pub max_accounts_per_node: usize,
     /// Executable to run. Config file / `ABV_MIHOMO_PATH` only: the admin API can
     /// never choose what the server executes.
     pub mihomo_path: String,
@@ -133,6 +140,7 @@ impl Default for Settings {
             include: String::new(),
             exclude: DEFAULT_EXCLUDE.into(),
             auto_assign: true,
+            max_accounts_per_node: DEFAULT_MAX_ACCOUNTS_PER_NODE,
             mihomo_path: String::new(),
             bindings: BTreeMap::new(),
             pools: BTreeMap::new(),
@@ -183,6 +191,7 @@ pub struct Update {
     pub include: Option<String>,
     pub exclude: Option<String>,
     pub auto_assign: Option<bool>,
+    pub max_accounts_per_node: Option<usize>,
 }
 #[derive(Serialize)]
 pub struct NodeView {
@@ -192,6 +201,8 @@ pub struct NodeView {
     pub eligible: bool,
     /// Accounts of this pool bound to the node.
     pub accounts: usize,
+    /// The node has reached `max_accounts_per_node` for this pool.
+    pub full: bool,
 }
 #[derive(Serialize)]
 pub struct View {
@@ -201,6 +212,7 @@ pub struct View {
     pub include: String,
     pub exclude: String,
     pub auto_assign: bool,
+    pub max_accounts_per_node: usize,
     pub env_locked: Vec<&'static str>,
     pub running: bool,
     pub binary: Option<String>,
@@ -271,6 +283,7 @@ fn stored() -> Result<Settings, String> {
 #[derive(Default)]
 struct Locks {
     subscription: bool,
+    max_accounts: bool,
     enabled: HashSet<&'static str>,
 }
 impl Locks {
@@ -281,6 +294,9 @@ impl Locks {
         }
         if self.subscription {
             fields.push("subscription_url");
+        }
+        if self.max_accounts {
+            fields.push("max_accounts_per_node");
         }
         fields
     }
@@ -306,10 +322,25 @@ fn overrides(settings: &mut Settings) -> Result<Locks, String> {
         settings.subscription_url = value.trim().to_owned();
         locks.subscription = true;
     }
+    if let Some(max) = max_accounts_override()? {
+        settings.max_accounts_per_node = max;
+        locks.max_accounts = true;
+    }
     if let Ok(value) = std::env::var("ABV_MIHOMO_PATH") {
         settings.mihomo_path = value;
     }
     Ok(locks)
+}
+fn max_accounts_override() -> Result<Option<usize>, String> {
+    std::env::var(MAX_ACCOUNTS_ENV)
+        .ok()
+        .map(|value| {
+            value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{MAX_ACCOUNTS_ENV} must be a number from 1 to 20"))
+        })
+        .transpose()
 }
 fn validate(settings: &Settings) -> Result<(), String> {
     let url = settings.subscription_url.as_str();
@@ -323,6 +354,9 @@ fn validate(settings: &Settings) -> Result<(), String> {
         if pattern.len() > 500 || regex::Regex::new(pattern).is_err() {
             return Err("Node filters must be valid regular expressions".into());
         }
+    }
+    if !(1..=MAX_ACCOUNTS_PER_NODE_LIMIT).contains(&settings.max_accounts_per_node) {
+        return Err("Accounts per node must be from 1 to 20".into());
     }
     let invalid = |bindings: &BTreeMap<String, String>| {
         bindings.len() > 1000
@@ -350,7 +384,17 @@ fn edit<T>(change: impl FnOnce(&mut Settings) -> Result<T, String>) -> Result<T,
         .lock()
         .map_err(|_| "Egress settings unavailable")?;
     let mut settings = stored()?;
+    // Checks inside `change` must see the per-node limit in force; the override itself
+    // is never written back.
+    let saved_max = settings.max_accounts_per_node;
+    let max_override = max_accounts_override()?;
+    if let Some(max) = max_override {
+        settings.max_accounts_per_node = max;
+    }
     let result = change(&mut settings)?;
+    if max_override.is_some() {
+        settings.max_accounts_per_node = saved_max;
+    }
     validate(&settings)?;
     let data =
         serde_json::to_vec_pretty(&settings).map_err(|_| "Cannot serialize egress settings")?;
@@ -367,47 +411,62 @@ fn eligible(name: &str, include: &Option<regex::Regex>, exclude: &Option<regex::
     include.as_ref().is_none_or(|r| r.is_match(name))
         && exclude.as_ref().is_none_or(|r| !r.is_match(name))
 }
-fn held_nodes(pool: Pool) -> HashSet<String> {
+/// Nodes reserved by in-progress logins of this pool, with how many logins hold each.
+fn held_nodes(pool: Pool) -> HashMap<String, usize> {
     let now = now();
-    HOLDS
-        .lock()
-        .map(|mut holds| {
-            holds.retain(|_, (_, _, until)| *until > now);
-            holds
-                .values()
-                .filter(|(key, _, _)| *key == pool.key())
-                .map(|(_, node, _)| node.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut held = HashMap::new();
+    if let Ok(mut holds) = HOLDS.lock() {
+        holds.retain(|_, (_, _, until)| *until > now);
+        for (key, node, _) in holds.values() {
+            if *key == pool.key() {
+                *held.entry(node.clone()).or_default() += 1;
+            }
+        }
+    }
+    held
 }
-/// `true` when another saved account of this pool already has this node.
-/// `DIRECT` is not a subscription node and may be selected for more than one account.
+/// Accounts of this pool bound to each subscription node. `DIRECT` is not a subscription
+/// node and never counts.
+fn bound_counts<'a>(
+    settings: &'a Settings,
+    pool: Pool,
+    except: Option<&str>,
+) -> HashMap<&'a str, usize> {
+    let mut counts = HashMap::new();
+    for (id, node) in settings.bindings(pool) {
+        if node != DIRECT && Some(id.as_str()) != except {
+            *counts.entry(node.as_str()).or_default() += 1;
+        }
+    }
+    counts
+}
+/// `true` when other saved accounts of this pool already fill this node.
 fn bound_elsewhere(settings: &Settings, pool: Pool, node: &str, except: Option<&str>) -> bool {
+    node != DIRECT
+        && bound_counts(settings, pool, except)
+            .get(node)
+            .is_some_and(|n| *n >= settings.max_accounts_per_node)
+}
+/// `true` when other accounts and in-progress logins of this pool fill this node.
+fn node_in_use(settings: &Settings, pool: Pool, node: &str, except: Option<&str>) -> bool {
     if node == DIRECT {
         return false;
     }
-    settings
-        .bindings(pool)
-        .iter()
-        .any(|(id, bound)| bound == node && Some(id.as_str()) != except)
+    let bound = bound_counts(settings, pool, except)
+        .get(node)
+        .copied()
+        .unwrap_or(0);
+    bound + held_nodes(pool).get(node).copied().unwrap_or(0) >= settings.max_accounts_per_node
 }
-/// `true` when another account or an in-progress login of this pool already has this node.
-fn node_in_use(settings: &Settings, pool: Pool, node: &str, except: Option<&str>) -> bool {
-    bound_elsewhere(settings, pool, node, except) || held_nodes(pool).contains(node)
-}
-/// One node no account of this pool uses. Tested-alive nodes win, then lower delay.
-/// Nodes whose last test failed are skipped. A node already given to an account of
-/// this pool is never handed out again.
+/// One node of this pool that is not full. Tested-alive nodes win, then the least-loaded
+/// node (accounts spread out before any node fills), then lower delay. Nodes whose last
+/// test failed are skipped.
 fn choose(nodes: &[Node], settings: &Settings, pool: Pool) -> Option<String> {
     let (include, exclude) = filters(settings);
     let held = held_nodes(pool);
-    let used: HashSet<&str> = settings
-        .bindings(pool)
-        .values()
-        .filter(|name| name.as_str() != DIRECT)
-        .map(String::as_str)
-        .collect();
+    let bound = bound_counts(settings, pool, None);
+    let load =
+        |name: &str| bound.get(name).copied().unwrap_or(0) + held.get(name).copied().unwrap_or(0);
     nodes
         .iter()
         .enumerate()
@@ -415,10 +474,16 @@ fn choose(nodes: &[Node], settings: &Settings, pool: Pool) -> Option<String> {
             n.is_subscription_proxy()
                 && n.alive != Some(false)
                 && eligible(&n.name, &include, &exclude)
-                && !used.contains(n.name.as_str())
-                && !held.contains(&n.name)
+                && load(&n.name) < settings.max_accounts_per_node
         })
-        .min_by_key(|(index, n)| (n.alive != Some(true), n.delay.unwrap_or(u64::MAX), *index))
+        .min_by_key(|(index, n)| {
+            (
+                n.alive != Some(true),
+                load(&n.name),
+                n.delay.unwrap_or(u64::MAX),
+                *index,
+            )
+        })
         .map(|(_, n)| n.name.clone())
 }
 
@@ -589,7 +654,7 @@ pub fn bound_node(pool: Pool, account_id: &str) -> Result<Option<String>, String
     Ok(settings.bindings(pool).get(account_id).cloned())
 }
 /// Keeps an authorized account on its login node unless it already has a binding.
-/// A node already given to a different account of the pool is left untouched.
+/// A node other accounts of the pool already fill is left untouched.
 pub fn adopt(pool: Pool, account_id: &str, node: Option<&str>) {
     let Some(node) = node else { return };
     let id = account_id.to_owned();
@@ -640,6 +705,7 @@ pub async fn view(pool: Pool) -> Result<View, String> {
         .map(|node| NodeView {
             eligible: eligible(&node.name, &include, &exclude),
             accounts: bindings.values().filter(|n| **n == node.name).count(),
+            full: bound_elsewhere(&settings, pool, &node.name, None),
             node,
         })
         .collect();
@@ -652,6 +718,7 @@ pub async fn view(pool: Pool) -> Result<View, String> {
         include: settings.include,
         exclude: settings.exclude,
         auto_assign: settings.auto_assign,
+        max_accounts_per_node: settings.max_accounts_per_node,
         env_locked: locks.fields(pool),
         running: status.running,
         binary: status.binary,
@@ -682,6 +749,12 @@ pub async fn save(pool: Pool, update: Update) -> Result<View, String> {
         }
         if let Some(auto) = update.auto_assign {
             s.auto_assign = auto;
+        }
+        if let Some(max) = update
+            .max_accounts_per_node
+            .filter(|_| !locked.contains(&"max_accounts_per_node"))
+        {
+            s.max_accounts_per_node = max;
         }
         Ok(())
     })?;
@@ -716,7 +789,10 @@ pub async fn set_account(
     edit(|s| {
         if let Some(name) = assigned.as_deref().filter(|name| *name != DIRECT) {
             if node_in_use(s, pool, name, Some(&id)) {
-                return Err("This egress node is already in use".into());
+                return Err(format!(
+                    "This egress node already serves {} account(s), the per-node limit",
+                    s.max_accounts_per_node
+                ));
             }
         }
         match assigned {
@@ -812,6 +888,14 @@ mod tests {
     const WB: Pool = Pool::WorkBuddy;
     const NATIVE: Pool = Pool::Native(Provider::ChatGpt);
 
+    /// One account per node, the behaviour before the per-node limit existed.
+    fn exclusive() -> Settings {
+        Settings {
+            max_accounts_per_node: 1,
+            ..Default::default()
+        }
+    }
+
     fn node(name: &str, delay: Option<u64>, alive: Option<bool>) -> Node {
         Node {
             name: name.into(),
@@ -829,7 +913,7 @@ mod tests {
             node("JP 02", Some(40), Some(true)),
             node("SG 03", None, Some(false)),
         ];
-        let mut settings = Settings::default();
+        let mut settings = exclusive();
         assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("JP 02"));
         settings.bindings.insert("a".into(), "JP 02".into());
         assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("HK 01"));
@@ -878,7 +962,7 @@ mod tests {
     #[test]
     fn nodes_are_exclusive_within_a_pool_but_not_across_pools() {
         let nodes = [node("JP 02", Some(40), Some(true))];
-        let mut settings = Settings::default();
+        let mut settings = exclusive();
         settings.bindings.insert("wb".into(), "JP 02".into());
         assert_eq!(choose(&nodes, &settings, WB), None);
         assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("JP 02"));
@@ -923,7 +1007,7 @@ mod tests {
     #[test]
     fn direct_bindings_do_not_occupy_a_subscription_node() {
         let nodes = [node("JP 02", Some(40), Some(true))];
-        let mut settings = Settings::default();
+        let mut settings = exclusive();
         settings.bindings.insert("a".into(), DIRECT.into());
         assert!(!node_in_use(&settings, WB, DIRECT, Some("b")));
         assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("JP 02"));
@@ -940,18 +1024,24 @@ mod tests {
         ];
         let mut hold = LoginHold::reserve(WB, "hold-fast").unwrap();
         assert_eq!(
+            choose(&nodes, &exclusive(), WB).as_deref(),
+            Some("hold-slow")
+        );
+        assert!(node_in_use(&exclusive(), WB, "hold-fast", None));
+        // Under a larger limit a held node still counts, so the idle node is preferred.
+        assert_eq!(
             choose(&nodes, &Settings::default(), WB).as_deref(),
             Some("hold-slow")
         );
-        assert!(node_in_use(&Settings::default(), WB, "hold-fast", None));
+        assert!(!node_in_use(&Settings::default(), WB, "hold-fast", None));
         // Another pool's login does not see this pool's hold.
         assert_eq!(
-            choose(&nodes, &Settings::default(), NATIVE).as_deref(),
+            choose(&nodes, &exclusive(), NATIVE).as_deref(),
             Some("hold-fast")
         );
         hold.release();
         assert_eq!(
-            choose(&nodes, &Settings::default(), WB).as_deref(),
+            choose(&nodes, &exclusive(), WB).as_deref(),
             Some("hold-fast")
         );
     }
@@ -960,11 +1050,11 @@ mod tests {
     fn an_abandoned_authorization_hold_lapses_at_its_deadline() {
         let nodes = [node("lapse-only", Some(10), Some(true))];
         let mut hold = LoginHold::reserve(WB, "lapse-only").unwrap();
-        assert_eq!(choose(&nodes, &Settings::default(), WB), None);
+        assert_eq!(choose(&nodes, &exclusive(), WB), None);
         // The session ended without release (e.g. the admin closed the dialog).
         hold.hold_until(now() - 1);
         assert_eq!(
-            choose(&nodes, &Settings::default(), WB).as_deref(),
+            choose(&nodes, &exclusive(), WB).as_deref(),
             Some("lapse-only")
         );
         std::mem::forget(hold);
@@ -1005,6 +1095,7 @@ mod tests {
         assert_eq!(load().unwrap().bindings["acct"], "HK 01");
         forget(WB, "acct");
         assert!(load().unwrap().bindings.is_empty());
+        save_limit(1);
         adopt(WB, "one", Some("node-a"));
         adopt(WB, "two", Some("node-a"));
         adopt(NATIVE, "three", Some("node-a"));
@@ -1018,6 +1109,81 @@ mod tests {
             settings.bindings(NATIVE).get("three").map(String::as_str),
             Some("node-a")
         );
+    }
+
+    fn save_limit(max: usize) {
+        edit(|s| {
+            s.max_accounts_per_node = max;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_node_serves_up_to_the_limit_and_fills_the_least_loaded_node_first() {
+        let nodes = [
+            node("fast", Some(10), Some(true)),
+            node("slow", Some(90), Some(true)),
+        ];
+        let mut settings = Settings::default();
+        assert_eq!(settings.max_accounts_per_node, 3);
+        // Accounts spread out before any node takes a second one.
+        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("fast"));
+        settings
+            .bindings_mut(NATIVE)
+            .insert("a".into(), "fast".into());
+        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("slow"));
+        settings
+            .bindings_mut(NATIVE)
+            .insert("b".into(), "slow".into());
+        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("fast"));
+        for (id, node) in [("c", "fast"), ("d", "fast"), ("e", "slow"), ("f", "slow")] {
+            assert!(!node_in_use(&settings, NATIVE, node, None), "{id}");
+            settings.bindings_mut(NATIVE).insert(id.into(), node.into());
+        }
+        // Three accounts each: both nodes are full, for new and other accounts alike.
+        assert_eq!(choose(&nodes, &settings, NATIVE), None);
+        assert!(node_in_use(&settings, NATIVE, "fast", Some("new")));
+        assert!(!node_in_use(&settings, NATIVE, "fast", Some("a")));
+        // Pools are counted separately.
+        assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn the_per_node_limit_is_validated_saved_and_overridable() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        let legacy: Settings =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        assert_eq!(legacy.max_accounts_per_node, DEFAULT_MAX_ACCOUNTS_PER_NODE);
+        for bad in [0, 21] {
+            let settings = Settings {
+                max_accounts_per_node: bad,
+                ..Default::default()
+            };
+            assert!(validate(&settings).is_err(), "{bad}");
+        }
+        save_limit(2);
+        assert_eq!(load().unwrap().max_accounts_per_node, 2);
+        adopt(WB, "one", Some("node-a"));
+        adopt(WB, "two", Some("node-a"));
+        adopt(WB, "three", Some("node-a"));
+        let bound = load().unwrap();
+        assert_eq!(bound.bindings(WB).len(), 2, "{:?}", bound.bindings(WB));
+        // An environment override wins in every check and is never persisted.
+        std::env::set_var(MAX_ACCOUNTS_ENV, "3");
+        adopt(WB, "three", Some("node-a"));
+        let settings = load().unwrap();
+        assert_eq!(settings.max_accounts_per_node, 3);
+        assert_eq!(settings.bindings(WB).len(), 3);
+        assert_eq!(stored().unwrap().max_accounts_per_node, 2);
+        let mut probe = stored().unwrap();
+        assert_eq!(
+            overrides(&mut probe).unwrap().fields(WB),
+            vec!["max_accounts_per_node"]
+        );
+        std::env::set_var(MAX_ACCOUNTS_ENV, "0");
+        assert!(load().is_err());
+        std::env::remove_var(MAX_ACCOUNTS_ENV);
     }
 
     #[tokio::test]

@@ -4,10 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { request } from '../../utils/request';
 import { showToast } from '../common/ToastContainer';
 
-export interface EgressNode { name: string; type: string; delay: number | null; alive: boolean | null; eligible: boolean; accounts: number }
+export interface EgressNode { name: string; type: string; delay: number | null; alive: boolean | null; eligible: boolean; accounts: number; full: boolean }
 export interface EgressView {
     enabled: boolean; subscription_configured: boolean; subscription_host: string | null;
-    include: string; exclude: string; auto_assign: boolean; env_locked: string[];
+    include: string; exclude: string; auto_assign: boolean; max_accounts_per_node: number; env_locked: string[];
     running: boolean; binary: string | null; error: string | null;
     nodes: EgressNode[]; bindings: Record<string, string>;
 }
@@ -50,7 +50,9 @@ export default function WorkBuddyEgressPanel({ view, onChange, api = WORKBUDDY_E
     const [exclude, setExclude] = useState('');
     const [busy, setBusy] = useState('');
     const [error, setError] = useState('');
+    const [maxAccounts, setMaxAccounts] = useState('');
     useEffect(() => { if (view) { setInclude(view.include); setExclude(view.exclude); } }, [view?.include, view?.exclude]);
+    useEffect(() => { if (view) setMaxAccounts(String(view.max_accounts_per_node)); }, [view?.max_accounts_per_node]);
     if (!view) return null;
     const locked = (field: string) => view.env_locked.includes(field);
     const alive = view.nodes.filter(n => n.alive).length;
@@ -94,8 +96,15 @@ export default function WorkBuddyEgressPanel({ view, onChange, api = WORKBUDDY_E
                     <label className="block space-y-1"><span>{t('workbuddy.egress.exclude')}</span>
                         <input className={`${input} font-mono`} value={exclude} disabled={!!busy} onChange={e => setExclude(e.target.value)} /></label>
                 </div>
-                <label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" checked={view.auto_assign} disabled={!!busy}
-                    onChange={e => void save({ auto_assign: e.target.checked })} />{t('workbuddy.egress.auto_assign')}</label>
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                    <label className="flex items-center gap-2"><input type="checkbox" className="accent-blue-600" checked={view.auto_assign} disabled={!!busy}
+                        onChange={e => void save({ auto_assign: e.target.checked })} />{t('workbuddy.egress.auto_assign')}</label>
+                    <label className="flex items-center gap-2"><span>{t('workbuddy.egress.max_accounts')}</span>
+                        <input className={`${input} !w-16 text-center`} type="number" min={1} max={20} value={maxAccounts} disabled={!!busy || locked('max_accounts_per_node')}
+                            onChange={e => setMaxAccounts(e.target.value)}
+                            onBlur={() => { const max = Number(maxAccounts); if (Number.isInteger(max) && max >= 1 && max <= 20 && max !== view.max_accounts_per_node) void save({ max_accounts_per_node: max }); else setMaxAccounts(String(view.max_accounts_per_node)); }} /></label>
+                </div>
+                <p className="leading-relaxed text-gray-500">{t('workbuddy.egress.max_accounts_hint')}</p>
                 <p className="leading-relaxed text-gray-500">{t('workbuddy.egress.fail_closed_hint')}</p>
                 {view.binary && <p className="break-all text-gray-500">{t('workbuddy.egress.binary', { path: view.binary })}</p>}
                 {view.env_locked.length > 0 && <p className="text-amber-600">{t('workbuddy.env_locked')}</p>}
@@ -142,8 +151,9 @@ export function WorkBuddyEgressCell({ accountId, view, disabled, onChange, api =
                 <option value={DIRECT}>{t('workbuddy.egress.direct')}</option>
                 {missing && <option value={bound}>{t('workbuddy.egress.missing', { name: bound })}</option>}
                 {view.nodes.map(node => {
-                    const taken = node.accounts > 0 && node.name !== bound;
-                    const label = nodeLabel(node, t);
+                    const taken = node.full && node.name !== bound;
+                    const usage = node.accounts > 0 ? ` · ${t('workbuddy.egress.node_accounts', { count: node.accounts, max: view.max_accounts_per_node })}` : '';
+                    const label = nodeLabel(node, t) + usage;
                     return <option key={node.name} value={node.name} disabled={taken}>{taken ? `${label} · ${t('workbuddy.egress.taken')}` : label}</option>;
                 })}
             </select>
