@@ -164,7 +164,9 @@ redirects.
   ChatGPT a node serves at most `max_accounts_per_node` accounts (default 3,
   1–20, counted per source; auto-assign fills the least-loaded node first); a
   WorkBuddy account and a ChatGPT account may share a node because they talk to
-  different services.
+  different services. mihomo tests every node once in the background after it
+  starts, and an assignment whose pick is still untested tests all nodes first
+  (concurrently, at most 20 s), so a restart cannot hand a new account a dead node.
 - Credential import validation, refresh, model and inference requests all use the
   account's node. An import claims a free node and the new account keeps it; a
   re-import uses the account's bound node. An import of a saved account through a
