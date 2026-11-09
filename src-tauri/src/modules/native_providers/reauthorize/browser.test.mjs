@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { authorize, totp } from './browser.mjs';
+import { socksFixture } from './browser-proxy.fixture.mjs';
 
 test('TOTP uses the standard Base32 key and 30 second SHA1 counter', () => {
     const key = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
@@ -44,16 +45,19 @@ test('official browser flow enters email, password and TOTP then captures the OA
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
+    const socks = await socksFixture();
     const input = { auth_url: `${base}/oauth/authorize`, browser: process.env.ABV_CHATGPT_BROWSER || '/usr/bin/chromium',
-        email: 'a@example.com', password: 'private-password', two_factor: 'JBSWY3DPEHPK3PXP', proxy: '' };
+        email: 'a@example.com', password: 'private-password', two_factor: 'JBSWY3DPEHPK3PXP', proxy: socks.url };
     try {
         const result = await authorize(input, { testOrigin: base, timeoutMs: 20000 });
         assert.equal(result.callback, 'http://localhost:1455/auth/callback?code=private-code&state=test-state');
         assert.deepEqual(steps, ['email', 'password', 'totp']);
+        assert(socks.destinations.some(target => target.host === '127.0.0.1' && target.port === server.address().port), 'Chromium must use the authenticated route even for the local fixture');
         for (const [path, code] of [['/challenge', 'CHALLENGE'], ['/email-code', 'EMAIL_VERIFICATION']]) {
             await assert.rejects(authorize({ ...input, auth_url: base + path }, { testOrigin: base, timeoutMs: 5000 }), { code });
         }
+        await assert.rejects(authorize({...input, proxy:socks.url.replace('route-password','wrong-password')}, {testOrigin:base, timeoutMs:5000}), {code:'PROXY_AUTH_FAILED'});
         const leftovers = (await readdir(tmpdir())).filter(name => name.startsWith('abv-chatgpt-') && !before.has(name));
         assert.deepEqual(leftovers, [], 'temporary browser profiles must be removed on success and failure');
-    } finally { await new Promise(resolve => server.close(resolve)); }
+    } finally { await socks.close(); await new Promise(resolve => server.close(resolve)); }
 });
