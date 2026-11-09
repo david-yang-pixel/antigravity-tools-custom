@@ -97,8 +97,11 @@ RUN cargo build --locked --release --bin antigravity-tools && \
 # --- Runtime Base Stage ---
 # Shared by both images below, so a prebuilt and a from-source image only differ
 # in where the binary and frontend come from.
-# Node runs the embedded OAuth worker; Chromium is installed once in the runtime image.
+# Protocol dependencies are installed once; Chromium remains an explicit fallback.
 FROM node:22-bookworm-slim AS oauth-node
+WORKDIR /opt/chatgpt-auth
+COPY src-tauri/src/modules/native_providers/reauthorize/protocol/package*.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 FROM debian:bookworm-slim AS runtime-base
 ARG USE_MIRROR=auto
@@ -117,6 +120,8 @@ RUN if [ "$USE_MIRROR" = "true" ] || ( [ "$USE_MIRROR" = "auto" ] && ! timeout 3
 RUN apt-get update && apt-get install -y \
     curl \
     chromium \
+    python3 \
+    python3-venv \
     libssl3 \
     libsqlite3-0 \
     ca-certificates \
@@ -142,8 +147,13 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/mihomo; \
     rm /tmp/mihomo.gz
 
-# Built-in OAuth needs no separately deployed service or npm packages.
+# Built-in authorization dependencies; no downloads during login jobs.
 COPY --from=oauth-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=oauth-node /opt/chatgpt-auth/node_modules /app/chatgpt-auth/node_modules
+COPY src-tauri/src/modules/native_providers/reauthorize/protocol/vendor/tosub2/requirements.txt /tmp/chatgpt-auth-requirements.txt
+RUN python3 -m venv /app/chatgpt-auth/venv && \
+    /app/chatgpt-auth/venv/bin/pip install --no-cache-dir -r /tmp/chatgpt-auth-requirements.txt && \
+    rm /tmp/chatgpt-auth-requirements.txt
 
 # Set environment variables
 ENV ABV_DIST_PATH=/app/dist

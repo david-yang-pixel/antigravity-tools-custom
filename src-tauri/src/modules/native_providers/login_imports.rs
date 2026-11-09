@@ -2,7 +2,9 @@
 //! use their own encrypted vault; only verified tokens enter the account pool.
 use super::{
     now,
-    reauthorize::{self, LoginCredentials, Progress, Service, ServiceConfig, State},
+    reauthorize::{
+        self, protocol, LoginCredentials, Progress, Service, ServiceConfig, State, Target,
+    },
     store, Provider,
 };
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ pub enum Status {
     Queued,
     Running,
     Failed,
+    Waiting,
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Pending {
@@ -31,6 +34,7 @@ pub struct View {
     pub status: Status,
     pub error: Option<String>,
     pub created_at: i64,
+    pub progress: Option<protocol::View>,
 }
 impl From<&Pending> for View {
     fn from(job: &Pending) -> Self {
@@ -41,6 +45,7 @@ impl From<&Pending> for View {
             status: job.status,
             error: job.state.error.clone(),
             created_at: job.created_at,
+            progress: job.state.protocol.view(),
         }
     }
 }
@@ -80,10 +85,10 @@ pub fn enqueue(
                 continue;
             }
             if let Some(job) = jobs.iter_mut().find(|job| job.login.email == login.email) {
-                if job.status != Status::Failed && job.login != login {
+                if !matches!(job.status, Status::Failed | Status::Waiting) && job.login != login {
                     return Err("A task with different login credentials or authorization service is already active for this email; wait for it or remove it first".into());
                 }
-                if job.status == Status::Failed {
+                if matches!(job.status, Status::Failed | Status::Waiting) {
                     job.login = login;
                     job.revision = uuid::Uuid::new_v4().to_string();
                     job.state = State {
@@ -130,6 +135,27 @@ fn change<T>(
         update(job)
     })
 }
+pub(super) fn job_state(provider: Provider, id: &str, revision: &str) -> Result<State, String> {
+    store::imports(provider)?
+        .into_iter()
+        .find(|j| j.id == id && j.revision == revision)
+        .map(|j| j.state)
+        .ok_or_else(|| "Login import was removed or restarted".into())
+}
+pub(super) fn change_job_state(
+    provider: Provider,
+    id: &str,
+    revision: &str,
+    update: impl FnOnce(&mut State),
+) -> Result<(), String> {
+    change(provider, id, revision, |job| {
+        update(&mut job.state);
+        if job.state.protocol.started_at > 0 && job.state.protocol.finished_at == 0 {
+            job.status = Status::Running;
+        }
+        Ok(())
+    })
+}
 fn finish(provider: Provider, job: &Pending) -> Result<(), String> {
     store::change_imports(provider, |jobs| {
         jobs.retain(|j| j.id != job.id || j.revision != job.revision);
@@ -142,12 +168,15 @@ pub fn retry(provider: Provider, id: &str) -> Result<(), String> {
             .iter_mut()
             .find(|job| job.id == id)
             .ok_or("Login import no longer exists")?;
-        if job.status != Status::Failed {
+        if !matches!(job.status, Status::Failed | Status::Waiting) {
             return Err("Login import is already queued or running".into());
         }
         job.revision = uuid::Uuid::new_v4().to_string();
+        let mut protocol = job.state.protocol.clone();
+        protocol.reset_progress();
         job.state = State {
             auto: job.state.auto,
+            protocol,
             ..Default::default()
         };
         job.status = Status::Queued;
@@ -161,7 +190,9 @@ pub fn remove(provider: Provider, id: &str) -> Result<(), String> {
     })
 }
 fn due(job: &Pending) -> bool {
-    job.status != Status::Failed && job.state.retry_at <= now()
+    matches!(job.status, Status::Queued | Status::Running)
+        && (job.state.retry_at <= now()
+            || (job.state.protocol.stage.is_some() && job.state.protocol.finished_at == 0))
 }
 pub(super) fn tick(provider: Provider) {
     let Ok(jobs) = store::imports(provider) else {
@@ -181,8 +212,17 @@ async fn process(provider: Provider, job: &Pending) {
     if let Err(error) = step(provider, job).await {
         let _ = change(provider, &job.id, &job.revision, |job| {
             job.state.error = Some(error);
+            if job.state.protocol.stage.is_some() && job.state.protocol.finished_at == 0 {
+                job.state.protocol.finished_at = now();
+                job.state.protocol.updated_at = now();
+            }
             if job.state.batch.is_some() {
                 job.state.retry_at = now() + 30;
+            } else if job.state.protocol.waiting {
+                job.status = Status::Waiting;
+            } else if job.state.protocol.retryable && job.state.attempts < 3 {
+                job.status = Status::Queued;
+                job.state.retry_at = now() + protocol::retry_delay(&job.state);
             } else {
                 job.status = Status::Failed;
             }
@@ -220,53 +260,97 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
     }
     let client = super::http::login_client(provider, &crate::modules::egress::Exit::Off)
         .map_err(|_| "Cannot initialize login import connection")?;
-    let Some(mut batch) = job.state.batch.clone() else {
-        if job.state.attempts > 0 {
-            return Err(
-                "Login submission was interrupted; retry explicitly to avoid duplicate jobs".into(),
-            );
-        }
-        change(provider, &job.id, &job.revision, |job| {
-            job.status = Status::Running;
-            job.state.attempts = 1;
-            job.state.retry_at = now() + 60;
-            Ok(())
-        })?;
-        // A built-in login obtains its token on the node the new account will keep.
-        // Merchant services perform login remotely and do not use this local browser.
-        let route = if job.login.authorization.service == Service::BuiltIn {
-            Some(
-                crate::modules::egress::login_route(
-                    crate::modules::egress::Pool::Native(provider),
-                    None,
-                )
-                .await?,
+    let local_protocol = job.login.authorization.service == Service::BuiltIn && protocol::enabled();
+    let mut batch = match job.state.batch.clone() {
+        Some(batch) => batch,
+        None => {
+            let interrupted_protocol = local_protocol
+                && job.state.protocol.stage.is_some()
+                && job.state.protocol.finished_at == 0
+                && job.state.attempts < 3;
+            if job.state.attempts > 0
+                && !(local_protocol && job.state.protocol.retryable)
+                && !interrupted_protocol
+            {
+                return Err(
+                    "Login submission was interrupted; retry explicitly to avoid duplicate jobs"
+                        .into(),
+                );
+            }
+            change(provider, &job.id, &job.revision, |job| {
+                job.status = if local_protocol {
+                    Status::Queued
+                } else {
+                    Status::Running
+                };
+                job.state.attempts += 1;
+                job.state.retry_at = now() + 60;
+                Ok(())
+            })?;
+            // A built-in login obtains its token on the node the new account will keep.
+            // Merchant services perform login remotely and do not use this local browser.
+            let mut route =
+                if job.login.authorization.service == Service::BuiltIn && !local_protocol {
+                    Some(
+                        crate::modules::egress::login_route(
+                            crate::modules::egress::Pool::Native(provider),
+                            None,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+            let exit = route
+                .as_ref()
+                .map(|route| &route.exit)
+                .unwrap_or(&crate::modules::egress::Exit::Off);
+            let submit_client = super::http::login_client(provider, exit)
+                .map_err(|_| "Cannot initialize login import connection")?;
+            let target = Target {
+                provider,
+                id: job.id.clone(),
+                revision: job.revision.clone(),
+                pending: true,
+                node: None,
+            };
+            let mut batch = reauthorize::create_batch(
+                &submit_client,
+                &job.login,
+                &super::http::proxy_url(exit),
+                &target,
             )
-        } else {
-            None
-        };
-        let exit = route
-            .as_ref()
-            .map(|route| &route.exit)
-            .unwrap_or(&crate::modules::egress::Exit::Off);
-        let submit_client = super::http::login_client(provider, exit)
-            .map_err(|_| "Cannot initialize login import connection")?;
-        let mut batch =
-            reauthorize::create_batch(&submit_client, &job.login, &super::http::proxy_url(exit))
-                .await?;
-        batch.node = route.as_ref().and_then(|route| route.node.clone());
-        change(provider, &job.id, &job.revision, |job| {
-            job.state.batch = Some(batch);
-            job.state.retry_at = now() + 5;
-            job.state.error = None;
-            Ok(())
-        })?;
-        return Ok(());
+            .await?;
+            if !local_protocol {
+                batch.node = route.as_ref().and_then(|route| route.node.clone());
+                batch.lease = route
+                    .as_mut()
+                    .and_then(|route| route.hold.take())
+                    .map(std::sync::Arc::new);
+            }
+            change(provider, &job.id, &job.revision, |job| {
+                job.state.batch = Some(batch.clone());
+                job.state.retry_at = now() + 5;
+                job.state.error = None;
+                Ok(())
+            })?;
+            if job.login.authorization.service != Service::BuiltIn {
+                return Ok(());
+            }
+            batch
+        }
     };
+    if batch.lease.is_none() {
+        if let Some(node) = batch.node.as_deref() {
+            batch.lease = crate::modules::egress::reserve_native_login_node(provider, node)
+                .await?
+                .map(std::sync::Arc::new);
+        }
+    }
     let progress = reauthorize::poll_batch(&client, &mut batch).await;
     let node = batch.node.clone();
     change(provider, &job.id, &job.revision, |job| {
-        job.state.batch = Some(batch);
+        job.state.batch = Some(batch.clone());
         Ok(())
     })?;
     match progress? {

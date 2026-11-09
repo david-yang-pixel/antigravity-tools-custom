@@ -2,6 +2,8 @@ export type NativeProvider = 'chatgpt';
 export type NativeRealm = 'cn' | 'global';
 export type ReauthorizationService = 'built_in' | 'dbc2api' | 'ruozhen';
 export interface AuthorizationConfig { service: ReauthorizationService; cdk: string }
+export type AuthorizationStage = 'queued' | 'preparing' | 'connecting' | 'resuming' | 'login' | 'password' | 'two_factor' | 'security_check' | 'oauth' | 'workspace' | 'token_exchange' | 'verifying' | 'complete';
+export interface AuthorizationProgress { stage: AuthorizationStage; elapsed_seconds: number; stage_seconds: number; waiting: boolean }
 export interface NativeModel { id: string; name: string; context_window: number; vision: boolean; reasoning: boolean; is_free?: boolean }
 export interface NativeQuotaPack { name: string; total: number | null; remaining: number | null; used: number | null; unlimited: boolean; expires_at: number | null }
 export interface NativeQuota { unit: string; total: number | null; remaining: number | null; used: number | null; unlimited: boolean; updated_at: number; packs: NativeQuotaPack[] }
@@ -10,6 +12,7 @@ export interface NativeAccount {
     enabled: boolean; auto_refresh: boolean; expires_at: number; can_refresh: boolean;
     has_login_credentials: boolean; auto_reauthorize: boolean; reauthorizing: boolean; reauthorization_error: string | null;
     reauthorization_service: ReauthorizationService | null;
+    authorization_progress?: AuthorizationProgress | null;
     credential_dead: boolean;
     models: NativeModel[]; models_updated_at: number; quota: NativeQuota | null;
     quota_error: string | null; models_error: string | null; auth_error: string | null;
@@ -18,7 +21,7 @@ export interface NativeAccount {
 }
 /** One account of a batch import (e.g. a sub2api export). */
 export interface BatchItem { label: string; status: 'imported' | 'skipped' | 'failed'; message: string; account: NativeAccount | null }
-export interface LoginImportJob { id: string; email: string; reauthorization_service: ReauthorizationService; status: 'queued' | 'running' | 'failed'; error: string | null; created_at: number }
+export interface LoginImportJob { id: string; email: string; reauthorization_service: ReauthorizationService; status: 'queued' | 'running' | 'failed' | 'waiting'; error: string | null; created_at: number; progress?: AuthorizationProgress | null }
 export interface LoginImportReport { queued: LoginImportJob[]; skipped: string[] }
 export interface NativeSettings { provider: NativeProvider; enabled: boolean; preferred_account_id: string | null; env_locked: boolean }
 export function nativeAccountStatus(account: NativeAccount, now: number): 'disabled' | 'reauthorize' | 'exhausted' | 'cooldown' | 'busy' | 'ready' {

@@ -234,6 +234,7 @@ pub struct AccountView {
     pub auto_reauthorize: bool,
     pub reauthorizing: bool,
     pub reauthorization_error: Option<String>,
+    pub authorization_progress: Option<reauthorize::protocol::View>,
     pub credential_dead: bool,
     pub models: Vec<Model>,
     pub models_updated_at: i64,
@@ -267,8 +268,12 @@ impl From<&Account> for AccountView {
             // token-only imports that do not yet have password/2FA material bound.
             reauthorization_service: Some(reauthorize::service_for(a).unwrap_or_default().service),
             auto_reauthorize: a.reauthorization.auto,
-            reauthorizing: a.reauthorization.requested || a.reauthorization.batch.is_some(),
+            reauthorizing: a.reauthorization.requested
+                || a.reauthorization.batch.is_some()
+                || (a.reauthorization.protocol.started_at > 0
+                    && a.reauthorization.protocol.finished_at == 0),
             reauthorization_error: a.reauthorization.error.clone(),
+            authorization_progress: a.reauthorization.protocol.view(),
             credential_dead: a.credential_dead,
             models: a.models.clone(),
             models_updated_at: a.models_updated_at,

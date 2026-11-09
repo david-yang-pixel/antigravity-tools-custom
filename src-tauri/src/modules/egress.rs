@@ -31,6 +31,7 @@ use std::{
 };
 
 pub const DIRECT: &str = "DIRECT";
+pub const NATIVE_LOGIN_SLOTS: usize = 2;
 /// Accounts of one pool a node serves unless configured otherwise.
 pub const DEFAULT_MAX_ACCOUNTS_PER_NODE: usize = 3;
 const MAX_ACCOUNTS_PER_NODE_LIMIT: usize = 20;
@@ -70,6 +71,9 @@ impl Pool {
             Pool::Native(_) => format!("{}-login", self.key()),
         }
     }
+    fn login_slot_user(self, slot: usize) -> String {
+        format!("{}-slot-{slot}", self.login_user())
+    }
     fn enabled_env(self) -> String {
         match self {
             Pool::WorkBuddy => "ABV_WORKBUDDY_EGRESS_ENABLED".into(),
@@ -95,6 +99,9 @@ fn all_users() -> HashSet<String> {
     let mut users = HashSet::new();
     for pool in Pool::all() {
         users.insert(pool.login_user());
+        if matches!(pool, Pool::Native(_)) {
+            users.extend((0..NATIVE_LOGIN_SLOTS).map(|slot| pool.login_slot_user(slot)));
+        }
         match pool.account_ids() {
             Ok(ids) => users.extend(ids.iter().map(|id| pool.user(id))),
             Err(error) => tracing::warn!("Egress users for {}: {error}", pool.key()),
@@ -688,6 +695,95 @@ pub struct LoginRoute {
     /// authorization session so the node stays reserved until the account is bound.
     pub hold: Option<LoginHold>,
     _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+/// A protocol worker owns one preallocated selector and a node reservation. Separate
+/// slots allow concurrent authorizations without changing another worker's address.
+pub struct NativeLoginRoute {
+    pub exit: Exit,
+    pub node: Option<String>,
+    _hold: Option<LoginHold>,
+}
+impl NativeLoginRoute {
+    pub fn take_hold(&mut self) -> Option<LoginHold> {
+        self._hold.take()
+    }
+}
+pub async fn reserve_native_login_node(
+    provider: Provider,
+    node: &str,
+) -> Result<Option<LoginHold>, String> {
+    let pool = Pool::Native(provider);
+    let _assign = ASSIGN_LOCK.lock().await;
+    let settings = load()?;
+    if !settings.enabled(pool) || node == DIRECT {
+        return Ok(None);
+    }
+    if node_in_use(&settings, pool, node, None) {
+        return Err("The saved login node is full; retry authorization".into());
+    }
+    let mut hold = LoginHold::reserve(pool, node)?;
+    hold.hold_until(now() + 420);
+    Ok(Some(hold))
+}
+pub async fn native_login_route(
+    provider: Provider,
+    slot: usize,
+    preferred: Option<&str>,
+) -> Result<NativeLoginRoute, String> {
+    if slot >= NATIVE_LOGIN_SLOTS {
+        return Err("Invalid native login slot".into());
+    }
+    let pool = Pool::Native(provider);
+    let settings = load()?;
+    if !settings.enabled(pool) {
+        return Ok(NativeLoginRoute {
+            exit: Exit::Off,
+            node: None,
+            _hold: None,
+        });
+    }
+    let (node, mut hold) = {
+        let _assign = ASSIGN_LOCK.lock().await;
+        let settings = load()?;
+        let nodes = assignable_nodes(&settings, pool).await?;
+        let node = match preferred {
+            Some(DIRECT) => DIRECT.to_owned(),
+            Some(node)
+                if nodes
+                    .iter()
+                    .any(|n| n.name == node && n.alive != Some(false))
+                    && !node_in_use(&settings, pool, node, None) =>
+            {
+                node.to_owned()
+            }
+            Some(_) => return Err("The saved login node is unavailable or full".into()),
+            None => choose(&nodes, &settings, pool)
+                .ok_or("No free egress node is left in the subscription")?,
+        };
+        let hold = (node != DIRECT)
+            .then(|| LoginHold::reserve(pool, &node))
+            .transpose()?;
+        (node, hold)
+    };
+    if let Some(hold) = &mut hold {
+        hold.hold_until(now() + 420);
+    }
+    if node == DIRECT {
+        return Ok(NativeLoginRoute {
+            exit: Exit::Direct,
+            node: Some(node),
+            _hold: hold,
+        });
+    }
+    let route = mihomo::route(&settings, &pool.login_slot_user(slot), &node).await?;
+    Ok(NativeLoginRoute {
+        exit: Exit::Proxy {
+            url: route.proxy_url,
+            node: node.clone(),
+        },
+        node: Some(node),
+        _hold: hold,
+    })
 }
 fn login_lock(pool: Pool) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
     Ok(LOGIN_LOCKS

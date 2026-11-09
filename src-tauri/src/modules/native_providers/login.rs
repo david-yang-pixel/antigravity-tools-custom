@@ -250,6 +250,10 @@ async fn import_inner(
     if let Some((auto, _, _)) = new_login_auto {
         a.reauthorization.auto = auto;
     }
+    if let Some((_, id, revision)) = new_login_auto {
+        a.reauthorization.protocol =
+            super::login_imports::job_state(provider, id, revision)?.protocol;
+    }
     let pasted = a.credentials.refresh_token.clone();
     reject_saved_credentials(&a, &store::all(provider)?)?;
     // A row re-import goes through that account's own node. A new account is validated

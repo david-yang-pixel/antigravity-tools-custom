@@ -123,7 +123,9 @@ pub(super) fn config(
     let mut groups = vec![json!({"name": ALL_GROUP, "type": "select", "use": [PROVIDER]})];
     let mut rules = Vec::new();
     for user in &names {
-        groups.push(json!({"name": group(user), "type": "select", "use": [PROVIDER]}));
+        groups.push(
+            json!({"name": group(user), "type": "select", "proxies":["REJECT"], "use": [PROVIDER]}),
+        );
         rules.push(json!(format!("IN-USER,{user},{}", group(user))));
     }
     // Anything that is not an authenticated account must never leave directly.
@@ -137,7 +139,7 @@ pub(super) fn config(
         "geo-auto-update": false,
         "external-controller": format!("127.0.0.1:{controller_port}"),
         "secret": secret,
-        "profile": {"store-selected": false, "store-fake-ip": false},
+        "profile": {"store-selected": true, "store-fake-ip": false},
         "proxy-providers": {"sub": {
             "type": "http",
             "url": subscription,
@@ -480,8 +482,16 @@ async fn ensure(state: &mut State, settings: &Settings, users: &[&str]) -> Resul
             json!({"path": path.to_string_lossy()}),
         )
         .await?;
-        // Reloading rebuilds selectors; every selection must be applied again.
-        runtime.verified.clear();
+        // Preserve choices across a reload, including protocol workers which use a
+        // selector for the duration of their whole login. Unknown choices fail closed.
+        let selected = std::mem::take(&mut runtime.verified);
+        for (user, node) in selected {
+            if api.select(&user, &node).await.is_ok() {
+                runtime.verified.insert((user, node));
+            } else {
+                let _ = api.select(&user, "REJECT").await;
+            }
+        }
     }
     Ok(api)
 }
@@ -608,6 +618,142 @@ pub(super) async fn status() -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opt-in integration test against the same pinned mihomo binary as Docker.
+    /// Synthetic HTTP proxies never forward traffic outside the local machine.
+    #[tokio::test]
+    async fn concurrent_login_routes_survive_a_real_mihomo_config_reload() {
+        let Ok(binary) = std::env::var("ABV_TEST_MIHOMO_BIN") else {
+            return;
+        };
+        let _sandbox = crate::modules::native_providers::tests::Sandbox::new();
+        use axum::{routing::get, Json, Router};
+        async fn serve(app: Router) -> (u16, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let handle = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+            (port, handle)
+        }
+        async fn proxy(marker: &'static str) -> (u16, tokio::task::JoinHandle<()>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            async fn headers(
+                stream: &mut tokio::net::TcpStream,
+            ) -> Result<Vec<u8>, std::io::Error> {
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") && bytes.len() < 16384 {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).await?;
+                    bytes.push(byte[0]);
+                }
+                Ok(bytes)
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let handle = tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let request = async {
+                            if headers(&mut stream).await?.starts_with(b"CONNECT ") {
+                                stream
+                                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                                    .await?;
+                                headers(&mut stream).await?;
+                            }
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{marker}",
+                                marker.len()
+                            );
+                            stream.write_all(response.as_bytes()).await
+                        };
+                        let _ = tokio::time::timeout(Duration::from_secs(2), request).await;
+                    });
+                }
+            });
+            (port, handle)
+        }
+        let (a, task_a) = proxy("route-a").await;
+        let (b, task_b) = proxy("route-b").await;
+        let subscription = json!({"proxies":[
+            {"name":"node-a","type":"http","server":"127.0.0.1","port":a},
+            {"name":"node-b","type":"http","server":"127.0.0.1","port":b}
+        ]});
+        let (port, task_sub) = serve(Router::new().route(
+            "/sub",
+            get(move || {
+                let value = subscription.clone();
+                async move { Json(value) }
+            }),
+        ))
+        .await;
+        let settings = Settings {
+            subscription_url: format!("http://127.0.0.1:{port}/sub"),
+            mihomo_path: binary,
+            ..Default::default()
+        };
+        let mut state = State::default();
+        let users = ["chatgpt-login-slot-0", "chatgpt-login-slot-1"];
+        let api = ensure(&mut state, &settings, &users).await.unwrap();
+        for (user, node) in users.iter().zip(["node-a", "node-b"]) {
+            api.select(user, node).await.unwrap();
+            state
+                .runtime
+                .as_mut()
+                .unwrap()
+                .verified
+                .insert((user.to_string(), node.to_string()));
+        }
+        let clients: Vec<_> = users
+            .iter()
+            .map(|user| {
+                let runtime = state.runtime.as_ref().unwrap();
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(3))
+                    .proxy(
+                        reqwest::Proxy::all(format!(
+                            "socks5h://{user}:{}@127.0.0.1:{}",
+                            runtime.users[*user], runtime.socks_port
+                        ))
+                        .unwrap(),
+                    )
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        async fn body(client: &reqwest::Client) -> String {
+            client
+                .get("http://local.invalid/test")
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }
+        let before = tokio::join!(body(&clients[0]), body(&clients[1]));
+        assert_eq!(before, ("route-a".into(), "route-b".into()));
+        let api = ensure(&mut state, &settings, &["newly-imported-account"])
+            .await
+            .unwrap();
+        let after = tokio::join!(body(&clients[0]), body(&clients[1]));
+        assert_eq!(after, before);
+        for (user, node) in users.iter().zip(["node-a", "node-b"]) {
+            assert_eq!(
+                api.get(&["proxies", &group(user)], &[]).await.unwrap()["now"],
+                node
+            );
+        }
+        assert_eq!(
+            api.get(&["proxies", &group("newly-imported-account")], &[])
+                .await
+                .unwrap()["now"],
+            "REJECT"
+        );
+        state.runtime.as_mut().unwrap().child.kill().await.unwrap();
+        task_a.abort();
+        task_b.abort();
+        task_sub.abort();
+    }
 
     #[test]
     fn config_routes_each_user_to_its_selector_and_rejects_the_rest() {

@@ -100,6 +100,7 @@ pub(super) async fn create(
         base,
         created_at: now(),
         node: None,
+        lease: None,
     })
 }
 

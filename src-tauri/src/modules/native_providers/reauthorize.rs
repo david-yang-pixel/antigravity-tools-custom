@@ -5,13 +5,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
 const SERVICE: &str = "https://login.dbc2api.top";
 #[path = "reauthorize/builtin.rs"]
 mod builtin;
+#[path = "reauthorize/protocol.rs"]
+pub(super) mod protocol;
 #[path = "reauthorize/ruozhen.rs"]
 mod ruozhen;
 
@@ -62,6 +64,7 @@ pub struct LoginCredentials {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct State {
+    pub protocol: protocol::State,
     // Optional so old imports retain their original merchant when no new choice is made.
     pub authorization: Option<ServiceConfig>,
     pub auto: bool,
@@ -83,6 +86,41 @@ pub struct Batch {
     created_at: i64,
     #[serde(default)]
     pub(super) node: Option<String>,
+    #[serde(skip)]
+    pub(super) lease: Option<Arc<crate::modules::egress::LoginHold>>,
+}
+pub(super) struct Target {
+    pub provider: Provider,
+    pub id: String,
+    pub revision: String,
+    pub pending: bool,
+    pub node: Option<String>,
+}
+impl Target {
+    pub fn state(&self) -> Result<State, String> {
+        if self.pending {
+            return super::login_imports::job_state(self.provider, &self.id, &self.revision);
+        }
+        let a = store::get(self.provider, &self.id)?;
+        if a.revision != self.revision {
+            return Err("Authorization was replaced".into());
+        }
+        Ok(a.reauthorization)
+    }
+    pub fn change(&self, update: impl FnOnce(&mut State)) -> Result<(), String> {
+        if self.pending {
+            return super::login_imports::change_job_state(
+                self.provider,
+                &self.id,
+                &self.revision,
+                update,
+            );
+        }
+        store::update(self.provider, &self.id, Some(&self.revision), |a| {
+            update(&mut a.reauthorization)
+        })
+        .map(|_| ())
+    }
 }
 
 fn valid_email(email: &str) -> bool {
@@ -279,11 +317,24 @@ fn segment(value: &str) -> bool {
 }
 fn due(a: &Account, at: i64) -> bool {
     let s = &a.reauthorization;
-    if a.login_credentials.is_none() || s.retry_at > at {
+    if a.login_credentials.is_none() {
+        return false;
+    }
+    if service_for(a).is_some_and(|config| config.service == Service::BuiltIn)
+        && s.protocol.stage.is_some()
+        && s.protocol.finished_at == 0
+        && s.attempts < MAX_ATTEMPTS
+    {
+        return true;
+    }
+    if s.retry_at > at {
         return false;
     }
     if s.batch.is_some() || s.requested {
         return true;
+    }
+    if s.protocol.waiting {
+        return false;
     }
     s.auto
         && a.auto_refresh
@@ -313,6 +364,7 @@ pub fn request(provider: Provider, id: &str) -> Result<AccountView, String> {
         a.reauthorization.attempts = 0;
         a.reauthorization.retry_at = 0;
         a.reauthorization.error = None;
+        a.reauthorization.protocol.reset_progress();
     })?;
     launch(account.clone());
     Ok((&account).into())
@@ -339,13 +391,19 @@ fn launch(account: Account) {
                 Some(&account.revision),
                 |a| {
                     a.reauthorization.error = Some(error);
-                    a.reauthorization.requested = false;
+                    a.reauthorization.requested = a.reauthorization.protocol.retryable
+                        && a.reauthorization.attempts < MAX_ATTEMPTS;
                     a.reauthorization.retry_at = now()
                         + if a.reauthorization.batch.is_some() {
                             30
                         } else {
-                            3600
+                            protocol::retry_delay(&a.reauthorization)
                         };
+                    if a.reauthorization.protocol.started_at > 0
+                        && a.reauthorization.protocol.finished_at == 0
+                    {
+                        a.reauthorization.protocol.finished_at = now();
+                    }
                 },
             );
         }
@@ -376,10 +434,11 @@ pub(super) async fn create_batch(
     client: &reqwest::Client,
     login: &LoginCredentials,
     proxy: &str,
+    target: &Target,
 ) -> Result<Batch, String> {
     login.authorization.validate()?;
     if login.authorization.service == Service::BuiltIn {
-        return builtin::create(client, login, proxy).await;
+        return builtin::create(client, login, proxy, target).await;
     }
     let base = login.authorization.base_url()?;
     if login.authorization.service == Service::Ruozhen {
@@ -402,6 +461,7 @@ pub(super) async fn create_batch(
         base,
         created_at: now(),
         node: None,
+        lease: None,
     })
 }
 pub(super) enum Progress {
@@ -493,7 +553,19 @@ async fn step(original: &Account) -> Result<(), String> {
             a.reauthorization.attempts += 1;
             a.reauthorization.retry_at = now() + 3600;
         })?;
-        let batch = create_batch(&client, &login, &super::http::proxy_url(&exit)).await?;
+        let node = match &exit {
+            crate::modules::egress::Exit::Proxy { node, .. } => Some(node.clone()),
+            crate::modules::egress::Exit::Direct => Some(crate::modules::egress::DIRECT.into()),
+            _ => None,
+        };
+        let target = Target {
+            provider: a.provider,
+            id: a.id.clone(),
+            revision: a.revision.clone(),
+            pending: false,
+            node,
+        };
+        let batch = create_batch(&client, &login, &super::http::proxy_url(&exit), &target).await?;
         store::update(a.provider, &a.id, Some(&a.revision), |a| {
             a.reauthorization.batch = Some(batch);
             a.reauthorization.requested = false;
@@ -799,6 +871,7 @@ mod tests {
                 base: "https://sms.iruozhen.com".into(),
                 created_at: now(),
                 node: None,
+                lease: None,
             });
         })
         .unwrap();

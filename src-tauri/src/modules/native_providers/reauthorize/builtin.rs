@@ -242,7 +242,11 @@ pub(super) async fn create(
     client: &reqwest::Client,
     login: &LoginCredentials,
     proxy: &str,
+    target: &super::Target,
 ) -> Result<Batch, String> {
+    if super::protocol::enabled() {
+        return super::protocol::create(login, proxy, target).await;
+    }
     // Small servers run one browser at a time, irrespective of merchant job concurrency.
     let _permit = BROWSER
         .acquire()
@@ -273,6 +277,7 @@ pub(super) async fn create(
         base: String::new(),
         created_at: now(),
         node: None,
+        lease: None,
     })
 }
 pub(super) fn poll(batch: &Batch) -> Result<Progress, String> {

@@ -1,5 +1,7 @@
 target/
 node_modules/
+**/node_modules/
+**/__pycache__/
 .git/
 src-tauri/target/
 src-tauri/bin/
