@@ -206,6 +206,12 @@ include them once in the image. Non-Docker deployments can set `ABV_CHATGPT_NODE
 and `ABV_CHATGPT_BROWSER` to executable paths. No npm packages or separate service
 are needed. One browser runs at a time; passwords arrive over stdin, browser stderr
 is discarded, and private temporary profiles are removed after success or failure.
+Authenticated HTTP/HTTPS and SOCKS5/SOCKS5h upstream proxies are supported. For an
+authenticated route, the worker opens a temporary HTTP bridge on `127.0.0.1` and
+performs upstream authentication itself; Chromium never receives proxy credentials
+in its command line. SOCKS5 hostnames are resolved upstream, and authenticated
+Mihomo users keep their selected account/login route. The bridge closes with the
+worker, and proxy errors stop the attempt without a direct-connection fallback.
 The browser fills only the official login origin. PKCE, the callback origin and
 state are checked before exchanging the code. A new account's selected egress node
 is recorded with the job and reused when importing its tokens. Saved accounts use

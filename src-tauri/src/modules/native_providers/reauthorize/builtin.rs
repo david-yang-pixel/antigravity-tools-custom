@@ -14,6 +14,7 @@ use tokio::{
 static BROWSER: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(1));
 const REDIRECT: &str = "http://localhost:1455/auth/callback";
 const SCRIPT: &str = include_str!("browser.mjs");
+const PROXY_SCRIPT: &str = include_str!("browser-proxy.mjs");
 
 fn nonce() -> String {
     let mut bytes = [0; 32];
@@ -111,7 +112,9 @@ fn worker_error(code: &str) -> &'static str {
         "INVALID_CREDENTIALS" => "Official login rejected the password; edit the account's login credentials",
         "ACCOUNT_UNAVAILABLE" => "Official login reports this account is unavailable",
         "INVALID_2FA" => "Built-in authorization needs a valid Base32 2FA secret",
-        "UNSUPPORTED_PROXY" => "Built-in authorization needs an HTTP or SOCKS5 proxy without credentials",
+        "UNSUPPORTED_PROXY" => "Built-in authorization needs a valid HTTP, HTTPS or SOCKS5 proxy URL",
+        "PROXY_AUTH_FAILED" => "The selected proxy rejected authentication; check the egress proxy credentials",
+        "PROXY_CONNECTION_FAILED" => "Cannot reach official login through the selected proxy; check the egress node",
         "LOGIN_TIMEOUT" => "Official login timed out; check the egress node or use another authorization method",
         _ => "Built-in login could not complete; use a merchant service or manually import authorized JSON",
     }
@@ -140,16 +143,16 @@ impl Drop for Profile {
 async fn run_worker(mut input: Value) -> Result<Value, String> {
     let profile = Profile::create()?;
     input["profile"] = json!(profile.0);
+    // Source files contain no secrets. Keeping them in the private temporary directory
+    // also avoids platform command-line length limits; credentials still use stdin.
+    std::fs::write(profile.0.join("browser.mjs"), SCRIPT)
+        .and_then(|_| std::fs::write(profile.0.join("browser-proxy.mjs"), PROXY_SCRIPT))
+        .map_err(|_| "Cannot prepare built-in login worker")?;
     let node = std::env::var("ABV_CHATGPT_NODE").unwrap_or_else(|_| "node".into());
     let mut command = Command::new(node);
     command
-        .args([
-            "--input-type=module",
-            "-e",
-            SCRIPT,
-            "--",
-            "--abv-login-worker",
-        ])
+        .arg(profile.0.join("browser.mjs"))
+        .arg("--abv-login-worker")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

@@ -5,6 +5,7 @@ import { createHmac } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { browserProxy } from './browser-proxy.mjs';
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const fail = code => { throw Object.assign(new Error(code), { code }); };
@@ -98,7 +99,7 @@ export async function authorize(input, options = {}) {
     const origin = new URL(input.auth_url).origin;
     if (origin !== 'https://auth.openai.com' && origin !== options.testOrigin) fail('INVALID_LOGIN_ORIGIN');
     const profile = input.profile || await mkdtemp(join(tmpdir(), 'abv-chatgpt-'));
-    let browser, socket, deadline;
+    let browser, socket, deadline, proxyRoute;
     let stopping = false;
     const cleanup = async () => {
         if (stopping) return;
@@ -109,6 +110,7 @@ export async function authorize(input, options = {}) {
             for (let i = 0; i < 20 && browser.exitCode === null; i++) await pause(100);
             if (browser.exitCode === null) browser.kill('SIGKILL');
         }
+        await proxyRoute?.close();
         // Chromium owns this temporary profile exclusively. No persistent account data.
         await rm(profile, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     };
@@ -119,11 +121,9 @@ export async function authorize(input, options = {}) {
             `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
             '--disable-dev-shm-usage', '--disable-background-networking', '--password-store=basic'];
         if (process.getuid?.() === 0) args.push('--no-sandbox');
-        if (input.proxy) {
-            const proxy = new URL(input.proxy);
-            if (proxy.username || proxy.password || !['http:', 'https:', 'socks5:'].includes(proxy.protocol)) fail('UNSUPPORTED_PROXY');
-            args.push(`--proxy-server=${input.proxy}`);
-        } else args.push('--no-proxy-server');
+        proxyRoute = await browserProxy(input.proxy);
+        if (proxyRoute.address) args.push(`--proxy-server=${proxyRoute.address}`, '--proxy-bypass-list=<-loopback>');
+        else args.push('--no-proxy-server');
         browser = spawn(input.browser, args, { stdio: 'ignore', windowsHide: true });
         let launchError = false;
         browser.on('error', () => { launchError = true; });
@@ -163,6 +163,8 @@ export async function authorize(input, options = {}) {
         deadline = setTimeout(() => { timeout = true; }, options.timeoutMs || 150000);
         while (!timeout) {
             if (callback) return { callback };
+            const proxyError = proxyRoute.failure(new URL(input.auth_url).hostname);
+            if (proxyError) fail(proxyError);
             const allowed = Object.keys(counts).filter(stage => counts[stage] < (stage === 'consent' ? 3 : 1) && Date.now() - (last[stage] || 0) > 3000);
             const payload = { origin, email: input.email, password: input.password, code: totp(input.two_factor), allowed };
             let result;
@@ -185,7 +187,7 @@ export async function authorize(input, options = {}) {
 }
 
 if (process.argv.includes('--abv-login-worker')) {
-    const errors = new Set(['INVALID_2FA', 'BROWSER_UNAVAILABLE', 'UNSUPPORTED_PROXY', 'CHALLENGE',
+    const errors = new Set(['INVALID_2FA', 'BROWSER_UNAVAILABLE', 'UNSUPPORTED_PROXY', 'PROXY_AUTH_FAILED', 'PROXY_CONNECTION_FAILED', 'CHALLENGE',
         'EMAIL_VERIFICATION', 'INVALID_CREDENTIALS', 'ACCOUNT_UNAVAILABLE', 'UNSUPPORTED', 'LOGIN_TIMEOUT']);
     try {
         let raw = '';
