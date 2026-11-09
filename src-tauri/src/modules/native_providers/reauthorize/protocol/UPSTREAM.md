@@ -7,6 +7,8 @@ The original license is retained at `vendor/tosub2/LICENSE`.
 Local changes:
 
 - Export protocol functions and run the original command-line entry only when executed directly.
+- Select the official password login method when a password is supplied, instead
+  of relying on the email-OTP default. Mandatory additional verification still pauses.
 - Always verify upstream TLS, including through loopback proxies.
 - Disable environment proxy inheritance in the Python session so the application's selected route is authoritative.
 - Explicit curl proxy options prevent `NO_PROXY` from silently bypassing that route.

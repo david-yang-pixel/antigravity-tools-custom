@@ -61,6 +61,16 @@ test("password, TOTP, workspace and OAuth use real curl transport; checkpoint re
       assert(!text.includes(secret));
   });
 });
+test("a supplied password selects password login when the default is email OTP", async () => {
+  await fixture({ defaultEmailLogin: true }, async (options, server) => {
+    const result = await authorize(input, options);
+    assert.equal(result.credentials.email, input.email);
+    assert.equal(
+      (await (await fetch(server.base + "/__test/state")).json()).passwordCount,
+      1,
+    );
+  });
+});
 test("password rejection and extra email verification terminate without prompting", async () => {
   await fixture({}, async (options) => {
     await assert.rejects(
