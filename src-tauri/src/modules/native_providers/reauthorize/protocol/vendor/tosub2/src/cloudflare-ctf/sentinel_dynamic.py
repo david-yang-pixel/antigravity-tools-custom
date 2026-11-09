@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from request_policy import request as authorized_request
 from curl_cffi import requests
 from runtime_support import RuntimeEvents, RuntimeInput, launch_runtime, close_runtime
 
@@ -72,7 +73,7 @@ def request_headers(
 
 
 def fetch_assets(client: requests.Session, page_url: str, user_agent: str = USER_AGENT) -> dict[str, str]:
-    loader_response = client.get(
+    loader_response = authorized_request(client, "GET",
         SENTINEL_LOADER,
         headers={
             "user-agent": user_agent,
@@ -91,7 +92,7 @@ def fetch_assets(client: requests.Session, page_url: str, user_agent: str = USER
     if not match:
         raise RuntimeError("Sentinel loader did not expose a versioned SDK URL")
     sdk_url = match.group(0)
-    sdk_response = client.get(
+    sdk_response = authorized_request(client, "GET",
         sdk_url,
         headers={
             "user-agent": user_agent,
@@ -243,7 +244,7 @@ def run_call(
                 }
             else:
                 assert client is not None
-                response = client.request(
+                response = authorized_request(client,
                     request["method"],
                     request["url"],
                     headers=request_headers(
@@ -255,7 +256,6 @@ def run_call(
                     ),
                     data=request.get("body") if request["method"] != "GET" else None,
                     timeout=45,
-                    allow_redirects=False,
                 )
                 reply = {
                     "status": response.status_code,

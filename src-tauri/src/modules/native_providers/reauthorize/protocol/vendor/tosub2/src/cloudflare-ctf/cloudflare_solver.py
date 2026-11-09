@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from request_policy import request as authorized_request
 from runtime_support import RuntimeEvents, RuntimeInput, launch_runtime, close_runtime
 
 
@@ -162,13 +163,12 @@ def submit_generated(
 ):
     method = generated["method"].upper()
     body = generated.get("body", "")
-    response = session.request(
+    response = authorized_request(session,
         method,
         generated["url"],
         headers=request_headers(page_url, generated, user_agent, browser_identity),
         data=body if method != "GET" else None,
         timeout=45,
-        allow_redirects=False,
     )
     _log(
         f"{generated['kind']} {method} HTTP {response.status_code} "
@@ -326,7 +326,7 @@ def solve_challenge(
                     value = (browser_identity or {}).get(key)
                     if value:
                         frame_headers[{"secChUa": "sec-ch-ua", "secChUaMobile": "sec-ch-ua-mobile", "secChUaPlatform": "sec-ch-ua-platform"}[key]] = str(value)
-                frame_response = session.get(
+                frame_response = authorized_request(session, "GET",
                     frame_url,
                     headers=frame_headers,
                     timeout=40,
@@ -356,11 +356,11 @@ def solve_challenge(
 
             current_clearance = clearance_values(session, challenge_url)
             if current_clearance - initial_clearance:
-                verification = session.get(
+                verification = authorized_request(session, "GET",
                     verification_url or challenge_url,
+                    purpose="verification",
                     headers=navigation_headers(user_agent, browser_identity),
                     timeout=30,
-                    allow_redirects=False,
                 )
                 status = int(verification.status_code)
                 return {

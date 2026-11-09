@@ -175,6 +175,10 @@ const ASSETS: &[(&str, &str)] = &[
         include_str!("protocol/vendor/tosub2/src/cloudflare-ctf/runtime_support.py"),
     ),
     (
+        "vendor/tosub2/src/cloudflare-ctf/request_policy.py",
+        include_str!("protocol/vendor/tosub2/src/cloudflare-ctf/request_policy.py"),
+    ),
+    (
         "vendor/tosub2/src/cloudflare-ctf/turnstile_runtime.cjs",
         include_str!("protocol/vendor/tosub2/src/cloudflare-ctf/turnstile_runtime.cjs"),
     ),

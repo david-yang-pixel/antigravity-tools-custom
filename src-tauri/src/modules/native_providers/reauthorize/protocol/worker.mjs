@@ -55,7 +55,7 @@ function failure(error) {
     return "ACCOUNT_UNAVAILABLE";
   if (/HTTP 429|rate.limit/i.test(text)) return "RATE_LIMITED";
   if (
-    /PROXY_RISK_CONTROL|security.check|Cloudflare|Turnstile|SESSION_SELECTION_INVALID|安全校验/i.test(
+    /AUTH_REQUEST_BLOCKED|PROXY_RISK_CONTROL|security.check|Cloudflare|Turnstile|SESSION_SELECTION_INVALID|安全校验/i.test(
       text,
     )
   )

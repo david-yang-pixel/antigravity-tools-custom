@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "vendor/tosub2/src/cloudflare-ctf"
 sys.path.insert(0, str(RUNTIME_DIR))
@@ -44,12 +45,20 @@ class FakeSession:
         """)
 
     def request(self, method, url, **kwargs):
+        if method == "GET":
+            return self.get(url, **kwargs)
         self.seen.append((method, url))
         return FakeResponse(url, json.dumps({"token": "fixture-challenge"}))
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required")
 class RuntimeTests(unittest.TestCase):
+    def setUp(self):
+        # Assets and broker replies use FakeSession; tests never resolve real services.
+        dns = patch("request_policy.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))])
+        dns.start()
+        self.addCleanup(dns.stop)
+
     def test_real_sentinel_sdk_runtime_reads_closed_input_and_cleans_it(self):
         session = FakeSession()
         with SentinelClient(client=session) as client:

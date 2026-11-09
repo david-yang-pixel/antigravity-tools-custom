@@ -13,6 +13,10 @@ Local changes:
 - Bound Python dependency detection and Sentinel calls by the application's deadlines.
 - Close private runtime input files before Node opens them, and use bounded reader
   threads for anonymous subprocess pipes on Windows, macOS and Linux.
+- Route all SDK/Cloudflare broker requests, assets and iframe downloads through an
+  exact HTTPS origin/endpoint policy. Reject private, reserved and mixed DNS answers,
+  pin the checked destination through proxies while retaining TLS hostname checks,
+  disable redirects and discard script-supplied routing/credential headers.
 
 The application wrapper owns credentials, encrypted checkpoints, progress, cancellation,
 timeouts, identity verification and retries. It does not launch the upstream console,
