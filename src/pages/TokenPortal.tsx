@@ -173,6 +173,7 @@ export default function TokenPortal() {
 
     const unlimited = t('user_token.unlimited');
     const million = (n: number) => `${toQuotaMillions(n)} M tokens`;
+    const times = (n: number) => t('token_portal.request_times', { count: n, formatted: n.toLocaleString(i18n.language) });
     const exhausted = overview !== null && (overview.balance_micros ?? 0) <= 0;
     const status = overview?.expired ? t('token_portal.expired') : exhausted ? t('billing.insufficient') : t('token_portal.active');
     // `daily` is newest-first and always includes the current UTC+8 day, even when empty.
@@ -226,24 +227,26 @@ export default function TokenPortal() {
                             <span className="flex items-center justify-between text-sm text-slate-500 mb-3">{t('billing.balance')}<ArrowRight size={16} aria-hidden="true" /></span>
                             <span className="block text-xl font-semibold tracking-tight break-words">{formatYuan(overview.balance_micros ?? 0)}</span>
                         </button>
-                        <div className="bg-white border border-slate-200 rounded-xl p-5">
+                        {[
+                            { label: t('token_portal.today_used'), listLabel: t('token_portal.today_by_model'), total: million(today ? today.input_tokens + today.output_tokens : 0), value: (row: ModelUsage) => million(row.input_tokens + row.output_tokens) },
+                            { label: t('token_portal.today_requests'), listLabel: t('token_portal.today_requests_by_model'), total: times(today?.requests ?? 0), value: (row: ModelUsage) => times(row.requests) },
+                        ].map(card => <div key={card.label} className="bg-white border border-slate-200 rounded-xl p-5">
                             <p className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                                <span className="text-sm text-slate-500">{t('token_portal.today_used')}</span>
-                                <span className="text-xl font-semibold tracking-tight tabular-nums break-words">{million(today ? today.input_tokens + today.output_tokens : 0)}</span>
+                                <span className="text-sm text-slate-500">{card.label}</span>
+                                <span className="text-xl font-semibold tracking-tight tabular-nums break-words">{card.total}</span>
                             </p>
-                            {overview.today_models.length > 0 && <ul aria-label={t('token_portal.today_by_model')} className="mt-3 max-h-40 overflow-y-auto space-y-1.5 border-t border-slate-100 pt-3 text-sm">
+                            {overview.today_models.length > 0 && <ul aria-label={card.listLabel} className="mt-3 max-h-40 overflow-y-auto space-y-1.5 border-t border-slate-100 pt-3 text-sm">
                                 {overview.today_models.map(row => <li key={row.model} className="flex items-baseline justify-between gap-3">
                                     <span className="truncate font-mono text-slate-600" title={row.model}>{row.model}</span>
-                                    <span className="shrink-0 tabular-nums text-slate-900">{million(row.input_tokens + row.output_tokens)}</span>
+                                    <span className="shrink-0 tabular-nums text-slate-900">{card.value(row)}</span>
                                 </li>)}
                             </ul>}
-                        </div>
+                        </div>)}
                         {[
-                            [t('token_portal.today_requests'), (today?.requests ?? 0).toLocaleString(), t('token_portal.today_note')],
                             [t('token_portal.used'), million(overview.total_tokens_used)],
                             [t('token_portal.requests'), overview.total_requests.toLocaleString()],
                             [t('user_token.max_concurrency'), overview.max_concurrency === 0 ? unlimited : String(overview.max_concurrency)],
-                        ].map(([label, value, note]) => <div key={label} className="bg-white border border-slate-200 rounded-xl p-5"><p className="text-sm text-slate-500 mb-3">{label}</p><p className="text-xl font-semibold tracking-tight break-words">{value}</p>{note && <p className="mt-1 text-xs text-slate-400">{note}</p>}</div>)}
+                        ].map(([label, value]) => <div key={label} className="bg-white border border-slate-200 rounded-xl p-5"><p className="text-sm text-slate-500 mb-3">{label}</p><p className="text-xl font-semibold tracking-tight break-words">{value}</p></div>)}
                     </section>
                     {(currentKey || isAccount) && <TokenConnectionDetails token={currentKey} account={isAccount ? { onRegenerate: regenerateKey } : undefined} />}
                     </div>
