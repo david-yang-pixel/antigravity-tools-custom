@@ -11,6 +11,8 @@ Local changes:
 - Disable environment proxy inheritance in the Python session so the application's selected route is authoritative.
 - Explicit curl proxy options prevent `NO_PROXY` from silently bypassing that route.
 - Bound Python dependency detection and Sentinel calls by the application's deadlines.
+- Close private runtime input files before Node opens them, and use bounded reader
+  threads for anonymous subprocess pipes on Windows, macOS and Linux.
 
 The application wrapper owns credentials, encrypted checkpoints, progress, cancellation,
 timeouts, identity verification and retries. It does not launch the upstream console,
@@ -52,3 +54,7 @@ exercise the actual protocol engine and Python transport against a local HTTP se
 including password/TOTP, workspace selection, OAuth state and identity validation,
 checkpoint recovery, rejection, timeouts and fixed-proxy failure. They do not verify
 that a real account can pass the official service's current security checks.
+
+`python -m unittest discover -s test -p "test_*.py" -v` also runs the real Sentinel
+and Cloudflare JavaScript runtimes with synthetic SDK inputs, without the worker's
+test token shortcut. The same tests run on Windows, macOS and Linux in CI.

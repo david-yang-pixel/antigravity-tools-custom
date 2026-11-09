@@ -8,6 +8,8 @@ from typing import Any
 
 from curl_cffi import requests
 
+from runtime_support import close_runtime
+
 from sentinel_dynamic import (
     PROXY,
     TLS_PROFILE,
@@ -109,8 +111,8 @@ class SentinelClient:
                 self.process.stdin.flush()
                 self.process.wait(timeout=2)
             except Exception:
-                self.process.kill()
-                self.process.wait()
+                pass
+        close_runtime(self.process)
         self.input_file.close()
         if self._owns_client:
             self.client.close()

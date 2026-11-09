@@ -6,15 +6,14 @@ from __future__ import annotations
 import base64
 import json
 import re
-import selectors
 import subprocess
 import sys
-import tempfile
 import time
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from runtime_support import RuntimeEvents, RuntimeInput, launch_runtime, close_runtime
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -106,19 +105,8 @@ def start_runtime(
     script: Path,
     runtime_input: dict[str, Any],
     node_command: str,
-) -> tuple[subprocess.Popen[str], tempfile.NamedTemporaryFile[str]]:
-    input_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json")
-    json.dump(runtime_input, input_file)
-    input_file.flush()
-    process = subprocess.Popen(
-        [node_command, str(script), input_file.name],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    return process, input_file
+) -> tuple[subprocess.Popen[str], RuntimeInput]:
+    return launch_runtime(script, runtime_input, node_command)
 
 
 def request_headers(
@@ -253,8 +241,8 @@ def solve_challenge(
     initial_clearance = clearance_values(session, challenge_url)
     parent: subprocess.Popen[str] | None = None
     child: subprocess.Popen[str] | None = None
-    input_files: list[tempfile.NamedTemporaryFile[str]] = []
-    selector = selectors.DefaultSelector()
+    input_files: list[RuntimeInput] = []
+    events = RuntimeEvents()
     try:
         parser = InlineScriptParser()
         parser.feed(challenge_html)
@@ -273,7 +261,7 @@ def solve_challenge(
         input_files.append(parent_file)
         if parent.stdout is None:
             raise RuntimeError("Cloudflare parent runtime stdout is unavailable")
-        selector.register(parent.stdout, selectors.EVENT_READ, ("parent", parent))
+        events.register("parent", parent)
 
         frame_url = ""
         parent_events: dict[str, dict[str, Any]] = {}
@@ -283,12 +271,12 @@ def solve_challenge(
         deadline = time.monotonic() + timeout_seconds
 
         while time.monotonic() < deadline:
-            for key, _mask in selector.select(timeout=0.5):
-                source_name, process = key.data
-                line = key.fileobj.readline()
-                if not line:
-                    selector.unregister(key.fileobj)
-                    continue
+            event = events.read(min(0.5, max(0, deadline - time.monotonic())))
+            if event is not None:
+                source_name, process, line = event
+            else:
+                line = None
+            if line is not None:
                 message = json.loads(line)
                 message_type = message.get("type")
 
@@ -322,7 +310,7 @@ def solve_challenge(
                         parent_final = message.get("result") or {}
                     else:
                         child_final = message.get("result") or {}
-                    selector.unregister(key.fileobj)
+                    events.unregister(source_name)
 
             if not child_started and frame_url and {"init", "extraParams", "execute"}.issubset(parent_events):
                 frame_headers = {
@@ -363,7 +351,7 @@ def solve_challenge(
                 input_files.append(child_file)
                 if child.stdout is None:
                     raise RuntimeError("Cloudflare child runtime stdout is unavailable")
-                selector.register(child.stdout, selectors.EVENT_READ, ("child", child))
+                events.register("child", child)
                 child_started = True
 
             current_clearance = clearance_values(session, challenge_url)
@@ -385,10 +373,9 @@ def solve_challenge(
 
         raise RuntimeError("Cloudflare challenge did not issue cf_clearance before timeout")
     finally:
-        selector.close()
         for process in (child, parent):
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait()
+            if process is not None:
+                close_runtime(process)
+        events.close()
         for input_file in input_files:
             input_file.close()

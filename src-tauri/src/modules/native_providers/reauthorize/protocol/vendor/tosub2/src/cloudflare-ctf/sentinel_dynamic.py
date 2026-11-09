@@ -10,9 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import selectors
 import subprocess
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -20,6 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from curl_cffi import requests
+from runtime_support import RuntimeEvents, RuntimeInput, launch_runtime, close_runtime
 
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME = BASE_DIR / "sentinel_runtime.cjs"
@@ -181,7 +180,7 @@ def start_runtime(
     user_agent: str = USER_AGENT,
     browser_identity: dict[str, Any] | None = None,
     node_command: str = "node",
-) -> tuple[subprocess.Popen[str], tempfile.NamedTemporaryFile[str]]:
+) -> tuple[subprocess.Popen[str], RuntimeInput]:
     identity = browser_identity or {}
     runtime_input = {
         "url": page_url,
@@ -196,17 +195,9 @@ def start_runtime(
         "screenHeight": screen_height,
         **assets,
     }
-    input_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json")
-    json.dump(runtime_input, input_file)
-    input_file.flush()
-    process = subprocess.Popen(
-        [node_command, str(RUNTIME), input_file.name],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=None,
-        text=True,
-        bufsize=1,
-    )
+    process, input_file = launch_runtime(RUNTIME, runtime_input, node_command)
+    process._abv_events = RuntimeEvents()
+    process._abv_events.register("sentinel", process)
     return process, input_file
 
 
@@ -229,11 +220,14 @@ def run_call(
     send(process, {"type": "call", "method": method, "flow": flow})
     assert process.stdout is not None
     network_responses: list[dict[str, Any]] = []
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            stderr = process.stderr.read() if process.stderr else ""
-            raise RuntimeError(f"Sentinel runtime exited unexpectedly: {stderr[-1000:]}")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        event = process._abv_events.read(min(0.5, max(0, deadline - time.monotonic())))
+        if event is None:
+            continue
+        _, _, line = event
+        if line is None:
+            raise RuntimeError("Sentinel runtime exited unexpectedly")
         message = json.loads(line)
         if message.get("type") == "request":
             request = message["request"]
@@ -287,6 +281,8 @@ def run_call(
             message["networkResponses"] = network_responses
             return message
 
+    raise RuntimeError("Sentinel runtime call timed out")
+
 
 def safe_value_summary(value: str | None) -> dict[str, Any]:
     if not value:
@@ -322,7 +318,7 @@ def main() -> int:
 
     client = session()
     process: subprocess.Popen[str] | None = None
-    input_file: tempfile.NamedTemporaryFile[str] | None = None
+    input_file: RuntimeInput | None = None
     try:
         replay_response = None
         if args.har:
@@ -356,13 +352,8 @@ def main() -> int:
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if output["ok"] else 1
     finally:
-        if process is not None and process.poll() is None:
-            try:
-                send(process, {"type": "shutdown"})
-                process.wait(timeout=2)
-            except Exception:
-                process.kill()
-                process.wait()
+        if process is not None:
+            close_runtime(process)
         if input_file is not None:
             input_file.close()
         client.close()
