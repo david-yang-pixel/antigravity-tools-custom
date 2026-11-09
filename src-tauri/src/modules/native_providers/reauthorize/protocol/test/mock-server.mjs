@@ -61,7 +61,11 @@ export async function startMock(controls = {}) {
       chatgptWorkspaceSelected = false;
       chatgptLoginComplete = false;
       selectedEmail = url.searchParams.get("login_hint") || selectedEmail;
-      const passwordMode = selectedEmail !== "email-mfa@example.com";
+      const passwordMode = selectedEmail !== "email-mfa@example.com" && (
+        !controls.defaultEmailLogin ||
+        (url.searchParams.get("connection") === "password" &&
+          url.searchParams.get("reauth") === "password")
+      );
       return sendJson(res, 200, {
         url: `${base}/api/accounts/authorize?mode=${passwordMode ? "password" : "email"}`,
       });

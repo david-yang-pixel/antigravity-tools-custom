@@ -1007,6 +1007,10 @@ async function loginChatgptWeb(client, { chatgptBase, authBase, email, rl, passw
     `${chatgptBase}/api/auth/signin/openai?` +
     new URLSearchParams({
       prompt: "login",
+      // Without an explicit method, the official default may be email OTP even
+      // for an account that has a password. The supplied password stays in the
+      // later verification POST, never in this URL.
+      ...(password ? { connection: "password", reauth: "password" } : {}),
       "ext-oai-did": deviceId,
       auth_session_logging_id: authSessionLoggingId,
       screen_hint: "login_or_signup",

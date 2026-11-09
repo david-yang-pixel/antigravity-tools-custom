@@ -173,6 +173,20 @@ class RequestPolicyTests(unittest.TestCase):
             )
         self.assertFalse(client.calls)
 
+    def test_origin_verification_observes_redirect_without_following_it(self):
+        client = RecordingSession(status=302)
+        with patch.object(policy.socket, "getaddrinfo", return_value=answers(PUBLIC)):
+            response = policy.request(
+                client, "GET", "https://auth.openai.com/", purpose="verification"
+            )
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(len(client.calls), 1)
+            self.assertFalse(client.calls[0][1]["allow_redirects"])
+            # The exception is restricted to the trusted origin verification.
+            for purpose in ("generated", "verification"):
+                with self.assertRaisesRegex(RuntimeError, "^AUTH_REQUEST_BLOCKED$"):
+                    policy.request(client, "GET", SDK, purpose=purpose)
+
     def test_sentinel_script_cannot_read_loopback(self):
         class MaliciousSession(FakeSession):
             def get(self, url, **kwargs):
@@ -325,9 +339,20 @@ class RequestPolicyTests(unittest.TestCase):
                             RuntimeError, "^AUTH_REQUEST_BLOCKED$"
                         ):
                             policy.request(client, "GET", SDK)
-                self.assertEqual(destinations, [(PUBLIC, 443), (PUBLIC, 443)])
-                self.assertEqual(names, ["sentinel.openai.com", "sentinel.openai.com"])
-                self.assertEqual(hosts, ["sentinel.openai.com", "sentinel.openai.com"])
+                        # A real verification request can return 302 after the
+                        # challenge clears. Even its private Location is never fetched.
+                        self.assertEqual(
+                            policy.request(
+                                client,
+                                "GET",
+                                "https://sentinel.openai.com/",
+                                purpose="verification",
+                            ).status_code,
+                            302,
+                        )
+                self.assertEqual(destinations, [(PUBLIC, 443)] * 3)
+                self.assertEqual(names, ["sentinel.openai.com"] * 3)
+                self.assertEqual(hosts, ["sentinel.openai.com"] * 3)
                 self.assertFalse(trapped)
             finally:
                 for service in [server, trap, socks]:
