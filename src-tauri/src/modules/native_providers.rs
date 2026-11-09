@@ -263,7 +263,9 @@ impl From<&Account> for AccountView {
             expires_at: a.expires_at,
             can_refresh: !a.credentials.refresh_token.is_empty(),
             has_login_credentials: a.login_credentials.is_some(),
-            reauthorization_service: reauthorize::service_for(a).map(|config| config.service),
+            // Every pre-selection account came from the original merchant, including
+            // token-only imports that do not yet have password/2FA material bound.
+            reauthorization_service: Some(reauthorize::service_for(a).unwrap_or_default().service),
             auto_reauthorize: a.reauthorization.auto,
             reauthorizing: a.reauthorization.requested || a.reauthorization.batch.is_some(),
             reauthorization_error: a.reauthorization.error.clone(),

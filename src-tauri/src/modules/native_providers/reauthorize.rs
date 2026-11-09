@@ -773,6 +773,12 @@ mod tests {
     fn service_changes_invalidate_old_jobs_and_survive_token_reimports() {
         let _sandbox = Sandbox::new();
         let a = saved();
+        // Old JSON imports without bound login material still belong to dbc2api.
+        assert!(a.login_credentials.is_none());
+        assert_eq!(
+            serde_json::to_value(AccountView::from(&a)).unwrap()["reauthorization_service"],
+            "dbc2api"
+        );
         let input = "a@example.com----private-password----JBSWY3DPEHPK3PXP";
         bind(
             a.provider,

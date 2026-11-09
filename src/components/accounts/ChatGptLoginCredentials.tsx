@@ -62,7 +62,7 @@ export function LoginCredentialsEditor({ account, provider, busy, onSave, onClos
     const { t } = useTranslation();
     const [input, setInput] = useState('');
     const [auto, setAuto] = useState(account?.has_login_credentials ? account.auto_reauthorize : true);
-    const [authorization, setAuthorization] = useState<AuthorizationConfig>({ service: account?.reauthorization_service || 'built_in', cdk: '' });
+    const [authorization, setAuthorization] = useState<AuthorizationConfig>({ service: account?.reauthorization_service || 'dbc2api', cdk: '' });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     useEffect(() => {

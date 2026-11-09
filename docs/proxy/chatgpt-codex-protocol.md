@@ -190,8 +190,11 @@ requests. `service` is one of:
 | `dbc2api` | `https://login.dbc2api.top/api/batches`, bearer-token polling, download `?format=sub2`. |
 | `ruozhen` | `https://sms.iruozhen.com/api/submit` with `account_first:true`, private cookie session, `/api/tasks/{id}`, download `/api/download/{id}?format=sub2api`. |
 
-The UI defaults new imports to `built_in`. Existing vaults, jobs and API callers
-omitting the option retain the original `dbc2api` behavior. A binding that omits
+The UI defaults new imports to `built_in`. All existing accounts, including
+token-only imports without bound password/2FA material, display the original
+`dbc2api` service unless explicitly changed. Bulk binding also defaults to that
+merchant. Existing vaults, jobs and API callers omitting the option retain the
+original `dbc2api` behavior. A binding that omits
 the service preserves that account's choice. A JSON-only import records the choice
 but still needs complete email/password/2FA material to log in automatically.
 Ruozhen's historical-account matching can work without CDK; its optional CDK is
