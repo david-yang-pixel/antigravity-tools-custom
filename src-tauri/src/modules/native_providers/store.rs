@@ -165,6 +165,10 @@ fn upsert_mode(
         if account.reauthorization.authorization.is_none() {
             account.reauthorization.authorization = previous.reauthorization.authorization.clone();
         }
+        if account.login_credentials == previous.login_credentials {
+            account.reauthorization.protocol = previous.reauthorization.protocol.clone();
+        }
+        account.reauthorization.protocol.complete();
         account.quota = previous.quota.clone();
         account.models = previous.models.clone();
         account.verified_models = previous.verified_models.clone();
@@ -175,6 +179,7 @@ fn upsert_mode(
         if accounts.len() >= 500 {
             return Err("At most 500 accounts per provider".into());
         }
+        account.reauthorization.protocol.complete();
         accounts.push(account.clone());
     }
     write(account.provider, &accounts)?;
@@ -209,6 +214,7 @@ pub(super) fn bind_logins(
             a.revision = uuid::Uuid::new_v4().to_string();
             a.reauthorization.batch = None;
             a.reauthorization.requested = false;
+            a.reauthorization.protocol = Default::default();
         }
         a.login_credentials = Some(login.clone());
         a.reauthorization.authorization = Some(login.authorization.clone());

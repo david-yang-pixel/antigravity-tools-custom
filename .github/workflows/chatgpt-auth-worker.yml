@@ -1,0 +1,32 @@
+name: ChatGPT authorization worker
+
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/src/modules/native_providers/reauthorize/protocol/**'
+      - '.github/workflows/chatgpt-auth-worker.yml'
+  workflow_dispatch:
+
+jobs:
+  protocol:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src-tauri/src/modules/native_providers/reauthorize/protocol
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --omit=dev --ignore-scripts
+      - run: python -m pip install -r vendor/tosub2/requirements.txt
+      - run: node --test test/worker.test.mjs
+      - run: python -m unittest discover -s test -p "test_*.py" -v
