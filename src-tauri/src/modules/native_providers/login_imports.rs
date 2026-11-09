@@ -258,9 +258,13 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
         })?;
         return Err("This email is already imported; use the saved account's own row".into());
     }
-    let direct = crate::modules::egress::Exit::Direct;
     let builtin = job.login.authorization.service == Service::BuiltIn;
-    let client = super::http::login_client(provider, &direct)
+    let auth_exit = if builtin {
+        crate::modules::egress::Exit::Direct
+    } else {
+        crate::modules::egress::Exit::Off
+    };
+    let client = super::http::login_client(provider, &auth_exit)
         .map_err(|_| "Cannot initialize login import connection")?;
     let local_protocol = job.login.authorization.service == Service::BuiltIn && protocol::enabled();
     let mut batch = match job.state.batch.clone() {
@@ -302,7 +306,10 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
             } else {
                 None
             };
-            let exit = route.as_ref().map(|route| &route.exit).unwrap_or(&direct);
+            let exit = route
+                .as_ref()
+                .map(|route| &route.exit)
+                .unwrap_or(&auth_exit);
             let submit_client = super::http::login_client(provider, exit)
                 .map_err(|_| "Cannot initialize login import connection")?;
             let target = Target {
