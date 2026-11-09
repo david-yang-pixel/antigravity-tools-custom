@@ -11,15 +11,17 @@ from unittest.mock import patch
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / "vendor/tosub2/src/cloudflare-ctf"
 sys.path.insert(0, str(RUNTIME_DIR))
-from runtime_support import RuntimeEvents, launch_runtime, close_runtime
+from runtime_support import RuntimeEvents, launch_runtime, close_runtime, RuntimeInput
 from sentinel_client import SentinelClient
 import cloudflare_solver
+import runtime_support
 
 
 class FakeResponse:
     def __init__(self, url, text):
         self.url, self.text, self.status_code = url, text, 200
         self.headers = {"content-type": "application/json"}
+        self.content = text.encode("utf-8")
 
 
 class FakeSession:
@@ -127,6 +129,49 @@ class RuntimeTests(unittest.TestCase):
                 close_runtime(process)
                 events.close()
                 source.close()
+
+    def test_solver_processes_parent_child_messages_and_verifies_clearance(self):
+        # Drive solve_challenge itself so Windows CI also covers its pipe loop.
+        # The fake JS messages stand in for a challenge; no external HTTP is sent.
+        class Session(FakeSession):
+            def request(self, method, url, **_kwargs):
+                self.seen.append((method, url))
+                if method == "POST":
+                    self.cookies.set("cf_clearance", "fixture-clearance", domain="auth.openai.com", path="/")
+                return FakeResponse(url, "<!doctype html><html></html>")
+        paths = []
+        def source(value):
+            item = RuntimeInput(value)
+            paths.append(Path(item.name))
+            return item
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "messages.cjs"
+            script.write_text("""
+                const input=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));
+                const emit=message=>process.stdout.write(JSON.stringify(message)+'\\n');
+                if(input.parentUrl){
+                    emit({type:'request',request:{id:1,method:'POST',kind:'xhr',
+                        url:'https://auth.openai.com/cdn-cgi/challenge-platform/test',body:'{}'}});
+                }else{
+                    emit({type:'frame',url:'https://challenges.cloudflare.com/turnstile/v0/test'});
+                    for(const event of ['init','extraParams','execute'])
+                        emit({type:'frame-message',message:{data:{event}}});
+                }
+                require('readline').createInterface({input:process.stdin}).on('line',()=>{});
+            """, encoding="utf-8")
+            session = Session()
+            with patch.object(cloudflare_solver, "PARENT_RUNTIME", script), patch.object(cloudflare_solver, "CHILD_RUNTIME", script), patch.object(runtime_support, "RuntimeInput", side_effect=source):
+                result = cloudflare_solver.solve_challenge(session,
+                    challenge_url="https://auth.openai.com/", challenge_html="<script>_cf_chl_opt={}</script>",
+                    challenge_size=40, user_agent="fixture-agent", timeout_seconds=5)
+            self.assertTrue(result["ok"])
+            self.assertEqual(session.seen, [
+                ("GET", "https://challenges.cloudflare.com/turnstile/v0/test"),
+                ("POST", "https://auth.openai.com/cdn-cgi/challenge-platform/test"),
+                ("GET", "https://auth.openai.com/"),
+            ])
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(not path.exists() and not path.parent.exists() for path in paths))
 
 
 if __name__ == "__main__":
