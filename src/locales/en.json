@@ -50,7 +50,7 @@
     "deleteTitle": "Remove account",
     "deleteHint": "Remove local credentials for {{name}}? This account will stop participating in rotation.",
     "chatgpt": {
-      "importHint": "Paste email----password----2fa, one account per line, or Sub2 JSON, Codex auth.json or a refresh token. The selected service handles authorization. New accounts import through the server directly and retain DIRECT as their egress. Existing emails are skipped; reauthorize them from their own rows.",
+      "importHint": "Paste email----password----2fa, one account per line, or Sub2 JSON, Codex auth.json or a refresh token. Built-in login uses the server directly. Once credentials are issued, an available node is assigned according to egress settings and used to verify the account. Existing emails are skipped; reauthorize them from their own rows.",
       "importPlaceholder": "email----password----2fa (one account per line), or Sub2 JSON / auth.json / refresh token",
       "batchResult": "Imported {{imported}}, skipped {{skipped}}, failed {{failed}}",
       "reimport": "Re-import",
@@ -92,7 +92,7 @@
       "builtIn": "Self-hosted · Built in",
       "merchant": "Merchant",
       "notConfigured": "Login authorization not configured",
-      "builtInHint": "The project completes official OAuth with email, password and 2FA without sending credentials to a merchant. New account imports and failed import retries use the server directly; saved accounts reauthorize through their own route. Two tasks run at a time with encrypted login progress. Extra verification pauses the task until you retry.",
+      "builtInHint": "The project completes official OAuth with email, password and 2FA without sending credentials to a merchant. Login and 401 reauthorization use the server directly. Added accounts receive a node for API traffic and token refresh. Two tasks run at a time; extra verification pauses the task.",
       "import_waiting": "Waiting for verification",
       "waitingHint": "Automatic retries are paused. Complete verification or check the egress node, then retry.",
       "elapsed": "{{seconds}}s total, {{stageSeconds}}s this stage",

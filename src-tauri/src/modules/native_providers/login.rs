@@ -256,18 +256,18 @@ async fn import_inner(
     }
     let pasted = a.credentials.refresh_token.clone();
     reject_saved_credentials(&a, &store::all(provider)?)?;
-    // A row re-import goes through that account's own route. New accounts import
-    // directly unless resuming a token that was already issued on a recorded node.
+    // Direct OAuth does not select the account's node. New accounts obtain an
+    // available node here, and saved accounts keep their binding.
     let preferred = match account_id {
         Some(id) => {
             store::get(provider, id)?;
             egress::bound_node(Pool::Native(provider), id)?
         }
-        None => Some(new_login_node.unwrap_or(egress::DIRECT).to_owned()),
+        None => new_login_node.map(str::to_owned),
     };
-    // A saved account without a binding may still need auto-assignment. Only
-    // connection failures allow another candidate: nothing was sent. Explicit
-    // DIRECT and recorded routes remain fixed throughout verification.
+    // A new account's auto-chosen node that cannot reach the upstream is reported and
+    // the import moves to another node. Only connection failures move: nothing was sent,
+    // so the pasted credentials are untouched.
     let mut attempt = 1;
     let (route, refreshed) = loop {
         let route = egress::login_route(Pool::Native(provider), preferred.as_deref()).await?;

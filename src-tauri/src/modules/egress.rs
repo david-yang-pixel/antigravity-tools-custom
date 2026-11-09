@@ -673,9 +673,6 @@ async fn binding(settings: &Settings, pool: Pool, account_id: &str) -> Result<St
 /// Route of one saved account's upstream calls.
 pub async fn exit_for(pool: Pool, account_id: &str) -> Result<Exit, String> {
     let settings = load()?;
-    if settings.bindings(pool).get(account_id).map(String::as_str) == Some(DIRECT) {
-        return Ok(Exit::Direct);
-    }
     if !settings.enabled(pool) {
         return Ok(Exit::Off);
     }
@@ -803,9 +800,8 @@ fn login_lock(pool: Pool) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
         .or_default()
         .clone())
 }
-/// Login runs before the account exists: it uses `preferred` (the node chosen when
-/// the login started, or a saved account's own binding) or the node auto-assignment
-/// would pick, so the account later keeps the same exit it authorized from.
+/// Selects a route for token validation or login. `None` reserves an automatically
+/// assigned account node; an explicit DIRECT authentication route reserves no node.
 pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRoute, String> {
     let guard = login_lock(pool)?.lock_owned().await;
     if preferred == Some(DIRECT) {
@@ -856,20 +852,16 @@ pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRou
         _guard: guard,
     })
 }
-/// The node an existing account must reauthorize through: its own binding, so the
-/// new token is issued to the address that already carries this account. `None`
-/// when the pool's egress is off or the account has no binding yet. An explicit
-/// DIRECT binding always bypasses both airport routing and the global proxy.
+/// The node used to validate replacement credentials and carry account traffic.
+/// `None` when the pool's egress is off or the account has no binding yet.
 pub fn bound_node(pool: Pool, account_id: &str) -> Result<Option<String>, String> {
     let settings = load()?;
-    if !settings.enabled(pool)
-        && settings.bindings(pool).get(account_id).map(String::as_str) != Some(DIRECT)
-    {
+    if !settings.enabled(pool) {
         return Ok(None);
     }
     Ok(settings.bindings(pool).get(account_id).cloned())
 }
-/// Keeps an authorized account on its login node unless it already has a binding.
+/// Keeps an account on the node used to validate it unless it already has a binding.
 /// A node other accounts of the pool already fill is left untouched.
 pub fn adopt(pool: Pool, account_id: &str, node: Option<&str>) {
     let Some(node) = node else { return };
@@ -1643,7 +1635,7 @@ mod tests {
         assert_eq!(route.exit, Exit::Off);
     }
     #[tokio::test]
-    async fn direct_import_bypasses_an_unavailable_airport_and_retains_its_route() {
+    async fn direct_authentication_does_not_choose_the_account_node() {
         let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
         edit(|s| {
             s.set_enabled(NATIVE, true);
@@ -1656,32 +1648,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(route.exit, Exit::Direct);
-        assert_eq!(route.node.as_deref(), Some(DIRECT));
         assert!(route._hold.is_none());
         let route = login_route(NATIVE, Some(DIRECT)).await.unwrap();
         assert_eq!(route.exit, Exit::Direct);
         drop(route);
-        adopt(NATIVE, "direct-account", Some(DIRECT));
+        assert!(bound_node(NATIVE, "new-account").unwrap().is_none());
+        // The account's later traffic uses the assigned node, independently of login.
+        adopt(NATIVE, "new-account", Some("account-node"));
         assert_eq!(
-            bound_node(NATIVE, "direct-account").unwrap().as_deref(),
-            Some(DIRECT)
+            bound_node(NATIVE, "new-account").unwrap().as_deref(),
+            Some("account-node")
         );
-        assert_eq!(
-            exit_for(NATIVE, "direct-account").await.unwrap(),
-            Exit::Direct
-        );
+        assert!(exit_for(NATIVE, "new-account").await.is_err());
         edit(|s| {
             s.set_enabled(NATIVE, false);
             Ok(())
         })
         .unwrap();
-        assert_eq!(
-            exit_for(NATIVE, "direct-account").await.unwrap(),
-            Exit::Direct
-        );
-        assert_eq!(
-            exit_for(NATIVE, "unbound-account").await.unwrap(),
-            Exit::Off
-        );
+        assert_eq!(exit_for(NATIVE, "new-account").await.unwrap(), Exit::Off);
     }
 }

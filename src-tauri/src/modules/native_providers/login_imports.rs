@@ -290,19 +290,18 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
                 Ok(())
             })?;
             // New built-in logins use server DIRECT, including retries of old tasks.
-            // The resulting account retains DIRECT for validation and later refresh.
-            let mut route =
-                if job.login.authorization.service == Service::BuiltIn && !local_protocol {
-                    Some(
-                        crate::modules::egress::login_route(
-                            crate::modules::egress::Pool::Native(provider),
-                            Some(crate::modules::egress::DIRECT),
-                        )
-                        .await?,
+            // Once tokens are issued, account validation chooses its own usable node.
+            let route = if job.login.authorization.service == Service::BuiltIn && !local_protocol {
+                Some(
+                    crate::modules::egress::login_route(
+                        crate::modules::egress::Pool::Native(provider),
+                        Some(crate::modules::egress::DIRECT),
                     )
-                } else {
-                    None
-                };
+                    .await?,
+                )
+            } else {
+                None
+            };
             let exit = route.as_ref().map(|route| &route.exit).unwrap_or(&direct);
             let submit_client = super::http::login_client(provider, exit)
                 .map_err(|_| "Cannot initialize login import connection")?;
@@ -320,13 +319,10 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
                 &target,
             )
             .await?;
-            if !local_protocol {
-                batch.node = route.as_ref().and_then(|route| route.node.clone());
-                batch.lease = route
-                    .as_mut()
-                    .and_then(|route| route.hold.take())
-                    .map(std::sync::Arc::new);
-            }
+            // The login's DIRECT route is not an account-node reservation.
+            // Account assignment and token verification happen in import_new below.
+            batch.node = None;
+            batch.lease = None;
             change(provider, &job.id, &job.revision, |job| {
                 job.state.batch = Some(batch.clone());
                 job.state.retry_at = now() + 5;
@@ -339,6 +335,11 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
             batch
         }
     };
+    if builtin {
+        // Also separate the routes for a cached result from an older import task.
+        batch.node = None;
+        batch.lease = None;
+    }
     if batch.lease.is_none() {
         if let Some(node) = batch.node.as_deref() {
             batch.lease = crate::modules::egress::reserve_native_login_node(provider, node)
@@ -575,7 +576,6 @@ mod tests {
         let _sandbox = Sandbox::new();
         let server = server("success").await;
         let provider = Provider::ChatGpt;
-        unavailable_airport();
         enqueue(provider, INPUT, true, None).unwrap();
         process(provider, &pending()).await;
         assert!(pending().state.batch.is_some());
@@ -587,15 +587,6 @@ mod tests {
         assert_eq!(accounts[0].nickname, "new@example.com");
         assert!(accounts[0].reauthorization.auto && accounts[0].login_credentials.is_some());
         assert_eq!(accounts[0].credentials.refresh_token, "new-refresh");
-        assert_eq!(
-            crate::modules::egress::bound_node(
-                crate::modules::egress::Pool::Native(provider),
-                &accounts[0].id
-            )
-            .unwrap()
-            .as_deref(),
-            Some(crate::modules::egress::DIRECT)
-        );
         assert!(list(provider).unwrap().is_empty());
         assert_eq!(
             server
@@ -726,30 +717,51 @@ mod tests {
             .contains("Protocol authorization needs"));
     }
     #[tokio::test]
-    async fn new_json_import_uses_direct_when_the_airport_is_unavailable() {
+    async fn account_assignment_is_required_after_direct_authorization() {
+        let _sandbox = Sandbox::new();
+        let _server = server("success").await;
+        unavailable_airport();
+        let provider = Provider::ChatGpt;
+        enqueue(
+            provider,
+            INPUT,
+            true,
+            Some(ServiceConfig {
+                service: Service::BuiltIn,
+                cdk: String::new(),
+            }),
+        )
+        .unwrap();
+        store::change_imports(provider,|jobs| {
+            let job=&mut jobs[0];job.status=Status::Running;
+            job.state.protocol.node=Some(crate::modules::egress::DIRECT.into());
+            job.state.batch=Some(serde_json::from_value(json!({"service":"built_in","id":"fresh-oauth",
+                "token":json!({"platform":"openai","credentials":{"access_token":token("new@example.com"),
+                    "id_token":token("new@example.com"),"refresh_token":"new-refresh"}}).to_string(),
+                "base":"","created_at":now(),"node":"DIRECT"})).unwrap());Ok(())
+        }).unwrap();
+        process(provider, &pending()).await;
+        // A direct OAuth result does not silently bypass unavailable account nodes.
+        assert!(store::all(provider).unwrap().is_empty());
+        assert!(pending().status == Status::Failed);
+        assert!(pending().state.batch.is_none());
+    }
+    #[tokio::test]
+    async fn new_json_import_uses_automatic_account_assignment() {
         let _sandbox = Sandbox::new();
         let _server = server("success").await;
         unavailable_airport();
         let provider = Provider::ChatGpt;
         let access = token("new@example.com");
-        let account = super::super::login::import(
+        let result = super::super::login::import(
             provider,
             json!({"credentials":{
                 "access_token":access,"id_token":access,"refresh_token":"new-refresh"
             }}),
             None,
         )
-        .await
-        .unwrap();
-        assert!(account.enabled);
-        assert_eq!(
-            crate::modules::egress::bound_node(
-                crate::modules::egress::Pool::Native(provider),
-                &account.id
-            )
-            .unwrap()
-            .as_deref(),
-            Some(crate::modules::egress::DIRECT)
-        );
+        .await;
+        assert!(result.is_err());
+        assert!(store::all(provider).unwrap().is_empty());
     }
 }
