@@ -173,6 +173,8 @@ export default function TokenPortal() {
     const million = (n: number) => `${toQuotaMillions(n)} M tokens`;
     const exhausted = overview !== null && (overview.balance_micros ?? 0) <= 0;
     const status = overview?.expired ? t('token_portal.expired') : exhausted ? t('billing.insufficient') : t('token_portal.active');
+    // `daily` is newest-first and always includes the current UTC+8 day, even when empty.
+    const today = overview?.daily[0];
     const rows = overview?.models.filter(m => m.model.toLowerCase().includes(search.toLowerCase())) ?? [];
     const date = (ts: number) => new Date(ts * 1000).toLocaleString(i18n.language, { timeZone: 'Asia/Shanghai' });
 
@@ -217,16 +219,18 @@ export default function TokenPortal() {
                     </p>
                     {error && <p role="alert" className="text-sm text-red-600 rounded-lg bg-red-50 px-4 py-3">{error}</p>}
                     <div id="portal-panel-overview" hidden={menu !== 'overview'} className="space-y-8">
-                    <section aria-label={t('token_portal.summary')} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <section aria-label={t('token_portal.summary')} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                         <button type="button" onClick={() => setMenu('balance')} aria-controls="portal-panel-balance" className="text-left bg-white border border-slate-200 rounded-xl p-5 hover:border-blue-300 hover:bg-blue-50/30 focus-visible:ring-2 focus-visible:ring-blue-500">
                             <span className="flex items-center justify-between text-sm text-slate-500 mb-3">{t('billing.balance')}<ArrowRight size={16} aria-hidden="true" /></span>
                             <span className="block text-xl font-semibold tracking-tight break-words">{formatYuan(overview.balance_micros ?? 0)}</span>
                         </button>
                         {[
+                            [t('token_portal.today_used'), million(today ? today.input_tokens + today.output_tokens : 0), t('token_portal.today_note')],
+                            [t('token_portal.today_requests'), (today?.requests ?? 0).toLocaleString(), t('token_portal.today_note')],
                             [t('token_portal.used'), million(overview.total_tokens_used)],
                             [t('token_portal.requests'), overview.total_requests.toLocaleString()],
                             [t('user_token.max_concurrency'), overview.max_concurrency === 0 ? unlimited : String(overview.max_concurrency)],
-                        ].map(([label, value]) => <div key={label} className="bg-white border border-slate-200 rounded-xl p-5"><p className="text-sm text-slate-500 mb-3">{label}</p><p className="text-xl font-semibold tracking-tight break-words">{value}</p></div>)}
+                        ].map(([label, value, note]) => <div key={label} className="bg-white border border-slate-200 rounded-xl p-5"><p className="text-sm text-slate-500 mb-3">{label}</p><p className="text-xl font-semibold tracking-tight break-words">{value}</p>{note && <p className="mt-1 text-xs text-slate-400">{note}</p>}</div>)}
                     </section>
                     {(currentKey || isAccount) && <TokenConnectionDetails token={currentKey} account={isAccount ? { onRegenerate: regenerateKey } : undefined} />}
                     </div>
