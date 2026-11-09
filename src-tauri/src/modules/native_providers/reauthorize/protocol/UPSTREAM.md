@@ -17,6 +17,9 @@ Local changes:
   exact HTTPS origin/endpoint policy. Reject private, reserved and mixed DNS answers,
   pin the checked destination through proxies while retaining TLS hostname checks,
   disable redirects and discard script-supplied routing/credential headers.
+- After Cloudflare clearance, the trusted origin-root verification may observe an
+  HTTP redirect to the login page without following it. Script-generated requests
+  still reject redirect responses; endpoint and public-DNS restrictions also remain.
 
 The application wrapper owns credentials, encrypted checkpoints, progress, cancellation,
 timeouts, identity verification and retries. It does not launch the upstream console,
