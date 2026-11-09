@@ -41,6 +41,8 @@ struct UsageOverview {
     daily: Vec<db::UsagePeriod>,
     weekly: Vec<db::UsagePeriod>,
     models: Vec<db::ModelUsage>,
+    /// Per-model usage for the current UTC+8 day.
+    today_models: Vec<db::ModelUsage>,
 }
 
 #[derive(Serialize)]
@@ -381,7 +383,10 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
     // Expired keys and keys with no balance can still view their own historical usage.
     // Disabled or deleted keys are revoked for key sign-in.
     let models =
-        db::model_usage_for_token(&token.id).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        db::model_usage_for_token(&token.id, None).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let today_start = db::usage_day_start(now).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let today_models = db::model_usage_for_token(&token.id, Some(today_start))
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let topup_orders = payment::recent_orders(&token.id, 10)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .into_iter()
@@ -414,6 +419,7 @@ fn read_overview(viewer: Viewer, query: &PortalQuery) -> Result<UsageOverview, S
         daily,
         weekly,
         models,
+        today_models,
     })
 }
 

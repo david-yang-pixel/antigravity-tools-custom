@@ -1820,6 +1820,11 @@
   "token_portal": {
     "menu_balance": "餘額",
     "menu_overview": "用量概覽",
+    "today_used": "今日已用",
+    "today_requests": "今日請求數",
+    "today_requests_by_model": "今日各模型請求數",
+    "request_times": "{{formatted}} 次",
+    "today_by_model": "今日各模型用量",
     "menu_models": "可用模型",
     "menu_statistics": "用量統計",
     "menu_logs": "呼叫日誌",

@@ -446,17 +446,21 @@ pub struct ModelUsage {
     pub cost_micros: Option<i64>,
 }
 
-pub fn model_usage_for_token(token_id: &str) -> Result<Vec<ModelUsage>, String> {
+/// Per-model usage for a token; `since` limits it to requests at or after that timestamp.
+pub fn model_usage_for_token(
+    token_id: &str,
+    since: Option<i64>,
+) -> Result<Vec<ModelUsage>, String> {
     let conn = connect_db()?;
     let mut statement = conn.prepare(
         "SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model_name, COUNT(*),
          SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
          SUM(MAX(COALESCE(input_tokens, 0), 0)), SUM(MAX(COALESCE(output_tokens, 0), 0)), MAX(request_time), SUM(cached_tokens), COUNT(cached_tokens), SUM(cost_micros)
-         FROM token_usage_logs WHERE token_id = ?1 GROUP BY model_name
+         FROM token_usage_logs WHERE token_id = ?1 AND (?2 IS NULL OR request_time >= ?2) GROUP BY model_name
          ORDER BY SUM(MAX(COALESCE(input_tokens, 0), 0) + MAX(COALESCE(output_tokens, 0), 0)) DESC, model_name"
     ).map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map([token_id], |r| {
+        .query_map(params![token_id, since], |r| {
             Ok(ModelUsage {
                 model: r.get(0)?,
                 requests: r.get(1)?,
@@ -558,6 +562,22 @@ pub struct UsagePeriod {
     pub cached_tokens: Option<i64>,
     pub cache_recorded_requests: i64,
 }
+/// Start of the UTC+8 calendar day containing `now`, the day boundary used by portal statistics.
+pub fn usage_day_start(now: i64) -> Result<i64, String> {
+    use chrono::TimeZone;
+    let timezone = FixedOffset::east_opt(8 * 3600).unwrap();
+    let today = timezone
+        .timestamp_opt(now, 0)
+        .single()
+        .ok_or("Invalid timestamp")?
+        .date_naive();
+    Ok(timezone
+        .from_local_datetime(&today.and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp())
+}
+
 /// UTC+8 calendar days and ISO weeks (Monday start), including empty periods.
 pub fn period_usage_for_token(
     token_id: &str,
@@ -1557,6 +1577,19 @@ mod tests {
         assert_eq!(weekly[0].cached_tokens, Some(30));
         assert_eq!(weekly[1].requests, 1);
         assert_eq!(weekly[1].cached_tokens, None);
+        let today_start = usage_day_start(now).unwrap();
+        assert_eq!(
+            today_start,
+            chrono::DateTime::parse_from_rfc3339("2026-10-14T00:00:00+08:00")
+                .unwrap()
+                .timestamp()
+        );
+        let today_models = model_usage_for_token(&a.id, Some(today_start)).unwrap();
+        assert_eq!(today_models.len(), 1);
+        assert_eq!(today_models[0].model, "model-a");
+        assert_eq!(today_models[0].requests, 1);
+        assert_eq!(today_models[0].input_tokens, 100);
+        assert_eq!(model_usage_for_token(&a.id, None).unwrap()[0].requests, 3);
         assert_eq!(
             get_token_by_id(&a.id).unwrap().unwrap().total_tokens_used,
             360
