@@ -65,8 +65,11 @@ function formStep(input) {
     if (location.origin !== input.origin) return 'waiting';
     const visible = element => element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden';
     const body = document.body?.innerText || '';
-    if (/verify you are human|complete the security check|确认您是人类|验证您是人类/i.test(body) ||
+    if (/just a moment|checking your browser|attention required.*cloudflare/i.test(document.title) ||
+        document.querySelector('#challenge-running,#challenge-stage') ||
+        /verify you are human|complete the security check|确认您是人类|验证您是人类/i.test(body) ||
         [...document.querySelectorAll('iframe')].some(frame => visible(frame) && /challenges\.cloudflare|hcaptcha|recaptcha/.test(frame.src))) return 'challenge';
+    if (/access denied|request blocked|you have been blocked|403\s+forbidden/i.test(body)) return 'login_blocked';
     if (/check your inbox|check your email|code.*sent.*email|email.*verification code|检查您的邮箱|查看您的邮箱|发送.*邮箱/i.test(body)) return 'email_verification';
     if (/incorrect password|wrong password|invalid password|密码错误|密码不正确/i.test(body)) return 'invalid_credentials';
     if (/account.*deactivated|account.*suspended|账户.*停用|账号.*停用/i.test(body)) return 'account_unavailable';
@@ -156,29 +159,46 @@ export async function authorize(input, options = {}) {
                 body: Buffer.from('Authorization received. You can close this window.').toString('base64') }, sessionId).catch(() => {});
         });
         await cdp.call('Fetch.enable', { patterns: [{ urlPattern: 'http://localhost:1455/auth/callback*' }] }, sessionId);
-        await cdp.call('Page.navigate', { url: input.auth_url }, sessionId);
+        const navigation = await cdp.call('Page.navigate', { url: input.auth_url }, sessionId)
+            .catch(() => fail('LOGIN_CONNECTION_FAILED'));
+        if (navigation.errorText) fail(proxyRoute.failure(new URL(input.auth_url).hostname) || 'LOGIN_CONNECTION_FAILED');
         const counts = { email: 0, password: 0, totp: 0, consent: 0 };
         const last = {};
+        let phase = 'page', phaseAt = Date.now(), challengeAt = 0;
+        const phaseError = () => challengeAt ? 'CHALLENGE' : ({page:'LOGIN_PAGE_TIMEOUT', email:'EMAIL_STEP_TIMEOUT', password:'PASSWORD_STEP_TIMEOUT', totp:'TOTP_STEP_TIMEOUT', consent:'CONSENT_STEP_TIMEOUT'})[phase];
+        const totalTimeout = options.timeoutMs || 90000;
+        const stepTimeout = options.stepTimeoutMs || Math.min(30000, totalTimeout);
+        const challengeGrace = options.challengeGraceMs ?? 5000;
         let timeout = false;
-        deadline = setTimeout(() => { timeout = true; }, options.timeoutMs || 150000);
+        deadline = setTimeout(() => { timeout = true; }, totalTimeout);
         while (!timeout) {
             if (callback) return { callback };
             const proxyError = proxyRoute.failure(new URL(input.auth_url).hostname);
             if (proxyError) fail(proxyError);
+            if (Date.now() - phaseAt >= stepTimeout) fail(phaseError());
             const allowed = Object.keys(counts).filter(stage => counts[stage] < (stage === 'consent' ? 3 : 1) && Date.now() - (last[stage] || 0) > 3000);
             const payload = { origin, email: input.email, password: input.password, code: totp(input.two_factor), allowed };
             let result;
             try {
-                const current = await cdp.call('Runtime.evaluate', { expression: 'location.origin', returnByValue: true }, sessionId);
-                if (current.result?.value !== origin) { await pause(500); continue; }
+                const current = await cdp.call('Runtime.evaluate', { expression: '({origin:location.origin,browserError:location.protocol === "chrome-error:"})', returnByValue: true }, sessionId);
+                if (current.result?.value?.browserError) fail('LOGIN_CONNECTION_FAILED');
+                if (current.result?.value?.origin !== origin) { await pause(500); continue; }
                 const response = await cdp.call('Runtime.evaluate', { expression: `(${formStep.toString()})(${JSON.stringify(payload)})`, returnByValue: true }, sessionId);
                 result = response.result?.value;
-            } catch { if (callback) return { callback }; }
-            if (result?.endsWith('_submitted')) { const stage = result.slice(0, -10); counts[stage]++; last[stage] = Date.now(); }
-            if (['challenge', 'email_verification', 'invalid_credentials', 'account_unavailable', 'unsupported'].includes(result)) fail(result.toUpperCase());
+            } catch (error) { if (error.code) throw error; if (callback) return { callback }; }
+            if (result === 'challenge') {
+                // Ordinary automatic checks may finish on their own. Allow a short
+                // grace period without entering credentials or interacting with them.
+                challengeAt ||= Date.now();
+                if (Date.now() - challengeAt >= challengeGrace) fail('CHALLENGE');
+                await pause(500); continue;
+            }
+            if (result !== undefined) challengeAt = 0;
+            if (result?.endsWith('_submitted')) { const stage = result.slice(0, -10); counts[stage]++; last[stage] = Date.now(); phase = stage; phaseAt = Date.now(); }
+            if (['login_blocked', 'email_verification', 'invalid_credentials', 'account_unavailable', 'unsupported'].includes(result)) fail(result.toUpperCase());
             await pause(500);
         }
-        fail('LOGIN_TIMEOUT');
+        fail(phaseError());
     } finally {
         clearTimeout(deadline);
         process.removeListener('SIGTERM', terminate); process.removeListener('SIGINT', terminate);
@@ -188,7 +208,9 @@ export async function authorize(input, options = {}) {
 
 if (process.argv.includes('--abv-login-worker')) {
     const errors = new Set(['INVALID_2FA', 'BROWSER_UNAVAILABLE', 'UNSUPPORTED_PROXY', 'PROXY_AUTH_FAILED', 'PROXY_CONNECTION_FAILED', 'CHALLENGE',
-        'EMAIL_VERIFICATION', 'INVALID_CREDENTIALS', 'ACCOUNT_UNAVAILABLE', 'UNSUPPORTED', 'LOGIN_TIMEOUT']);
+        'EMAIL_VERIFICATION', 'INVALID_CREDENTIALS', 'ACCOUNT_UNAVAILABLE', 'UNSUPPORTED', 'LOGIN_TIMEOUT',
+        'LOGIN_BLOCKED', 'LOGIN_CONNECTION_FAILED', 'LOGIN_PAGE_TIMEOUT', 'EMAIL_STEP_TIMEOUT',
+        'PASSWORD_STEP_TIMEOUT', 'TOTP_STEP_TIMEOUT', 'CONSENT_STEP_TIMEOUT']);
     try {
         let raw = '';
         for await (const part of process.stdin) { raw += part; if (raw.length > 32768) fail('INVALID_INPUT'); }

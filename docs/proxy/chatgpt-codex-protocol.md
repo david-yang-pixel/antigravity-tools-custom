@@ -218,6 +218,16 @@ is recorded with the job and reused when importing its tokens. Saved accounts us
 their own node. Human or email verification stops the attempt with an explicit
 error; it does not try to bypass the challenge. A merchant service or a manual JSON
 import remains available when official login cannot complete automatically.
+Security interstitials are recognized by their page title, visible verification
+content and Cloudflare challenge elements, including a 403 "Just a moment" page
+with no login fields. A security check gets a five-second grace period to complete
+automatically, without entering credentials or interacting with the check; a
+persistent check stops the attempt. A blocked page or browser navigation failure
+terminates promptly. After navigation, page readiness and each submitted login step
+have a 30-second stall budget; the active form loop has a 90-second overall limit.
+Timeout errors identify page loading, email, password, TOTP or consent instead of
+waiting 150 seconds and reporting a generic timeout. These limits exclude browser
+startup and waiting for the single browser slot.
 
 `ABV_CHATGPT_REAUTH_URL` overrides only dbc2api's base URL;
 `ABV_CHATGPT_RUOZHEN_URL` overrides only Ruozhen's base URL. Both require HTTPS;

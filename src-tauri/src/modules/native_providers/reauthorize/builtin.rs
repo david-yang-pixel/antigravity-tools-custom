@@ -115,6 +115,13 @@ fn worker_error(code: &str) -> &'static str {
         "UNSUPPORTED_PROXY" => "Built-in authorization needs a valid HTTP, HTTPS or SOCKS5 proxy URL",
         "PROXY_AUTH_FAILED" => "The selected proxy rejected authentication; check the egress proxy credentials",
         "PROXY_CONNECTION_FAILED" => "Cannot reach official login through the selected proxy; check the egress node",
+        "LOGIN_BLOCKED" => "Official login blocked this browser or egress node; complete official sign-in in your own browser",
+        "LOGIN_CONNECTION_FAILED" => "The browser could not load official login through the selected egress node",
+        "LOGIN_PAGE_TIMEOUT" => "Official login page did not become ready; check the egress node or security verification",
+        "EMAIL_STEP_TIMEOUT" => "Official login stalled after submitting the email; check the login page or security verification",
+        "PASSWORD_STEP_TIMEOUT" => "Official login stalled after submitting the password; additional verification may be required",
+        "TOTP_STEP_TIMEOUT" => "Official login stalled after submitting the 2FA code; check additional verification",
+        "CONSENT_STEP_TIMEOUT" => "Official login stalled while waiting for authorization confirmation",
         "LOGIN_TIMEOUT" => "Official login timed out; check the egress node or use another authorization method",
         _ => "Built-in login could not complete; use a merchant service or manually import authorized JSON",
     }
