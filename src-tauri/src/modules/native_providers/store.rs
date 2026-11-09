@@ -162,6 +162,9 @@ fn upsert_mode(
         if previous.login_credentials.is_some() {
             account.reauthorization.auto = previous.reauthorization.auto;
         }
+        if account.reauthorization.authorization.is_none() {
+            account.reauthorization.authorization = previous.reauthorization.authorization.clone();
+        }
         account.quota = previous.quota.clone();
         account.models = previous.models.clone();
         account.verified_models = previous.verified_models.clone();
@@ -198,7 +201,17 @@ pub(super) fn bind_logins(
             .iter_mut()
             .find(|a| a.id == *id)
             .ok_or("Account no longer exists")?;
+        if a.login_credentials.as_ref() != Some(login)
+            || super::reauthorize::service_for(a).as_ref() != Some(&login.authorization)
+        {
+            // A late task for the previous merchant or password cannot replace the
+            // newly bound login. Identical bindings keep their resumable task.
+            a.revision = uuid::Uuid::new_v4().to_string();
+            a.reauthorization.batch = None;
+            a.reauthorization.requested = false;
+        }
         a.login_credentials = Some(login.clone());
+        a.reauthorization.authorization = Some(login.authorization.clone());
         a.reauthorization.auto = auto;
         a.reauthorization.attempts = 0;
         a.reauthorization.retry_at = 0;

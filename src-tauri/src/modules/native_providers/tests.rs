@@ -21,6 +21,9 @@ impl Sandbox {
             "ABV_CHATGPT_EGRESS_ENABLED",
             "ABV_CHATGPT_CLIENT_VERSION",
             "ABV_CHATGPT_REAUTH_URL",
+            "ABV_CHATGPT_RUOZHEN_URL",
+            "ABV_CHATGPT_NODE",
+            "ABV_CHATGPT_BROWSER",
             "ABV_WORKBUDDY_ENABLED",
             "ABV_WORKBUDDY_MODELS",
             "ABV_CUSTOM_UPSTREAMS",
@@ -101,6 +104,7 @@ fn account_vault_and_public_projection_never_expose_tokens() {
         email: "private@example.com".into(),
         password: "test-password-private".into(),
         two_factor: "PRIVATEBASE32".into(),
+        authorization: Default::default(),
     });
     let a = store::upsert(a, None).unwrap();
     let disk = std::fs::read_to_string(

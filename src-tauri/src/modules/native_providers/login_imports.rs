@@ -2,7 +2,7 @@
 //! use their own encrypted vault; only verified tokens enter the account pool.
 use super::{
     now,
-    reauthorize::{self, LoginCredentials, Progress, State},
+    reauthorize::{self, LoginCredentials, Progress, Service, ServiceConfig, State},
     store, Provider,
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ pub struct Pending {
 pub struct View {
     pub id: String,
     pub email: String,
+    pub reauthorization_service: Service,
     pub status: Status,
     pub error: Option<String>,
     pub created_at: i64,
@@ -36,6 +37,7 @@ impl From<&Pending> for View {
         Self {
             id: job.id.clone(),
             email: job.login.email.clone(),
+            reauthorization_service: job.login.authorization.service,
             status: job.status,
             error: job.state.error.clone(),
             created_at: job.created_at,
@@ -51,9 +53,18 @@ pub struct Report {
 pub fn list(provider: Provider) -> Result<Vec<View>, String> {
     Ok(store::imports(provider)?.iter().map(Into::into).collect())
 }
-pub fn enqueue(provider: Provider, input: &str, auto: bool) -> Result<Report, String> {
-    let entries = reauthorize::parse(input)?;
-    reauthorize::base_url()?;
+pub fn enqueue(
+    provider: Provider,
+    input: &str,
+    auto: bool,
+    authorization: Option<ServiceConfig>,
+) -> Result<Report, String> {
+    let mut entries = reauthorize::parse(input)?;
+    let authorization = authorization.unwrap_or_default();
+    authorization.validate()?;
+    for entry in &mut entries {
+        entry.authorization = authorization.clone();
+    }
     let accounts = store::all(provider)?;
     store::change_imports(provider, |jobs| {
         let mut report = Report {
@@ -69,6 +80,9 @@ pub fn enqueue(provider: Provider, input: &str, auto: bool) -> Result<Report, St
                 continue;
             }
             if let Some(job) = jobs.iter_mut().find(|job| job.login.email == login.email) {
+                if job.status != Status::Failed && job.login != login {
+                    return Err("A task with different login credentials or authorization service is already active for this email; wait for it or remove it first".into());
+                }
                 if job.status == Status::Failed {
                     job.login = login;
                     job.revision = uuid::Uuid::new_v4().to_string();
@@ -194,6 +208,7 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
             login.email == job.login.email
                 && login.password == job.login.password
                 && login.two_factor == job.login.two_factor
+                && login.authorization == job.login.authorization
         }) {
             return finish(provider, &job);
         }
@@ -205,7 +220,7 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
     }
     let client = super::http::login_client(provider, &crate::modules::egress::Exit::Off)
         .map_err(|_| "Cannot initialize login import connection")?;
-    let Some(batch) = &job.state.batch else {
+    let Some(mut batch) = job.state.batch.clone() else {
         if job.state.attempts > 0 {
             return Err(
                 "Login submission was interrupted; retry explicitly to avoid duplicate jobs".into(),
@@ -217,7 +232,29 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
             job.state.retry_at = now() + 60;
             Ok(())
         })?;
-        let batch = reauthorize::create_batch(&client, &job.login).await?;
+        // A built-in login obtains its token on the node the new account will keep.
+        // Merchant services perform login remotely and do not use this local browser.
+        let route = if job.login.authorization.service == Service::BuiltIn {
+            Some(
+                crate::modules::egress::login_route(
+                    crate::modules::egress::Pool::Native(provider),
+                    None,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let exit = route
+            .as_ref()
+            .map(|route| &route.exit)
+            .unwrap_or(&crate::modules::egress::Exit::Off);
+        let submit_client = super::http::login_client(provider, exit)
+            .map_err(|_| "Cannot initialize login import connection")?;
+        let mut batch =
+            reauthorize::create_batch(&submit_client, &job.login, &super::http::proxy_url(exit))
+                .await?;
+        batch.node = route.as_ref().and_then(|route| route.node.clone());
         change(provider, &job.id, &job.revision, |job| {
             job.state.batch = Some(batch);
             job.state.retry_at = now() + 5;
@@ -226,7 +263,13 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
         })?;
         return Ok(());
     };
-    match reauthorize::poll_batch(&client, batch).await? {
+    let progress = reauthorize::poll_batch(&client, &mut batch).await;
+    let node = batch.node.clone();
+    change(provider, &job.id, &job.revision, |job| {
+        job.state.batch = Some(batch);
+        Ok(())
+    })?;
+    match progress? {
         Progress::Pending => change(provider, &job.id, &job.revision, |job| {
             job.state.retry_at = now() + 5;
             job.state.error = None;
@@ -247,9 +290,16 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
                     serde_json::to_value(&job.login)
                         .map_err(|_| "Cannot bind login credentials")?,
                 );
-            if super::login::import_new(provider, auth, job.state.auto, &job.id, &job.revision)
-                .await
-                .is_err()
+            if super::login::import_new(
+                provider,
+                auth,
+                job.state.auto,
+                &job.id,
+                &job.revision,
+                node.as_deref(),
+            )
+            .await
+            .is_err()
             {
                 // An import may have consumed a rotating refresh token. Never download and
                 // replay that same export automatically after a failed validation/save.
@@ -320,6 +370,19 @@ mod tests {
                 let path = uri.path_and_query().unwrap().to_string();
                 log.lock().unwrap().push(path.clone());
                 let value = match path.as_str() {
+                    "/api/submit" => {
+                        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["text"], INPUT);
+                        json!({"ok":true,"created":[{"task_id":1,"account_id":1}]})
+                    }
+                    "/api/tasks/1" => {
+                        assert_eq!(headers["cookie"], "session=private-session");
+                        json!({"ok":true,"task":{"id":1,"status":"success"}})
+                    }
+                    "/api/download/1?format=sub2api" => {
+                        assert_eq!(headers["cookie"], "session=private-session");
+                        json!({"accounts":[{"platform":"openai","credentials":{"access_token":token("new@example.com"),
+                            "id_token":token("new@example.com"),"refresh_token":"new-refresh"}}]})
+                    }
                     "/api/batches" => {
                         assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["input"], INPUT);
                         json!({"batch_id":"job", "access_token":"private-job-token"})
@@ -338,12 +401,17 @@ mod tests {
                     _ if path.starts_with("/backend-api/codex/models") => json!({"models":[]}),
                     _ => panic!("unexpected request {path}"),
                 };
-                Json(value)
+                let mut out = HeaderMap::new();
+                if path == "/api/submit" {
+                    out.insert("set-cookie", "session=private-session; Path=/; HttpOnly".parse().unwrap());
+                }
+                (out, Json(value))
             }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         std::env::set_var("ABV_CHATGPT_REAUTH_URL", &base);
+        std::env::set_var("ABV_CHATGPT_RUOZHEN_URL", &base);
         chatgpt::endpoints::set_test(Some(chatgpt::endpoints::Endpoints {
             auth: base.clone(),
             backend: format!("{base}/backend-api"),
@@ -355,8 +423,8 @@ mod tests {
     fn enqueue_is_encrypted_and_repeated_input_reuses_the_job() {
         let _sandbox = Sandbox::new();
         let provider = Provider::ChatGpt;
-        let first = enqueue(provider, INPUT, true).unwrap();
-        let second = enqueue(provider, INPUT, true).unwrap();
+        let first = enqueue(provider, INPUT, true, None).unwrap();
+        let second = enqueue(provider, INPUT, true, None).unwrap();
         assert_eq!(first.queued[0].id, second.queued[0].id);
         assert_eq!(store::imports(provider).unwrap().len(), 1);
         assert!(store::all(provider).unwrap().is_empty());
@@ -375,11 +443,51 @@ mod tests {
         assert!(store::imports(provider).unwrap().is_empty());
     }
     #[tokio::test]
+    async fn ruozhen_import_keeps_the_selected_service_and_never_exports_its_cdk_or_session() {
+        let _sandbox = Sandbox::new();
+        let server = server("ruozhen").await;
+        let provider = Provider::ChatGpt;
+        enqueue(
+            provider,
+            INPUT,
+            true,
+            Some(ServiceConfig {
+                service: Service::Ruozhen,
+                cdk: "private-cdk".into(),
+            }),
+        )
+        .unwrap();
+        process(provider, &pending()).await;
+        let view = serde_json::to_string(&list(provider).unwrap()).unwrap();
+        let disk = std::fs::read_to_string(
+            crate::modules::account::get_data_dir()
+                .unwrap()
+                .join("chatgpt_login_imports.enc"),
+        )
+        .unwrap();
+        assert!(view.contains("ruozhen"));
+        for secret in ["private-password", "private-cdk", "private-session"] {
+            assert!(!view.contains(secret) && !disk.contains(secret));
+        }
+        process(provider, &ready_to_poll()).await;
+        let saved = store::all(provider).unwrap().remove(0);
+        assert!(reauthorize::service_for(&saved).unwrap().service == Service::Ruozhen);
+        assert_eq!(reauthorize::service_for(&saved).unwrap().cdk, "private-cdk");
+        assert!(saved.enabled && saved.reauthorization.auto);
+        assert!(!server
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.contains("batches")));
+        assert!(list(provider).unwrap().is_empty());
+    }
+    #[tokio::test]
     async fn direct_login_import_adds_a_new_account_without_manual_json() {
         let _sandbox = Sandbox::new();
         let server = server("success").await;
         let provider = Provider::ChatGpt;
-        enqueue(provider, INPUT, true).unwrap();
+        enqueue(provider, INPUT, true, None).unwrap();
         process(provider, &pending()).await;
         assert!(pending().state.batch.is_some());
         let persisted_view = serde_json::to_string(&list(provider).unwrap()).unwrap();
@@ -402,7 +510,7 @@ mod tests {
             1
         );
         assert_eq!(
-            enqueue(provider, INPUT, true).unwrap().skipped,
+            enqueue(provider, INPUT, true, None).unwrap().skipped,
             ["new@example.com"]
         );
     }
@@ -412,7 +520,7 @@ mod tests {
             let _sandbox = Sandbox::new();
             let _server = server(mode).await;
             let provider = Provider::ChatGpt;
-            enqueue(provider, INPUT, true).unwrap();
+            enqueue(provider, INPUT, true, None).unwrap();
             process(provider, &pending()).await;
             process(provider, &ready_to_poll()).await;
             let failed = pending();
@@ -438,11 +546,11 @@ mod tests {
     fn removed_and_restarted_jobs_cannot_add_accounts_and_existing_accounts_are_preserved() {
         let _sandbox = Sandbox::new();
         let provider = Provider::ChatGpt;
-        enqueue(provider, INPUT, true).unwrap();
+        enqueue(provider, INPUT, true, None).unwrap();
         let old = pending();
         remove(provider, &old.id).unwrap();
         assert!(store::upsert_new(account(), &old.id, &old.revision).is_err());
-        enqueue(provider, INPUT, true).unwrap();
+        enqueue(provider, INPUT, true, None).unwrap();
         let job = pending();
         let saved = store::upsert(account(), None).unwrap();
         assert!(store::upsert_new(account(), &job.id, &job.revision).is_err());
@@ -452,7 +560,7 @@ mod tests {
     async fn saved_accounts_clean_up_a_pending_record_after_a_restart() {
         let _sandbox = Sandbox::new();
         let provider = Provider::ChatGpt;
-        enqueue(provider, INPUT, true).unwrap();
+        enqueue(provider, INPUT, true, None).unwrap();
         let job = pending();
         store::upsert_new(account(), &job.id, &job.revision).unwrap();
         process(provider, &job).await;
@@ -464,7 +572,7 @@ mod tests {
         let _sandbox = Sandbox::new();
         let _server = server("success").await;
         let provider = Provider::ChatGpt;
-        enqueue(provider, INPUT, true).unwrap();
+        enqueue(provider, INPUT, true, None).unwrap();
         process(provider, &pending()).await;
         let mut manual = account();
         manual.login_credentials = None;

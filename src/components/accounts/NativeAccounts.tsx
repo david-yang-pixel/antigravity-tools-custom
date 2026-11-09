@@ -9,9 +9,9 @@ import ModalDialog from '../common/ModalDialog';
 import Pagination from '../common/Pagination';
 import { showToast } from '../common/ToastContainer';
 import ChatGptClientVersion from './ChatGptClientVersion';
-import { LoginCredentialsCell, LoginCredentialsEditor, LoginImportJobs } from './ChatGptLoginCredentials';
+import { AuthorizationServiceFields, AuthorizationServiceLabel, LoginCredentialsCell, LoginCredentialsEditor, LoginImportJobs } from './ChatGptLoginCredentials';
 import WorkBuddyEgressPanel, { WorkBuddyEgressCell, egressArgs, nativeEgress, type EgressView } from './WorkBuddyEgress';
-import { nativeAccountStatus, type BatchItem, type LoginImportJob, type LoginImportReport, type NativeAccount, type NativeProvider, type NativeSettings } from '../../types/nativeProviders';
+import { nativeAccountStatus, type AuthorizationConfig, type BatchItem, type LoginImportJob, type LoginImportReport, type NativeAccount, type NativeProvider, type NativeSettings } from '../../types/nativeProviders';
 
 const PAGE_SIZE = 10;
 const input = 'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800';
@@ -55,6 +55,7 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
     const [importing, setImporting] = useState(false);
     const [target, setTarget] = useState<NativeAccount | null>(null);
     const [auth, setAuth] = useState('');
+    const [authorization, setAuthorization] = useState<AuthorizationConfig>({ service: 'built_in', cdk: '' });
     const [deleting, setDeleting] = useState<NativeAccount | null>(null);
     const [editingLogins, setEditingLogins] = useState(false);
     const [loginTarget, setLoginTarget] = useState<NativeAccount | null>(null);
@@ -107,7 +108,7 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
         catch (error) { if (alive.current) setError(errorText(error)); }
         finally { locked.current = false; if (alive.current) setBusy(false); }
     }
-    const close = () => { setImporting(false); setTarget(null); setAuth(''); };
+    const close = () => { setImporting(false); setTarget(null); setAuth(''); setAuthorization({ service: 'built_in', cdk: '' }); };
     const change = (account: NativeAccount, patch: { enabled?: boolean; auto_refresh?: boolean; auto_reauthorize?: boolean; refresh?: boolean }) => run(async () => {
         await request('update_native_account', { request: { provider, id: account.id, ...patch } });
     });
@@ -115,11 +116,11 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
         const raw = auth.trim();
         if (!/^[{"\[]/.test(raw) && raw.split('\n')[0].includes('@') && raw.includes('----')) {
             if (target) {
-                await request('save_native_login_credentials', { request: { provider, id: target.id, input: raw, auto_reauthorize: true } });
+                await request('save_native_login_credentials', { request: { provider, id: target.id, input: raw, auto_reauthorize: true, authorization } });
                 await request('reauthorize_native_account', { request: { provider, id: target.id } });
                 setLoginVersion(value => value + 1);
             } else {
-                const report = await request<LoginImportReport>('import_native_login_accounts', { request: { provider, input: raw, auto_reauthorize: true } });
+                const report = await request<LoginImportReport>('import_native_login_accounts', { request: { provider, input: raw, auto_reauthorize: true, authorization } });
                 showToast(t('nativeProviders.login.importQueued', { count: report.queued.length, skipped: report.skipped.length }), report.skipped.length ? 'warning' : 'success');
             }
             if (alive.current) close();
@@ -130,7 +131,7 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
         if (/^[{"]/.test(auth.trim())) { try { parsed = JSON.parse(auth); } catch { throw new Error(t('nativeProviders.invalidJson')); } }
         // A multi-account export (e.g. sub2api's {"accounts": [...]}) imports account by account.
         if (!target && Array.isArray((parsed as { accounts?: unknown })?.accounts)) {
-            const report = await request<BatchItem[]>('import_native_accounts_batch', { request: { provider, auth: parsed } });
+            const report = await request<BatchItem[]>('import_native_accounts_batch', { request: { provider, auth: parsed, authorization } });
             const count = (status: BatchItem['status']) => report.filter(item => item.status === status).length;
             showToast(t('nativeProviders.chatgpt.batchResult', { imported: count('imported'), skipped: count('skipped'), failed: count('failed') }), count('failed') ? 'warning' : 'success');
             const failed = report.filter(item => item.status === 'failed');
@@ -138,13 +139,13 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
             if (alive.current) close();
             return;
         }
-        await request('import_native_account', { request: { provider, auth: parsed, ...(target ? { account_id: target.id } : {}) } });
+        await request('import_native_account', { request: { provider, auth: parsed, authorization, ...(target ? { account_id: target.id } : {}) } });
         if (alive.current) close();
     });
-    const reimport = (account: NativeAccount) => { setTarget(account); setImporting(true); setAuth(''); setError(''); };
+    const reimport = (account: NativeAccount) => { setTarget(account); setImporting(true); setAuth(''); setError(''); setAuthorization({ service: account.reauthorization_service || 'built_in', cdk: '' }); };
     const editLogins = (account: NativeAccount | null) => { setLoginTarget(account); setEditingLogins(true); setError(''); };
-    const saveLogins = (input: string, auto: boolean) => void run(async () => {
-        const count = await request<number>('save_native_login_credentials', { request: { provider, id: loginTarget?.id, input, auto_reauthorize: auto } });
+    const saveLogins = (input: string, auto: boolean, authorization: AuthorizationConfig) => void run(async () => {
+        const count = await request<number>('save_native_login_credentials', { request: { provider, id: loginTarget?.id, input, auto_reauthorize: auto, authorization } });
         setLoginVersion(value => value + 1); setEditingLogins(false); setLoginTarget(null);
         showToast(t('nativeProviders.login.saved', { count }), 'success');
     });
@@ -167,18 +168,20 @@ export default function NativeAccounts({ provider }: { provider: NativeProvider 
                 <div className="flex items-center justify-between"><h2 className="font-medium">{target ? t('nativeProviders.chatgpt.reimportTitle') : t('nativeProviders.import')}</h2><button className={button} disabled={busy} onClick={close}>{t('nativeProviders.cancel')}</button></div>
                 <p className="text-sm text-gray-500">{t('nativeProviders.chatgpt.importHint')}{target && <> {t('nativeProviders.chatgpt.reimportHint')}</>}</p>
                 <label className="block space-y-2 text-sm"><span>{t('nativeProviders.credentials')}</span><textarea className={`${input} min-h-32 font-mono`} autoComplete="off" spellCheck={false} value={auth} onChange={e => setAuth(e.target.value)} placeholder={t('nativeProviders.chatgpt.importPlaceholder')} /></label>
+                <AuthorizationServiceFields value={authorization} disabled={busy} onChange={setAuthorization} />
                 <button className={button} disabled={busy || !auth.trim()} onClick={() => void importAccount()}>{t('nativeProviders.importSave')}</button>
             </div>}
             <LoginImportJobs jobs={loginImports} busy={busy} onRetry={id => void run(async () => { await request('retry_native_login_import', { request: { provider, id } }); })} onRemove={id => void run(async () => { await request('remove_native_login_import', { request: { provider, id } }); })} />
             {loading ? <div role="status" className="flex items-center justify-center gap-2 p-10 text-gray-500"><Loader2 size={18} className="animate-spin" />{t('nativeProviders.loading')}</div> : !accounts.length ? <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center dark:border-gray-700"><h2 className="font-medium">{t('nativeProviders.empty')}</h2><p className="mt-2 text-sm text-gray-500">{t('nativeProviders.emptyHint', { provider: label })}</p></div> :
                 <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-700" role="region" aria-label={t('nativeProviders.title', { provider: label })} tabIndex={0}>
-                    <table className="w-full text-left text-sm"><thead className="bg-gray-50 dark:bg-gray-800"><tr>{['account', 'egress', 'balance', 'health', 'authorization', 'maintenance', 'actions'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-3 py-2.5 font-medium">{t(`nativeProviders.${key}`)}</th>)}</tr></thead>
+                    <table className="w-full text-left text-sm"><thead className="bg-gray-50 dark:bg-gray-800"><tr>{['account', 'authorizationService', 'egress', 'balance', 'health', 'authorization', 'maintenance', 'actions'].map(key => <th key={key} scope="col" className="whitespace-nowrap px-3 py-2.5 font-medium">{t(`nativeProviders.${key}`)}</th>)}</tr></thead>
                         <tbody>{visibleAccounts.map(account => {
                             const errors = [account.auth_error, account.quota_error, account.models_error, account.last_error].filter((value): value is string => !!value);
                             const status = nativeAccountStatus(account, now);
                             const name = account.nickname || account.uid;
                             return <tr key={account.id} className="border-t border-gray-100 align-top dark:border-gray-700">
                                 <td className="min-w-64 max-w-72 px-3 py-2.5"><div className="truncate font-medium" title={name}>{name}</div><LoginCredentialsCell key={`${account.id}-${loginVersion}`} account={account} disabled={busy} onEdit={() => editLogins(account)} /><details className="mt-1 text-xs"><summary className="cursor-pointer text-blue-600">{t('nativeProviders.details', { count: account.models.length })}</summary><div className="mt-2 max-w-sm space-y-2 break-all text-gray-500"><div>{account.uid}</div><p>{t('nativeProviders.modelsUpdated', { time: date(account.models_updated_at) })}</p>{account.models.map(model => <div key={model.id}><code>{model.id}</code>{model.name && <span> · {model.name}</span>}</div>)}{errors.map((error, index) => <p key={index} className="text-amber-700 dark:text-amber-400">{error}</p>)}</div></details></td>
+                                <td className="whitespace-nowrap px-3 py-2.5 text-xs text-gray-500">{account.reauthorization_service ? <AuthorizationServiceLabel service={account.reauthorization_service} /> : t('nativeProviders.login.notConfigured')}</td>
                                 <td className="px-3 py-2.5"><WorkBuddyEgressCell accountId={account.id} view={egress} disabled={busy} onChange={setEgress} api={egressApi} /></td>
                                 <td className="min-w-72 px-3 py-2.5"><WindowBars quota={account.quota} t={t} /><div className="mt-1 whitespace-nowrap text-xs text-gray-500">{account.quota ? date(account.quota.updated_at) : t('nativeProviders.notQueried')}</div>{account.quota_error && <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">{t('nativeProviders.staleBalance')}</p>}</td>
                                 <td className="px-3 py-2.5">{account.auth_error && <details className="mb-2 min-w-40 max-w-64 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"><summary className="cursor-pointer font-medium">{t(account.credential_dead ? 'nativeProviders.chatgpt.authError' : 'nativeProviders.login.temporary')}</summary><p className="mt-1 break-words">{account.auth_error}</p></details>}<span className={`whitespace-nowrap rounded-full px-2 py-1 text-xs ${status === 'ready' ? 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>{t(`nativeProviders.status_${status}`)}</span><div className="mt-1.5 whitespace-nowrap text-xs tabular-nums text-gray-500">{t('nativeProviders.requests', { success: account.successes, failed: account.failures })}</div>{account.cooldown_until > now && <div className="mt-1 whitespace-nowrap text-xs text-amber-700">{t('nativeProviders.cooldownSeconds', { seconds: Math.ceil(account.cooldown_until - now) })}</div>}</td>

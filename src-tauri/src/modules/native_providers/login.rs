@@ -17,7 +17,7 @@ fn bound_elsewhere(provider: Provider, a: &Account, node: Option<&str>) -> Resul
     Ok(egress::bound_node(Pool::Native(provider), &previous.id)?
         .is_some_and(|bound| node != Some(bound.as_str())))
 }
-/// ChatGPT has no browser reauthorization: its row re-imports a token through its node.
+/// A row re-import keeps the same node as its authorization and inference traffic.
 const CHATGPT_BOUND_ELSEWHERE: &str =
     "This ChatGPT account is bound to another egress node; re-import its token from the account's own row";
 
@@ -57,6 +57,7 @@ fn imported_chatgpt(value: &Value) -> Result<Account, String> {
         return Err("Paste a ChatGPT refresh token, a {\"refresh_token\": \"...\"} object, a sub2api export or a Codex auth.json".into());
     }
     a.login_credentials = super::reauthorize::from_json(value)?;
+    a.reauthorization.authorization = super::reauthorize::service_from_json(value)?;
     a.reauthorization.auto = a.login_credentials.is_some();
     Ok(a)
 }
@@ -215,7 +216,7 @@ pub(super) async fn import_checked(
     account_id: Option<&str>,
     revision: Option<&str>,
 ) -> Result<AccountView, String> {
-    import_inner(provider, value, account_id, revision, None).await
+    import_inner(provider, value, account_id, revision, None, None).await
 }
 pub(super) async fn import_new(
     provider: Provider,
@@ -223,8 +224,17 @@ pub(super) async fn import_new(
     auto: bool,
     id: &str,
     revision: &str,
+    node: Option<&str>,
 ) -> Result<AccountView, String> {
-    import_inner(provider, value, None, None, Some((auto, id, revision))).await
+    import_inner(
+        provider,
+        value,
+        None,
+        None,
+        Some((auto, id, revision)),
+        node,
+    )
+    .await
 }
 async fn import_inner(
     provider: Provider,
@@ -232,6 +242,7 @@ async fn import_inner(
     account_id: Option<&str>,
     revision: Option<&str>,
     new_login_auto: Option<(bool, &str, &str)>,
+    new_login_node: Option<&str>,
 ) -> Result<AccountView, String> {
     let mut a = match provider {
         Provider::ChatGpt => imported_chatgpt(&value)?,
@@ -248,7 +259,7 @@ async fn import_inner(
             store::get(provider, id)?;
             egress::bound_node(Pool::Native(provider), id)?
         }
-        None => None,
+        None => new_login_node.map(str::to_owned),
     };
     // A new account's auto-chosen node that cannot reach the upstream is reported and
     // the import moves to another node. Only connection failures move: nothing was sent,

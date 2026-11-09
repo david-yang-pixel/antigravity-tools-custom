@@ -10,18 +10,60 @@ use std::{
 };
 
 const SERVICE: &str = "https://login.dbc2api.top";
+#[path = "reauthorize/builtin.rs"]
+mod builtin;
+#[path = "reauthorize/ruozhen.rs"]
+mod ruozhen;
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Service {
+    BuiltIn,
+    #[default]
+    Dbc2api,
+    Ruozhen,
+}
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ServiceConfig {
+    pub service: Service,
+    pub cdk: String,
+}
+impl ServiceConfig {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        self.base_url()?;
+        if self.cdk.len() > 4096 || self.cdk.chars().any(char::is_control) {
+            return Err("Invalid authorization CDK".into());
+        }
+        Ok(())
+    }
+    fn base_url(&self) -> Result<String, String> {
+        match self.service {
+            Service::BuiltIn => Ok(String::new()),
+            Service::Dbc2api => base_url(),
+            Service::Ruozhen => validate_url(
+                &std::env::var("ABV_CHATGPT_RUOZHEN_URL")
+                    .unwrap_or_else(|_| "https://sms.iruozhen.com".into()),
+            ),
+        }
+    }
+}
 const MAX_ATTEMPTS: u32 = 3;
 static ACTIVE: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LoginCredentials {
     pub email: String,
     pub password: String,
     pub two_factor: String,
+    #[serde(default)]
+    pub authorization: ServiceConfig,
 }
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct State {
+    // Optional so old imports retain their original merchant when no new choice is made.
+    pub authorization: Option<ServiceConfig>,
     pub auto: bool,
     pub needed: bool,
     pub requested: bool,
@@ -32,10 +74,15 @@ pub struct State {
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Batch {
+    #[serde(default)]
+    service: Service,
     id: String,
+    // Merchant bearer token/cookies, or a built-in OAuth result. Always encrypted.
     token: String,
     base: String,
     created_at: i64,
+    #[serde(default)]
+    pub(super) node: Option<String>,
 }
 
 fn valid_email(email: &str) -> bool {
@@ -82,6 +129,7 @@ pub fn parse(input: &str) -> Result<Vec<LoginCredentials>, String> {
             email,
             password,
             two_factor,
+            authorization: ServiceConfig::default(),
         });
     }
     if entries.is_empty() || entries.len() > 500 {
@@ -122,7 +170,38 @@ pub(super) fn from_json(value: &Value) -> Result<Option<LoginCredentials>, Strin
     .into_iter()
     .find(|s| !s.is_empty())
     .unwrap_or_default();
-    parse(&format!("{email}----{password}----{factor}")).map(|mut entries| entries.pop())
+    let authorization = service_from_json(value)?.unwrap_or_default();
+    let mut login = parse(&format!("{email}----{password}----{factor}"))?.remove(0);
+    login.authorization = authorization;
+    Ok(Some(login))
+}
+pub(super) fn service_from_json(value: &Value) -> Result<Option<ServiceConfig>, String> {
+    // An explicit import selection overrides any service embedded in login material.
+    let config = [
+        Some(value),
+        value.get("login_credentials"),
+        value.get("credentials"),
+        value.get("extra"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|v| v.get("authorization"))
+    .map(|v| {
+        serde_json::from_value::<ServiceConfig>(v.clone())
+            .map_err(|_| "Invalid authorization service configuration".to_owned())
+    })
+    .transpose()?;
+    if let Some(config) = &config {
+        config.validate()?;
+    }
+    Ok(config)
+}
+pub fn service_for(a: &Account) -> Option<ServiceConfig> {
+    a.reauthorization.authorization.clone().or_else(|| {
+        a.login_credentials
+            .as_ref()
+            .map(|login| login.authorization.clone())
+    })
 }
 pub(super) fn check_email(a: &Account, login: &LoginCredentials) -> Result<(), String> {
     let claims = super::chatgpt::identity::claims(&a.credentials.id_token)
@@ -144,14 +223,18 @@ pub fn bind(
     id: Option<&str>,
     input: &str,
     auto: bool,
+    authorization: Option<ServiceConfig>,
 ) -> Result<usize, String> {
+    if let Some(config) = &authorization {
+        config.validate()?;
+    }
     let entries = parse(input)?;
     if id.is_some() && entries.len() != 1 {
         return Err("Enter one credential line for this account".into());
     }
     let accounts = store::all(provider)?;
     let mut updates = Vec::new();
-    for entry in entries {
+    for mut entry in entries {
         let matches: Vec<_> = accounts
             .iter()
             .filter(|a| id.is_none_or(|id| id == a.id) && check_email(a, &entry).is_ok())
@@ -159,6 +242,9 @@ pub fn bind(
         if matches.len() != 1 {
             return Err(format!("No unique saved account for {}", entry.email));
         }
+        entry.authorization = authorization
+            .clone()
+            .unwrap_or_else(|| service_for(matches[0]).unwrap_or_default());
         updates.push((matches[0].id.clone(), matches[0].revision.clone(), entry));
     }
     store::bind_logins(provider, &updates, auto)?;
@@ -167,6 +253,9 @@ pub fn bind(
 
 pub(super) fn base_url() -> Result<String, String> {
     let base = std::env::var("ABV_CHATGPT_REAUTH_URL").unwrap_or_else(|_| SERVICE.into());
+    validate_url(&base)
+}
+fn validate_url(base: &str) -> Result<String, String> {
     let url = url::Url::parse(base.trim()).map_err(|_| "Invalid reauthorization service URL")?;
     let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     if (url.scheme() != "https" && !(local && url.scheme() == "http"))
@@ -218,7 +307,7 @@ pub fn request(provider: Provider, id: &str) -> Result<AccountView, String> {
         .as_ref()
         .ok_or("Add email----password----2fa first")?;
     check_email(&account, login)?;
-    base_url()?;
+    service_for(&account).unwrap_or_default().validate()?;
     let account = store::update(provider, id, Some(&account.revision), |a| {
         a.reauthorization.requested = true;
         a.reauthorization.attempts = 0;
@@ -286,8 +375,16 @@ async fn json_response(response: reqwest::Response) -> Result<Value, String> {
 pub(super) async fn create_batch(
     client: &reqwest::Client,
     login: &LoginCredentials,
+    proxy: &str,
 ) -> Result<Batch, String> {
-    let base = base_url()?;
+    login.authorization.validate()?;
+    if login.authorization.service == Service::BuiltIn {
+        return builtin::create(client, login, proxy).await;
+    }
+    let base = login.authorization.base_url()?;
+    if login.authorization.service == Service::Ruozhen {
+        return ruozhen::create(client, login, base).await;
+    }
     let response = client.post(format!("{base}/api/batches"))
             .timeout(Duration::from_secs(20))
             .json(&json!({"input": format!("{}----{}----{}", login.email, login.password, login.two_factor)}))
@@ -299,10 +396,12 @@ pub(super) async fn create_batch(
         return Err("Reauthorization service returned an invalid job".into());
     }
     Ok(Batch {
+        service: Service::Dbc2api,
         id,
         token,
         base,
         created_at: now(),
+        node: None,
     })
 }
 pub(super) enum Progress {
@@ -312,12 +411,18 @@ pub(super) enum Progress {
 }
 pub(super) async fn poll_batch(
     client: &reqwest::Client,
-    batch: &Batch,
+    batch: &mut Batch,
 ) -> Result<Progress, String> {
     if now() - batch.created_at > 3600 {
         return Ok(Progress::Failed(
             "Reauthorization job timed out; retry later".into(),
         ));
+    }
+    if batch.service == Service::Ruozhen {
+        return ruozhen::poll(client, batch).await;
+    }
+    if batch.service == Service::BuiltIn {
+        return builtin::poll(batch);
     }
     let endpoint = format!("{}/api/batches/{}", batch.base, batch.id);
     let response = client
@@ -370,21 +475,25 @@ async fn step(original: &Account) -> Result<(), String> {
     if a.revision != original.revision || !due(&a, now()) {
         return Ok(());
     }
-    let login = a
+    let mut login = a
         .login_credentials
-        .as_ref()
+        .clone()
         .ok_or("Login credentials are missing")?;
-    check_email(&a, login)?;
-    let client = super::http::client_for(&a)
-        .await
+    login.authorization = service_for(&a).unwrap_or_default();
+    check_email(&a, &login)?;
+    let exit =
+        crate::modules::egress::exit_for(crate::modules::egress::Pool::Native(a.provider), &a.id)
+            .await
+            .map_err(|_| "Cannot connect through this account's egress node")?;
+    let client = super::http::client_on(&a, &exit)
         .map_err(|_| "Cannot connect through this account's egress node")?;
-    let Some(batch) = &a.reauthorization.batch else {
+    let Some(mut batch) = a.reauthorization.batch.clone() else {
         // Persist the attempt before POST. A lost response must not cause a burst of jobs.
         store::update(a.provider, &a.id, Some(&a.revision), |a| {
             a.reauthorization.attempts += 1;
             a.reauthorization.retry_at = now() + 3600;
         })?;
-        let batch = create_batch(&client, login).await?;
+        let batch = create_batch(&client, &login, &super::http::proxy_url(&exit)).await?;
         store::update(a.provider, &a.id, Some(&a.revision), |a| {
             a.reauthorization.batch = Some(batch);
             a.reauthorization.requested = false;
@@ -393,7 +502,13 @@ async fn step(original: &Account) -> Result<(), String> {
         })?;
         return Ok(());
     };
-    let entry = match poll_batch(&client, batch).await? {
+    let progress = poll_batch(&client, &mut batch).await;
+    // Save refreshed merchant cookies even when downloading fails, so a retry resumes
+    // the same task rather than submitting the password again.
+    store::update(a.provider, &a.id, Some(&a.revision), |a| {
+        a.reauthorization.batch = Some(batch);
+    })?;
+    let entry = match progress? {
         Progress::Pending => {
             store::update(a.provider, &a.id, Some(&a.revision), |a| {
                 a.reauthorization.retry_at = now() + 5;
@@ -411,9 +526,17 @@ async fn step(original: &Account) -> Result<(), String> {
     };
     // The normal importer proves identity with OpenAI on this account's node. The revision
     // check also prevents a late job from replacing a newer manual authorization.
-    super::login::import_checked(a.provider, entry, Some(&a.id), Some(&a.revision))
+    if super::login::import_checked(a.provider, entry, Some(&a.id), Some(&a.revision))
         .await
-        .map_err(|_| "Cannot apply reauthorized credentials to the original account")?;
+        .is_err()
+    {
+        // Verification may have consumed a rotating refresh token. Do not replay the
+        // same downloaded/cached authorization after an incomplete import.
+        let _ = store::update(a.provider, &a.id, Some(&a.revision), |a| {
+            a.reauthorization.batch = None;
+        });
+        return Err("Cannot apply reauthorized credentials to the original account".into());
+    }
     super::accounts::scheduling::clear_cooldowns(Some(&a.id));
     Ok(())
 }
@@ -472,14 +595,15 @@ mod tests {
             a.provider,
             None,
             &format!("{input}\nb@example.com----secret----JBSWY3DPEHPK3PXP"),
-            true
+            true,
+            None
         )
         .is_err());
         assert!(store::get(a.provider, &a.id)
             .unwrap()
             .login_credentials
             .is_none());
-        bind(a.provider, Some(&a.id), input, true).unwrap();
+        bind(a.provider, Some(&a.id), input, true, None).unwrap();
         let mut replacement = Account::new(a.provider, Realm::Global);
         replacement.credentials.access_token = token("a@example.com", "new");
         replacement.credentials.id_token = token("a@example.com", "new");
@@ -509,6 +633,7 @@ mod tests {
             Some(&a.id),
             "a@example.com----private-password----JBSWY3DPEHPK3PXP",
             true,
+            None,
         )
         .unwrap();
         let a = store::update(a.provider, &a.id, None, |a| {
@@ -597,6 +722,13 @@ mod tests {
         assert!(from_json(&json!({"2fa":"JBSWY3DPEHPK3PXP"}))
             .unwrap()
             .is_none());
+        let selected = json!({"authorization":{"service":"built_in"},"login_credentials":{
+            "email":"a@example.com","password":"private-password","two_factor":"JBSWY3DPEHPK3PXP",
+            "authorization":{"service":"ruozhen","cdk":"old-cdk"}}});
+        let login = from_json(&selected).unwrap().unwrap();
+        assert!(
+            login.authorization.service == Service::BuiltIn && login.authorization.cdk.is_empty()
+        );
     }
     #[test]
     fn only_expired_or_rejected_credentials_start_automatic_jobs() {
@@ -636,5 +768,66 @@ mod tests {
         ] {
             assert!(exported_account(&value).is_err());
         }
+    }
+    #[test]
+    fn service_changes_invalidate_old_jobs_and_survive_token_reimports() {
+        let _sandbox = Sandbox::new();
+        let a = saved();
+        let input = "a@example.com----private-password----JBSWY3DPEHPK3PXP";
+        bind(
+            a.provider,
+            Some(&a.id),
+            input,
+            true,
+            Some(ServiceConfig {
+                service: Service::Ruozhen,
+                cdk: "private-cdk".into(),
+            }),
+        )
+        .unwrap();
+        let old = store::update(a.provider, &a.id, None, |a| {
+            a.reauthorization.batch = Some(Batch {
+                service: Service::Ruozhen,
+                id: "1".into(),
+                token: "private-session".into(),
+                base: "https://sms.iruozhen.com".into(),
+                created_at: now(),
+                node: None,
+            });
+        })
+        .unwrap();
+        bind(
+            a.provider,
+            Some(&a.id),
+            input,
+            true,
+            Some(ServiceConfig {
+                service: Service::BuiltIn,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let changed = store::get(a.provider, &a.id).unwrap();
+        assert!(changed.revision != old.revision && changed.reauthorization.batch.is_none());
+        assert!(store::update(a.provider, &a.id, Some(&old.revision), |_| {}).is_err());
+        let mut replacement = Account::new(a.provider, Realm::Global);
+        replacement.credentials.access_token = token("a@example.com", "new");
+        replacement.credentials.id_token = token("a@example.com", "new");
+        chatgpt::identity::apply(&mut replacement).unwrap();
+        let replaced = store::upsert(replacement, Some(&a.id)).unwrap();
+        assert!(service_for(&replaced).unwrap().service == Service::BuiltIn);
+        // Older API clients that omit the service must preserve this account's choice.
+        bind(a.provider, Some(&a.id), input, true, None).unwrap();
+        let a = store::get(a.provider, &a.id).unwrap();
+        assert!(service_for(&a).unwrap().service == Service::BuiltIn);
+        let view = serde_json::to_string(&AccountView::from(&a)).unwrap();
+        assert!(view.contains("built_in"));
+        assert!(
+            !view.contains("private-cdk")
+                && !view.contains("private-session")
+                && !view.contains("private-password")
+        );
+        let legacy: Batch = serde_json::from_value(json!({"id":"old", "token":"token", "base":"https://login.dbc2api.top", "created_at":0})).unwrap();
+        assert!(legacy.service == Service::Dbc2api);
     }
 }
