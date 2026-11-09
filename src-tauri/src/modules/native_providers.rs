@@ -230,6 +230,7 @@ pub struct AccountView {
     pub expires_at: i64,
     pub can_refresh: bool,
     pub has_login_credentials: bool,
+    pub reauthorization_service: Option<reauthorize::Service>,
     pub auto_reauthorize: bool,
     pub reauthorizing: bool,
     pub reauthorization_error: Option<String>,
@@ -262,6 +263,9 @@ impl From<&Account> for AccountView {
             expires_at: a.expires_at,
             can_refresh: !a.credentials.refresh_token.is_empty(),
             has_login_credentials: a.login_credentials.is_some(),
+            // Every pre-selection account came from the original merchant, including
+            // token-only imports that do not yet have password/2FA material bound.
+            reauthorization_service: Some(reauthorize::service_for(a).unwrap_or_default().service),
             auto_reauthorize: a.reauthorization.auto,
             reauthorizing: a.reauthorization.requested || a.reauthorization.batch.is_some(),
             reauthorization_error: a.reauthorization.error.clone(),

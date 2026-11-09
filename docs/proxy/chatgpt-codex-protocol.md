@@ -178,16 +178,51 @@ token without a refresh token) schedules a recovery job. Administrator-disabled
 accounts are excluded. HTTP, WebSocket and metadata requests reuse a token already
 rotated for the rejected access token, instead of rotating again for late 401s.
 
-Recovery uses `https://login.dbc2api.top` by default. Set `ABV_CHATGPT_REAUTH_URL` to
-an HTTPS base URL implementing its `/api/batches` API; HTTP is accepted only on
-loopback for local integration tests. Login material is sent to that service, which
-performs the actual sign-in using its own infrastructure. Job IDs and bearer tokens
-are encrypted with the account vault and survive restarts. The worker polls jobs,
-downloads `?format=sub2`, verifies the returned identity through the saved account's
-egress route, and replaces that account's tokens. It preserves its ID, login material,
-egress binding and administrator preferences. A stale job cannot overwrite a newer
-authorization. Failed automatic submissions are delayed one hour, capped at three;
-an explicit recovery request resets the limit. Jobs time out after one hour.
+Each account selects its own authorization service when importing JSON or login
+material, or editing its saved login credentials. The account table and pending
+imports display that service. Authenticated Web and desktop commands accept the
+same optional `authorization: {service, cdk}` object on import and login-binding
+requests. `service` is one of:
+
+| Service | Login and recovery |
+|---|---|
+| `built_in` | This project drives official OpenAI OAuth with PKCE using its own temporary Chrome/Chromium process. Credentials are not sent to a merchant. |
+| `dbc2api` | `https://login.dbc2api.top/api/batches`, bearer-token polling, download `?format=sub2`. |
+| `ruozhen` | `https://sms.iruozhen.com/api/submit` with `account_first:true`, private cookie session, `/api/tasks/{id}`, download `/api/download/{id}?format=sub2api`. |
+
+The UI defaults new imports to `built_in`. All existing accounts, including
+token-only imports without bound password/2FA material, display the original
+`dbc2api` service unless explicitly changed. Bulk binding also defaults to that
+merchant. Existing vaults, jobs and API callers omitting the option retain the
+original `dbc2api` behavior. A binding that omits
+the service preserves that account's choice. A JSON-only import records the choice
+but still needs complete email/password/2FA material to log in automatically.
+Ruozhen's historical-account matching can work without CDK; its optional CDK is
+used only for that merchant and kept encrypted. New authorizations may consume
+merchant credits. Merchant login uses the merchant's own network route.
+
+Built-in login requires Node.js 22+ and Chrome/Chromium; all Docker runtime variants
+include them once in the image. Non-Docker deployments can set `ABV_CHATGPT_NODE`
+and `ABV_CHATGPT_BROWSER` to executable paths. No npm packages or separate service
+are needed. One browser runs at a time; passwords arrive over stdin, browser stderr
+is discarded, and private temporary profiles are removed after success or failure.
+The browser fills only the official login origin. PKCE, the callback origin and
+state are checked before exchanging the code. A new account's selected egress node
+is recorded with the job and reused when importing its tokens. Saved accounts use
+their own node. Human or email verification stops the attempt with an explicit
+error; it does not try to bypass the challenge. A merchant service or a manual JSON
+import remains available when official login cannot complete automatically.
+
+`ABV_CHATGPT_REAUTH_URL` overrides only dbc2api's base URL;
+`ABV_CHATGPT_RUOZHEN_URL` overrides only Ruozhen's base URL. Both require HTTPS;
+HTTP is accepted only on loopback for local integration tests. They do not switch
+an account's selected protocol. Merchant task IDs, bearer tokens/cookies, CDKs and
+built-in OAuth results stay in the encrypted vault and survive restarts. Recovery
+verifies identity through the account's egress route before replacing tokens, while
+preserving the account ID, binding and administrator preferences. Changing login
+material or service invalidates an old task so it cannot overwrite the new choice.
+Failed automatic submissions are delayed one hour, capped at three; an explicit
+recovery request resets the limit. Jobs time out after one hour.
 
 ## 3. Identity (JWT claims)
 

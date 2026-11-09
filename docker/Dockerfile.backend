@@ -64,6 +64,9 @@ ARG FRONTEND_IMAGE=antigravity-manager:latest
 FROM ${FRONTEND_IMAGE} AS frontend-prebuilt
 
 # --- Final Runtime Stage ---
+# Node runs the embedded OAuth worker; Chromium is installed once in the runtime image.
+FROM node:22-bookworm-slim AS oauth-node
+
 FROM debian:bookworm-slim
 ARG USE_MIRROR=auto
 WORKDIR /app
@@ -80,6 +83,7 @@ RUN if [ "$USE_MIRROR" = "true" ] || ( [ "$USE_MIRROR" = "auto" ] && ! timeout 3
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    chromium \
     libssl3 \
     libsqlite3-0 \
     ca-certificates \
@@ -110,6 +114,9 @@ COPY --from=backend-builder /tmp/antigravity-tools /app/antigravity-tools
 
 # Copy frontend dist from prebuilt image
 COPY --from=frontend-prebuilt /app/dist /app/dist
+
+# Built-in OAuth needs no separately deployed service or npm packages.
+COPY --from=oauth-node /usr/local/bin/node /usr/local/bin/node
 
 # Set environment variables
 ENV ABV_DIST_PATH=/app/dist

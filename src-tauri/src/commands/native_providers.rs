@@ -27,6 +27,33 @@ pub struct ImportRequest {
     /// Re-import onto this saved account, through its own egress node.
     #[serde(default)]
     pub account_id: Option<String>,
+    pub authorization: Option<native::reauthorize::ServiceConfig>,
+}
+fn import_authorization(
+    mut value: serde_json::Value,
+    config: Option<native::reauthorize::ServiceConfig>,
+) -> Result<serde_json::Value, String> {
+    let Some(config) = config else {
+        return Ok(value);
+    };
+    config.validate()?;
+    if let Some(entries) = value.get_mut("accounts").and_then(|v| v.as_array_mut()) {
+        for entry in entries {
+            *entry = import_authorization(entry.take(), Some(config.clone()))?;
+        }
+        return Ok(value);
+    }
+    if let Some(token) = value.as_str() {
+        value = serde_json::json!({"refresh_token": token});
+    }
+    // Keep malformed batch entries for the normal importer to report individually.
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "authorization".into(),
+            serde_json::to_value(config).map_err(|_| "Invalid authorization service")?,
+        );
+    }
+    Ok(value)
 }
 #[derive(Deserialize)]
 pub struct AccountRequest {
@@ -67,13 +94,17 @@ pub async fn save_native_provider_settings(
 pub async fn import_native_accounts_batch(
     request: ImportRequest,
 ) -> Result<Vec<native::login::BatchItem>, String> {
-    native::login::import_batch(request.provider, request.auth).await
+    native::login::import_batch(
+        request.provider,
+        import_authorization(request.auth, request.authorization)?,
+    )
+    .await
 }
 #[tauri::command]
 pub async fn import_native_account(request: ImportRequest) -> Result<AccountView, String> {
     native::login::import(
         request.provider,
-        request.auth,
+        import_authorization(request.auth, request.authorization)?,
         request.account_id.as_deref(),
     )
     .await
@@ -105,6 +136,7 @@ pub struct LoginCredentialsRequest {
     pub input: String,
     #[serde(default)]
     pub auto_reauthorize: bool,
+    pub authorization: Option<native::reauthorize::ServiceConfig>,
 }
 #[tauri::command]
 pub async fn save_native_login_credentials(
@@ -115,6 +147,7 @@ pub async fn save_native_login_credentials(
         request.id.as_deref(),
         &request.input,
         request.auto_reauthorize,
+        request.authorization,
     )
 }
 /// Only the authenticated administrator explicitly requesting one row receives its secrets.
@@ -122,7 +155,11 @@ pub async fn save_native_login_credentials(
 pub async fn get_native_login_credentials(
     request: SessionRequest,
 ) -> Result<Option<native::reauthorize::LoginCredentials>, String> {
-    Ok(native::store::get(request.provider, &request.id)?.login_credentials)
+    let account = native::store::get(request.provider, &request.id)?;
+    Ok(account.login_credentials.clone().map(|mut login| {
+        login.authorization = native::reauthorize::service_for(&account).unwrap_or_default();
+        login
+    }))
 }
 #[tauri::command]
 pub async fn reauthorize_native_account(request: SessionRequest) -> Result<AccountView, String> {
@@ -132,7 +169,12 @@ pub async fn reauthorize_native_account(request: SessionRequest) -> Result<Accou
 pub async fn import_native_login_accounts(
     request: LoginCredentialsRequest,
 ) -> Result<native::login_imports::Report, String> {
-    native::login_imports::enqueue(request.provider, &request.input, request.auto_reauthorize)
+    native::login_imports::enqueue(
+        request.provider,
+        &request.input,
+        request.auto_reauthorize,
+        request.authorization,
+    )
 }
 #[tauri::command]
 pub async fn list_native_login_imports(
@@ -258,4 +300,41 @@ pub async fn save_chatgpt_client_version(
     .await
     .map_err(|_| "Codex client version task failed")??;
     Ok(native::chatgpt::release::status(false, false).await)
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn service_choice_is_applied_to_tokens_and_every_json_account() {
+        let config = || {
+            Some(native::reauthorize::ServiceConfig {
+                service: native::reauthorize::Service::BuiltIn,
+                ..Default::default()
+            })
+        };
+        let token = import_authorization(json!("private-token"), config()).unwrap();
+        assert_eq!(token["refresh_token"], "private-token");
+        assert_eq!(token["authorization"]["service"], "built_in");
+        let export = import_authorization(
+            json!({"accounts":[
+                {"platform":"openai","credentials":{"refresh_token":"one"}},
+                {"platform":"openai","credentials":{"refresh_token":"two"}}
+            ]}),
+            config(),
+        )
+        .unwrap();
+        for entry in export["accounts"].as_array().unwrap() {
+            assert_eq!(entry["authorization"]["service"], "built_in");
+            assert!(entry["credentials"]["refresh_token"].is_string());
+        }
+        let legacy = json!({"refresh_token":"private-token"});
+        assert_eq!(import_authorization(legacy.clone(), None).unwrap(), legacy);
+        let mixed =
+            import_authorization(json!({"accounts":[null,{"refresh_token":"one"}]}), config())
+                .unwrap();
+        assert!(mixed["accounts"][0].is_null());
+        assert_eq!(mixed["accounts"][1]["authorization"]["service"], "built_in");
+    }
 }

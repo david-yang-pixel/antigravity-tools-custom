@@ -97,6 +97,9 @@ RUN cargo build --locked --release --bin antigravity-tools && \
 # --- Runtime Base Stage ---
 # Shared by both images below, so a prebuilt and a from-source image only differ
 # in where the binary and frontend come from.
+# Node runs the embedded OAuth worker; Chromium is installed once in the runtime image.
+FROM node:22-bookworm-slim AS oauth-node
+
 FROM debian:bookworm-slim AS runtime-base
 ARG USE_MIRROR=auto
 WORKDIR /app
@@ -113,6 +116,7 @@ RUN if [ "$USE_MIRROR" = "true" ] || ( [ "$USE_MIRROR" = "auto" ] && ! timeout 3
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    chromium \
     libssl3 \
     libsqlite3-0 \
     ca-certificates \
@@ -137,6 +141,9 @@ RUN set -eux; \
     gunzip -c /tmp/mihomo.gz > /usr/local/bin/mihomo; \
     chmod 0755 /usr/local/bin/mihomo; \
     rm /tmp/mihomo.gz
+
+# Built-in OAuth needs no separately deployed service or npm packages.
+COPY --from=oauth-node /usr/local/bin/node /usr/local/bin/node
 
 # Set environment variables
 ENV ABV_DIST_PATH=/app/dist
