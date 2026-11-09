@@ -41,6 +41,12 @@ run `npm ci --omit=dev --ignore-scripts` in this directory, and install
 | `ABV_CHATGPT_AUTH_ENGINE=browser` | Explicit fallback to the previous Chromium implementation. |
 
 Passwords, 2FA secrets, cookies and results travel over private stdin/stdout pipes.
+Built-in OAuth login and reauthorization use the server directly, including retries
+of old failed imports. After authentication, the normal importer assigns an available
+account node and verifies the credentials through it. API traffic and regular token
+refresh use that node; a direct OAuth result never pins the account to DIRECT.
+Switching the authentication route to DIRECT discards an old node checkpoint.
+
 Checkpoints remain in the existing encrypted vault, tied to email and egress node;
 only web sessions younger than 12 hours resume. Spent OAuth codes are never saved.
 Temporary worker directories are owner-only on Unix and removed when a task ends.

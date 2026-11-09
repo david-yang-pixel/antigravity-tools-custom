@@ -258,7 +258,13 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
         })?;
         return Err("This email is already imported; use the saved account's own row".into());
     }
-    let client = super::http::login_client(provider, &crate::modules::egress::Exit::Off)
+    let builtin = job.login.authorization.service == Service::BuiltIn;
+    let auth_exit = if builtin {
+        crate::modules::egress::Exit::Direct
+    } else {
+        crate::modules::egress::Exit::Off
+    };
+    let client = super::http::login_client(provider, &auth_exit)
         .map_err(|_| "Cannot initialize login import connection")?;
     let local_protocol = job.login.authorization.service == Service::BuiltIn && protocol::enabled();
     let mut batch = match job.state.batch.clone() {
@@ -287,24 +293,23 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
                 job.state.retry_at = now() + 60;
                 Ok(())
             })?;
-            // A built-in login obtains its token on the node the new account will keep.
-            // Merchant services perform login remotely and do not use this local browser.
-            let mut route =
-                if job.login.authorization.service == Service::BuiltIn && !local_protocol {
-                    Some(
-                        crate::modules::egress::login_route(
-                            crate::modules::egress::Pool::Native(provider),
-                            None,
-                        )
-                        .await?,
+            // New built-in logins use server DIRECT, including retries of old tasks.
+            // Once tokens are issued, account validation chooses its own usable node.
+            let route = if job.login.authorization.service == Service::BuiltIn && !local_protocol {
+                Some(
+                    crate::modules::egress::login_route(
+                        crate::modules::egress::Pool::Native(provider),
+                        Some(crate::modules::egress::DIRECT),
                     )
-                } else {
-                    None
-                };
+                    .await?,
+                )
+            } else {
+                None
+            };
             let exit = route
                 .as_ref()
                 .map(|route| &route.exit)
-                .unwrap_or(&crate::modules::egress::Exit::Off);
+                .unwrap_or(&auth_exit);
             let submit_client = super::http::login_client(provider, exit)
                 .map_err(|_| "Cannot initialize login import connection")?;
             let target = Target {
@@ -312,7 +317,7 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
                 id: job.id.clone(),
                 revision: job.revision.clone(),
                 pending: true,
-                node: None,
+                node: builtin.then(|| crate::modules::egress::DIRECT.into()),
             };
             let mut batch = reauthorize::create_batch(
                 &submit_client,
@@ -321,13 +326,10 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
                 &target,
             )
             .await?;
-            if !local_protocol {
-                batch.node = route.as_ref().and_then(|route| route.node.clone());
-                batch.lease = route
-                    .as_mut()
-                    .and_then(|route| route.hold.take())
-                    .map(std::sync::Arc::new);
-            }
+            // The login's DIRECT route is not an account-node reservation.
+            // Account assignment and token verification happen in import_new below.
+            batch.node = None;
+            batch.lease = None;
             change(provider, &job.id, &job.revision, |job| {
                 job.state.batch = Some(batch.clone());
                 job.state.retry_at = now() + 5;
@@ -340,6 +342,11 @@ async fn step(provider: Provider, original: &Pending) -> Result<(), String> {
             batch
         }
     };
+    if builtin {
+        // Also separate the routes for a cached result from an older import task.
+        batch.node = None;
+        batch.lease = None;
+    }
     if batch.lease.is_none() {
         if let Some(node) = batch.node.as_deref() {
             batch.lease = crate::modules::egress::reserve_native_login_node(provider, node)
@@ -406,6 +413,11 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
     const INPUT: &str = "new@example.com----private-password----JBSWY3DPEHPK3PXP";
+    fn unavailable_airport() {
+        std::fs::write(crate::modules::account::get_data_dir().unwrap().join("workbuddy_egress.json"),
+            json!({"subscription_url":"http://127.0.0.1:9/unavailable","mihomo_path":"/missing-abv-mihomo",
+                "pools":{"chatgpt":{"enabled":true}}}).to_string()).unwrap();
+    }
     fn token(email: &str) -> String {
         format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(json!({"email":email,"exp":now()+7200,
             "https://api.openai.com/auth":{"chatgpt_account_id":"new-account","chatgpt_user_id":"user"}}).to_string()))
@@ -665,5 +677,98 @@ mod tests {
         let job = pending();
         assert!(job.status == Status::Failed && job.state.batch.is_none());
         assert_eq!(store::all(provider).unwrap()[0].revision, manual.revision);
+    }
+    #[tokio::test]
+    async fn retry_of_an_old_builtin_job_uses_direct_and_discards_its_node_checkpoint() {
+        let _sandbox = Sandbox::new();
+        let provider = Provider::ChatGpt;
+        unavailable_airport();
+        std::env::set_var(
+            "ABV_CHATGPT_AUTH_NODE_MODULES",
+            "/missing-abv-protocol-dependencies",
+        );
+        enqueue(
+            provider,
+            INPUT,
+            true,
+            Some(ServiceConfig {
+                service: Service::BuiltIn,
+                cdk: String::new(),
+            }),
+        )
+        .unwrap();
+        store::change_imports(provider, |jobs| {
+            let job = &mut jobs[0];
+            job.status = Status::Failed;
+            job.state.protocol.node = Some("old-airport-node".into());
+            job.state.protocol.route = "node:old-airport-node".into();
+            job.state.protocol.checkpoint = Some(json!({"private":"old-cookie"}));
+            Ok(())
+        })
+        .unwrap();
+        let old = pending();
+        retry(provider, &old.id).unwrap();
+        process(provider, &pending()).await;
+        let failed = pending();
+        assert_ne!(old.revision, failed.revision);
+        assert_eq!(
+            failed.state.protocol.node.as_deref(),
+            Some(crate::modules::egress::DIRECT)
+        );
+        assert!(failed.state.protocol.checkpoint.is_none());
+        // No real login is sent. Missing worker dependencies stop after selecting DIRECT.
+        assert!(failed
+            .state
+            .error
+            .unwrap()
+            .contains("Protocol authorization needs"));
+    }
+    #[tokio::test]
+    async fn account_assignment_is_required_after_direct_authorization() {
+        let _sandbox = Sandbox::new();
+        let _server = server("success").await;
+        unavailable_airport();
+        let provider = Provider::ChatGpt;
+        enqueue(
+            provider,
+            INPUT,
+            true,
+            Some(ServiceConfig {
+                service: Service::BuiltIn,
+                cdk: String::new(),
+            }),
+        )
+        .unwrap();
+        store::change_imports(provider,|jobs| {
+            let job=&mut jobs[0];job.status=Status::Running;
+            job.state.protocol.node=Some(crate::modules::egress::DIRECT.into());
+            job.state.batch=Some(serde_json::from_value(json!({"service":"built_in","id":"fresh-oauth",
+                "token":json!({"platform":"openai","credentials":{"access_token":token("new@example.com"),
+                    "id_token":token("new@example.com"),"refresh_token":"new-refresh"}}).to_string(),
+                "base":"","created_at":now(),"node":"DIRECT"})).unwrap());Ok(())
+        }).unwrap();
+        process(provider, &pending()).await;
+        // A direct OAuth result does not silently bypass unavailable account nodes.
+        assert!(store::all(provider).unwrap().is_empty());
+        assert!(pending().status == Status::Failed);
+        assert!(pending().state.batch.is_none());
+    }
+    #[tokio::test]
+    async fn new_json_import_uses_automatic_account_assignment() {
+        let _sandbox = Sandbox::new();
+        let _server = server("success").await;
+        unavailable_airport();
+        let provider = Provider::ChatGpt;
+        let access = token("new@example.com");
+        let result = super::super::login::import(
+            provider,
+            json!({"credentials":{
+                "access_token":access,"id_token":access,"refresh_token":"new-refresh"
+            }}),
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(store::all(provider).unwrap().is_empty());
     }
 }

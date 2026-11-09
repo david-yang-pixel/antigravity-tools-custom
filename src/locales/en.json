@@ -50,7 +50,7 @@
     "deleteTitle": "Remove account",
     "deleteHint": "Remove local credentials for {{name}}? This account will stop participating in rotation.",
     "chatgpt": {
-      "importHint": "Paste email----password----2fa, one account per line. The background service submits authorization to login.dbc2api.top, then verifies and adds the account with its login credentials. Sub2 JSON, Codex auth.json and refresh tokens are also accepted; valid access tokens are retained. Existing emails are skipped; use their own rows to reauthorize.",
+      "importHint": "Paste email----password----2fa, one account per line, or Sub2 JSON, Codex auth.json or a refresh token. Built-in login uses the server directly. Once credentials are issued, an available node is assigned according to egress settings and used to verify the account. Existing emails are skipped; reauthorize them from their own rows.",
       "importPlaceholder": "email----password----2fa (one account per line), or Sub2 JSON / auth.json / refresh token",
       "batchResult": "Imported {{imported}}, skipped {{skipped}}, failed {{failed}}",
       "reimport": "Re-import",
@@ -92,7 +92,7 @@
       "builtIn": "Self-hosted · Built in",
       "merchant": "Merchant",
       "notConfigured": "Login authorization not configured",
-      "builtInHint": "The project logs in to official OAuth with email, password and 2FA without sending credentials to a merchant. Two tasks run at a time with fixed egress and encrypted login progress. Requires Node.js 22+, Python curl_cffi and jsdom (included in Docker). Additional verification pauses the task until you retry.",
+      "builtInHint": "The project completes official OAuth with email, password and 2FA without sending credentials to a merchant. Login and 401 reauthorization use the server directly. Added accounts receive a node for API traffic and token refresh. Two tasks run at a time; extra verification pauses the task.",
       "import_waiting": "Waiting for verification",
       "waitingHint": "Automatic retries are paused. Complete verification or check the egress node, then retry.",
       "elapsed": "{{seconds}}s total, {{stageSeconds}}s this stage",
@@ -135,6 +135,7 @@
       "import_running": "Authorizing and importing",
       "import_failed": "Import failed",
       "retryImport": "Retry import",
+      "retryDirect": "Retry directly",
       "removeImport": "Remove task",
       "importQueued": "Queued {{count}} imports; skipped {{skipped}} existing accounts"
     }

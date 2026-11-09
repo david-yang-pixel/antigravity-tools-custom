@@ -106,7 +106,7 @@ export function LoginImportJobs({ jobs, busy, onRetry, onRemove }: {
         <p className="text-xs text-gray-500">{t('nativeProviders.login.importTasksHint')}</p>
         <ul className="space-y-2">{jobs.map(job => <li key={job.id} className="flex flex-wrap items-start justify-between gap-3 rounded-lg bg-gray-50 p-3 text-sm dark:bg-gray-800">
             <div className="min-w-0"><div className="break-all font-medium">{job.email}</div><p className="mt-1 text-xs text-gray-500"><AuthorizationServiceLabel service={job.reauthorization_service} /></p><p role="status" className={`mt-1 text-xs ${job.status === 'failed' ? 'text-red-600' : 'text-blue-600'}`}>{t(`nativeProviders.login.import_${job.status}`)}</p><LoginProgress progress={job.progress} />{job.error && <p className="mt-1 max-w-2xl break-words text-xs text-amber-700">{job.error}</p>}</div>
-            <div className="flex gap-2">{(job.status === 'failed' || job.status === 'waiting') && <button className={button} disabled={busy} onClick={() => onRetry(job.id)}>{t('nativeProviders.login.retryImport')}</button>}<button className={button} disabled={busy} onClick={() => onRemove(job.id)}>{t('nativeProviders.login.removeImport')}</button></div>
+            <div className="flex gap-2">{(job.status === 'failed' || job.status === 'waiting') && <button className={button} disabled={busy} onClick={() => onRetry(job.id)}>{t(job.reauthorization_service === 'built_in' ? 'nativeProviders.login.retryDirect' : 'nativeProviders.login.retryImport')}</button>}<button className={button} disabled={busy} onClick={() => onRemove(job.id)}>{t('nativeProviders.login.removeImport')}</button></div>
         </li>)}</ul>
     </section>;
 }

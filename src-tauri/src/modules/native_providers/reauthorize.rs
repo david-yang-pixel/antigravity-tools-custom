@@ -541,12 +541,17 @@ async fn step(original: &Account) -> Result<(), String> {
         .ok_or("Login credentials are missing")?;
     login.authorization = service_for(&a).unwrap_or_default();
     check_email(&a, &login)?;
-    let exit =
+    // Built-in OAuth uses DIRECT. The account's bound node is used later by
+    // import_checked for validation and by normal API traffic.
+    let exit = if login.authorization.service == Service::BuiltIn {
+        crate::modules::egress::Exit::Direct
+    } else {
         crate::modules::egress::exit_for(crate::modules::egress::Pool::Native(a.provider), &a.id)
             .await
-            .map_err(|_| "Cannot connect through this account's egress node")?;
+            .map_err(|_| "Cannot connect through this account's egress node")?
+    };
     let client = super::http::client_on(&a, &exit)
-        .map_err(|_| "Cannot connect through this account's egress node")?;
+        .map_err(|_| "Cannot initialize authorization connection")?;
     let Some(mut batch) = a.reauthorization.batch.clone() else {
         // Persist the attempt before POST. A lost response must not cause a burst of jobs.
         store::update(a.provider, &a.id, Some(&a.revision), |a| {
@@ -657,6 +662,49 @@ mod tests {
         a.credentials.id_token = token("a@example.com", "old");
         chatgpt::identity::apply(&mut a).unwrap();
         store::upsert(a, None).unwrap()
+    }
+    #[tokio::test]
+    async fn builtin_reauthorization_is_direct_while_the_account_keeps_its_node() {
+        let _sandbox = Sandbox::new();
+        let a = saved();
+        bind(
+            a.provider,
+            Some(&a.id),
+            "a@example.com----private-password----JBSWY3DPEHPK3PXP",
+            true,
+            Some(ServiceConfig {
+                service: Service::BuiltIn,
+                cdk: String::new(),
+            }),
+        )
+        .unwrap();
+        std::fs::write(crate::modules::account::get_data_dir().unwrap().join("workbuddy_egress.json"),
+            json!({"subscription_url":"http://127.0.0.1:9/unavailable","mihomo_path":"/missing-abv-mihomo",
+                "pools":{"chatgpt":{"enabled":true,"bindings":{a.id.clone():"account-node"}}}}).to_string()).unwrap();
+        std::env::set_var(
+            "ABV_CHATGPT_AUTH_NODE_MODULES",
+            "/missing-abv-protocol-dependencies",
+        );
+        let a = store::update(a.provider, &a.id, None, |a| {
+            a.reauthorization.requested = true
+        })
+        .unwrap();
+        let error = step(&a).await.unwrap_err();
+        assert!(error.contains("Protocol authorization needs"));
+        let saved = store::get(a.provider, &a.id).unwrap();
+        assert_eq!(
+            saved.reauthorization.protocol.node.as_deref(),
+            Some(crate::modules::egress::DIRECT)
+        );
+        assert_eq!(
+            crate::modules::egress::bound_node(
+                crate::modules::egress::Pool::Native(a.provider),
+                &a.id
+            )
+            .unwrap()
+            .as_deref(),
+            Some("account-node")
+        );
     }
     #[test]
     fn binding_validates_the_whole_batch_and_preserves_material_on_reimport() {

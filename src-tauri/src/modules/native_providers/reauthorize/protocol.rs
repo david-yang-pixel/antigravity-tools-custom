@@ -278,8 +278,8 @@ fn error(code: &str) -> &'static str {
     "EMAIL_REQUIRED"=>"Official login requires an email verification code; authorization is waiting for verification",
     "PHONE_REQUIRED"=>"Official authorization requires phone verification; complete it before retrying",
     "PROFILE_REQUIRED"=>"This account needs profile setup before authorization can continue",
-    "SECURITY_CHECK"=>"Official security verification could not complete on this egress node",
-    "NETWORK_FAILED"=>"Protocol authorization connection failed on the selected egress node",
+    "SECURITY_CHECK"=>"Official security verification could not complete on the selected route",
+    "NETWORK_FAILED"=>"Protocol authorization connection failed on the selected route",
     "RATE_LIMITED"=>"Official login is rate limited; retry is delayed",
     "ACCOUNT_UNAVAILABLE"=>"Official login reports that this account is unavailable",
     "STEP_TIMEOUT"=>"The current protocol authorization step timed out",
@@ -474,12 +474,12 @@ pub async fn create(
         match crate::modules::egress::native_login_route(
             target.provider,
             slot.index,
-            saved.node.as_deref(),
+            target.node.as_deref().or(saved.node.as_deref()),
         )
         .await
         {
             Ok(route) => Some(route),
-            Err(_) if saved.node.is_some() => {
+            Err(_) if target.node.is_none() && saved.node.is_some() => {
                 target.change(|s| {
                     s.protocol.checkpoint = None;
                     s.protocol.node = None;

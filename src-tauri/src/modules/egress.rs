@@ -733,6 +733,13 @@ pub async fn native_login_route(
     if slot >= NATIVE_LOGIN_SLOTS {
         return Err("Invalid native login slot".into());
     }
+    if preferred == Some(DIRECT) {
+        return Ok(NativeLoginRoute {
+            exit: Exit::Direct,
+            node: Some(DIRECT.into()),
+            _hold: None,
+        });
+    }
     let pool = Pool::Native(provider);
     let settings = load()?;
     if !settings.enabled(pool) {
@@ -793,11 +800,18 @@ fn login_lock(pool: Pool) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
         .or_default()
         .clone())
 }
-/// Login runs before the account exists: it uses `preferred` (the node chosen when
-/// the login started, or a saved account's own binding) or the node auto-assignment
-/// would pick, so the account later keeps the same exit it authorized from.
+/// Selects a route for token validation or login. `None` reserves an automatically
+/// assigned account node; an explicit DIRECT authentication route reserves no node.
 pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRoute, String> {
     let guard = login_lock(pool)?.lock_owned().await;
+    if preferred == Some(DIRECT) {
+        return Ok(LoginRoute {
+            exit: Exit::Direct,
+            node: Some(DIRECT.into()),
+            hold: None,
+            _guard: guard,
+        });
+    }
     let settings = load()?;
     if !settings.enabled(pool) {
         return Ok(LoginRoute {
@@ -838,9 +852,8 @@ pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRou
         _guard: guard,
     })
 }
-/// The node an existing account must reauthorize through: its own binding, so the
-/// new token is issued to the address that already carries this account. `None`
-/// when the pool's egress is off or the account has no binding yet.
+/// The node used to validate replacement credentials and carry account traffic.
+/// `None` when the pool's egress is off or the account has no binding yet.
 pub fn bound_node(pool: Pool, account_id: &str) -> Result<Option<String>, String> {
     let settings = load()?;
     if !settings.enabled(pool) {
@@ -848,7 +861,7 @@ pub fn bound_node(pool: Pool, account_id: &str) -> Result<Option<String>, String
     }
     Ok(settings.bindings(pool).get(account_id).cloned())
 }
-/// Keeps an authorized account on its login node unless it already has a binding.
+/// Keeps an account on the node used to validate it unless it already has a binding.
 /// A node other accounts of the pool already fill is left untouched.
 pub fn adopt(pool: Pool, account_id: &str, node: Option<&str>) {
     let Some(node) = node else { return };
@@ -1620,5 +1633,38 @@ mod tests {
         let route = login_route(NATIVE, None).await.unwrap();
         assert!(route.node.is_none());
         assert_eq!(route.exit, Exit::Off);
+    }
+    #[tokio::test]
+    async fn direct_authentication_does_not_choose_the_account_node() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        edit(|s| {
+            s.set_enabled(NATIVE, true);
+            s.subscription_url = "http://127.0.0.1:9/unavailable".into();
+            s.mihomo_path = "/missing-abv-mihomo".into();
+            Ok(())
+        })
+        .unwrap();
+        let route = native_login_route(Provider::ChatGpt, 0, Some(DIRECT))
+            .await
+            .unwrap();
+        assert_eq!(route.exit, Exit::Direct);
+        assert!(route._hold.is_none());
+        let route = login_route(NATIVE, Some(DIRECT)).await.unwrap();
+        assert_eq!(route.exit, Exit::Direct);
+        drop(route);
+        assert!(bound_node(NATIVE, "new-account").unwrap().is_none());
+        // The account's later traffic uses the assigned node, independently of login.
+        adopt(NATIVE, "new-account", Some("account-node"));
+        assert_eq!(
+            bound_node(NATIVE, "new-account").unwrap().as_deref(),
+            Some("account-node")
+        );
+        assert!(exit_for(NATIVE, "new-account").await.is_err());
+        edit(|s| {
+            s.set_enabled(NATIVE, false);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(exit_for(NATIVE, "new-account").await.unwrap(), Exit::Off);
     }
 }

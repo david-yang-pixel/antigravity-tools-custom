@@ -256,8 +256,8 @@ async fn import_inner(
     }
     let pasted = a.credentials.refresh_token.clone();
     reject_saved_credentials(&a, &store::all(provider)?)?;
-    // A row re-import goes through that account's own node. A new account is validated
-    // through the node it would take, and keeps that node.
+    // Direct OAuth does not select the account's node. New accounts obtain an
+    // available node here, and saved accounts keep their binding.
     let preferred = match account_id {
         Some(id) => {
             store::get(provider, id)?;

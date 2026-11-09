@@ -50,7 +50,7 @@
     "deleteTitle": "移除账号",
     "deleteHint": "移除 {{name}} 的本地凭证？该账号将停止参与轮换。",
     "chatgpt": {
-      "importHint": "支持直接粘贴 email----password----2fa，一行一个账号。后台将向 login.dbc2api.top 提交授权任务，成功后自动添加账号并保留登录凭据。也支持 Sub2 JSON、Codex auth.json 和 refresh token；有效的 access token 会优先保留。已有邮箱会跳过，可在对应账号行重新授权。",
+      "importHint": "支持直接粘贴 email----password----2fa，一行一个账号，也支持 Sub2 JSON、Codex auth.json 和 refresh token。内置登录认证使用服务器直连；获得凭据后，按出口配置自动分配可用节点并校验账号。已有邮箱会跳过，请在对应账号行重新授权。",
       "importPlaceholder": "email----password----2fa（每行一个账号），或粘贴 Sub2 JSON / auth.json / refresh token",
       "batchResult": "已导入 {{imported}} 个，跳过 {{skipped}} 个，失败 {{failed}} 个",
       "reimport": "重新导入",
@@ -92,7 +92,7 @@
       "builtIn": "自建 · 项目内置",
       "merchant": "商家",
       "notConfigured": "未配置登录授权",
-      "builtInHint": "本项目使用邮箱、密码和 2FA 直接完成官方 OAuth，凭据不发送给商家。最多同时处理 2 个账号，任务保持固定出口并保存加密登录进度。需要 Node.js 22+、Python curl_cffi 和 jsdom（Docker 镜像已包含）。遇到额外验证时暂停，处理后可重试。",
+      "builtInHint": "本项目使用邮箱、密码和 2FA 完成官方 OAuth，凭据不发送给商家。登录认证和 401 重新授权使用服务器直连；账号添加后自动分配节点，后续请求和续期使用账号的绑定节点。最多同时处理 2 个账号，遇到额外验证时暂停。",
       "import_waiting": "等待处理验证",
       "waitingHint": "自动重试已暂停，请处理验证或检查出口后重试。",
       "elapsed": "共 {{seconds}} 秒，本阶段 {{stageSeconds}} 秒",
@@ -135,6 +135,7 @@
       "import_running": "正在授权并导入",
       "import_failed": "导入失败",
       "retryImport": "重试导入",
+      "retryDirect": "直连重试",
       "removeImport": "移除任务",
       "importQueued": "已提交 {{count}} 个导入任务，跳过 {{skipped}} 个已有账号"
     }
