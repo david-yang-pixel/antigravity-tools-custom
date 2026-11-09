@@ -673,6 +673,9 @@ async fn binding(settings: &Settings, pool: Pool, account_id: &str) -> Result<St
 /// Route of one saved account's upstream calls.
 pub async fn exit_for(pool: Pool, account_id: &str) -> Result<Exit, String> {
     let settings = load()?;
+    if settings.bindings(pool).get(account_id).map(String::as_str) == Some(DIRECT) {
+        return Ok(Exit::Direct);
+    }
     if !settings.enabled(pool) {
         return Ok(Exit::Off);
     }
@@ -732,6 +735,13 @@ pub async fn native_login_route(
 ) -> Result<NativeLoginRoute, String> {
     if slot >= NATIVE_LOGIN_SLOTS {
         return Err("Invalid native login slot".into());
+    }
+    if preferred == Some(DIRECT) {
+        return Ok(NativeLoginRoute {
+            exit: Exit::Direct,
+            node: Some(DIRECT.into()),
+            _hold: None,
+        });
     }
     let pool = Pool::Native(provider);
     let settings = load()?;
@@ -798,6 +808,14 @@ fn login_lock(pool: Pool) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
 /// would pick, so the account later keeps the same exit it authorized from.
 pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRoute, String> {
     let guard = login_lock(pool)?.lock_owned().await;
+    if preferred == Some(DIRECT) {
+        return Ok(LoginRoute {
+            exit: Exit::Direct,
+            node: Some(DIRECT.into()),
+            hold: None,
+            _guard: guard,
+        });
+    }
     let settings = load()?;
     if !settings.enabled(pool) {
         return Ok(LoginRoute {
@@ -840,10 +858,13 @@ pub async fn login_route(pool: Pool, preferred: Option<&str>) -> Result<LoginRou
 }
 /// The node an existing account must reauthorize through: its own binding, so the
 /// new token is issued to the address that already carries this account. `None`
-/// when the pool's egress is off or the account has no binding yet.
+/// when the pool's egress is off or the account has no binding yet. An explicit
+/// DIRECT binding always bypasses both airport routing and the global proxy.
 pub fn bound_node(pool: Pool, account_id: &str) -> Result<Option<String>, String> {
     let settings = load()?;
-    if !settings.enabled(pool) {
+    if !settings.enabled(pool)
+        && settings.bindings(pool).get(account_id).map(String::as_str) != Some(DIRECT)
+    {
         return Ok(None);
     }
     Ok(settings.bindings(pool).get(account_id).cloned())
@@ -1620,5 +1641,47 @@ mod tests {
         let route = login_route(NATIVE, None).await.unwrap();
         assert!(route.node.is_none());
         assert_eq!(route.exit, Exit::Off);
+    }
+    #[tokio::test]
+    async fn direct_import_bypasses_an_unavailable_airport_and_retains_its_route() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        edit(|s| {
+            s.set_enabled(NATIVE, true);
+            s.subscription_url = "http://127.0.0.1:9/unavailable".into();
+            s.mihomo_path = "/missing-abv-mihomo".into();
+            Ok(())
+        })
+        .unwrap();
+        let route = native_login_route(Provider::ChatGpt, 0, Some(DIRECT))
+            .await
+            .unwrap();
+        assert_eq!(route.exit, Exit::Direct);
+        assert_eq!(route.node.as_deref(), Some(DIRECT));
+        assert!(route._hold.is_none());
+        let route = login_route(NATIVE, Some(DIRECT)).await.unwrap();
+        assert_eq!(route.exit, Exit::Direct);
+        drop(route);
+        adopt(NATIVE, "direct-account", Some(DIRECT));
+        assert_eq!(
+            bound_node(NATIVE, "direct-account").unwrap().as_deref(),
+            Some(DIRECT)
+        );
+        assert_eq!(
+            exit_for(NATIVE, "direct-account").await.unwrap(),
+            Exit::Direct
+        );
+        edit(|s| {
+            s.set_enabled(NATIVE, false);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            exit_for(NATIVE, "direct-account").await.unwrap(),
+            Exit::Direct
+        );
+        assert_eq!(
+            exit_for(NATIVE, "unbound-account").await.unwrap(),
+            Exit::Off
+        );
     }
 }
