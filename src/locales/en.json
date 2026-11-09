@@ -270,6 +270,7 @@
     "today_used": "Used today",
     "today_requests": "Requests today",
     "today_note": "UTC+8 day · up to now",
+    "today_by_model": "Today's usage by model",
     "remaining": "Remaining quota",
     "requests": "Requests",
     "quota": "Lifetime quota",

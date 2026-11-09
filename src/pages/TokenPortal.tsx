@@ -42,6 +42,8 @@ interface Overview {
     daily: UsagePeriod[];
     weekly: UsagePeriod[];
     models: ModelUsage[];
+    /** Per-model usage for the current UTC+8 day, highest tokens first. */
+    today_models: ModelUsage[];
 }
 
 const portalMenus = ['overview', 'balance', 'models', 'guide', 'statistics', 'logs'] as const;
@@ -224,8 +226,19 @@ export default function TokenPortal() {
                             <span className="flex items-center justify-between text-sm text-slate-500 mb-3">{t('billing.balance')}<ArrowRight size={16} aria-hidden="true" /></span>
                             <span className="block text-xl font-semibold tracking-tight break-words">{formatYuan(overview.balance_micros ?? 0)}</span>
                         </button>
+                        <div className="bg-white border border-slate-200 rounded-xl p-5">
+                            <p className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                <span className="text-sm text-slate-500">{t('token_portal.today_used')}</span>
+                                <span className="text-xl font-semibold tracking-tight tabular-nums break-words">{million(today ? today.input_tokens + today.output_tokens : 0)}</span>
+                            </p>
+                            {overview.today_models.length > 0 && <ul aria-label={t('token_portal.today_by_model')} className="mt-3 max-h-40 overflow-y-auto space-y-1.5 border-t border-slate-100 pt-3 text-sm">
+                                {overview.today_models.map(row => <li key={row.model} className="flex items-baseline justify-between gap-3">
+                                    <span className="truncate font-mono text-slate-600" title={row.model}>{row.model}</span>
+                                    <span className="shrink-0 tabular-nums text-slate-900">{million(row.input_tokens + row.output_tokens)}</span>
+                                </li>)}
+                            </ul>}
+                        </div>
                         {[
-                            [t('token_portal.today_used'), million(today ? today.input_tokens + today.output_tokens : 0), t('token_portal.today_note')],
                             [t('token_portal.today_requests'), (today?.requests ?? 0).toLocaleString(), t('token_portal.today_note')],
                             [t('token_portal.used'), million(overview.total_tokens_used)],
                             [t('token_portal.requests'), overview.total_requests.toLocaleString()],

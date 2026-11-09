@@ -269,6 +269,7 @@
     "today_used": "今日已用",
     "today_requests": "今日请求数",
     "today_note": "UTC+8 当天 · 截至现在",
+    "today_by_model": "今日各模型用量",
     "used": "累计已用",
     "remaining": "剩余额度",
     "requests": "请求数",
