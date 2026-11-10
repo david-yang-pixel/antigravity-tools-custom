@@ -161,16 +161,16 @@ redirects.
   airport subscription, like WorkBuddy (see `docs/WORKBUDDY_UPSTREAM.md`). The
   subscription link, node filters and auto-assign are shared with WorkBuddy, and
   one mihomo process serves both; the switch and bindings are per source. Within
-  ChatGPT a node serves at most `max_accounts_per_node` accounts (default 3,
-  1–20, counted per source; auto-assign fills the least-loaded node first); a
+  ChatGPT a node serves at most 10 accounts, including in-progress authorization
+  holds (counted per source; auto-assign fills the least-loaded node first); a
   WorkBuddy account and a ChatGPT account may share a node because they talk to
   different services. mihomo tests every node once in the background after it
   starts, and an assignment whose pick is still untested tests all nodes first
   (concurrently, at most 20 s), so a restart cannot hand a new account a dead node.
-- With **auto-rebind** on (per source, `pools.chatgpt.auto_rebind`, default off), an
-  hourly check moves accounts off a node that failed two tests 30 s apart onto the
-  healthy node with the fewest accounts and lowest delay; their exit IP changes.
-  Accounts on working nodes and `DIRECT` accounts never move.
+- ChatGPT bindings stay fixed even when a node fails. Existing saved
+  `pools.chatgpt.auto_rebind` settings are retired on startup. An administrator
+  can change a binding manually. A fixed node name does not guarantee a fixed
+  exit IP: the subscription controls the address behind each node.
 - A new account's import that cannot open a connection through its auto-chosen node
   (nothing reached OpenAI, so the credential is untouched) marks that node
   unavailable for 15 minutes and retries on another node, up to 3 nodes. Any answer

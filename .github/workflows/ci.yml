@@ -98,6 +98,10 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked --lib native_providers -- --test-threads=1
 
+      - name: Egress binding and capacity tests
+        working-directory: src-tauri
+        run: 'cargo test --locked --lib modules::egress::tests:: -- --test-threads=1'
+
   # Tauri 构建测试（不打包）
   build-tauri:
     name: Build Tauri App
