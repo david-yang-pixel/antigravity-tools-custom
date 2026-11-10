@@ -3,13 +3,13 @@
 //! upstream traffic (inference, refresh, models, quota, login) leaves through one node
 //! of an airport subscription, served by a managed mihomo process. An account bound to
 //! a node fails closed when that node is unusable: it never falls back to the server's
-//! own address. It stays on its node unless the pool's `auto_rebind` is on: then an
-//! hourly check moves accounts off a node that failed two tests in a row onto the
-//! healthy node with the fewest accounts and lowest delay.
+//! own address. ChatGPT bindings never move automatically. Other pools may opt into
+//! an hourly check that moves accounts off a node that failed two tests in a row.
 //!
 //! All pools share one subscription and one mihomo process; each pool has its own
 //! switch and bindings. Within a pool a node serves at most `max_accounts_per_node`
-//! accounts (default 3): auto-assignment and manual assignment both refuse a full node,
+//! accounts (ChatGPT: 10; other pools: configurable, default 3): auto-assignment
+//! and manual assignment both refuse a full node,
 //! and auto-assignment fills the least-loaded node first. Pools are counted separately:
 //! they talk to unrelated upstream services, so WorkBuddy and ChatGPT accounts may share
 //! a node. The exit address is whatever that node currently uses; this
@@ -32,7 +32,8 @@ use std::{
 
 pub const DIRECT: &str = "DIRECT";
 pub const NATIVE_LOGIN_SLOTS: usize = 2;
-/// Accounts of one pool a node serves unless configured otherwise.
+pub const CHATGPT_MAX_ACCOUNTS_PER_NODE: usize = 10;
+/// Accounts of a non-ChatGPT pool a node serves unless configured otherwise.
 pub const DEFAULT_MAX_ACCOUNTS_PER_NODE: usize = 3;
 const MAX_ACCOUNTS_PER_NODE_LIMIT: usize = 20;
 const MAX_ACCOUNTS_ENV: &str = "ABV_EGRESS_MAX_ACCOUNTS_PER_NODE";
@@ -47,6 +48,9 @@ pub enum Pool {
     Native(Provider),
 }
 impl Pool {
+    fn fixed_node(self) -> bool {
+        matches!(self, Pool::Native(Provider::ChatGpt))
+    }
     pub fn all() -> impl Iterator<Item = Pool> {
         std::iter::once(Pool::WorkBuddy).chain(Provider::ALL.into_iter().map(Pool::Native))
     }
@@ -163,6 +167,13 @@ impl Default for Settings {
 }
 static NO_BINDINGS: BTreeMap<String, String> = BTreeMap::new();
 impl Settings {
+    fn node_limit(&self, pool: Pool) -> usize {
+        if pool.fixed_node() {
+            CHATGPT_MAX_ACCOUNTS_PER_NODE
+        } else {
+            self.max_accounts_per_node
+        }
+    }
     pub fn enabled(&self, pool: Pool) -> bool {
         match pool {
             Pool::WorkBuddy => self.enabled,
@@ -176,6 +187,9 @@ impl Settings {
         }
     }
     pub fn auto_rebind(&self, pool: Pool) -> bool {
+        if pool.fixed_node() {
+            return false;
+        }
         match pool {
             Pool::WorkBuddy => self.auto_rebind,
             _ => self.pools.get(pool.key()).is_some_and(|p| p.auto_rebind),
@@ -242,6 +256,7 @@ pub struct View {
     pub auto_assign: bool,
     pub max_accounts_per_node: usize,
     pub auto_rebind: bool,
+    pub fixed_node: bool,
     pub env_locked: Vec<&'static str>,
     pub running: bool,
     pub binary: Option<String>,
@@ -474,7 +489,7 @@ fn bound_elsewhere(settings: &Settings, pool: Pool, node: &str, except: Option<&
     node != DIRECT
         && bound_counts(settings, pool, except)
             .get(node)
-            .is_some_and(|n| *n >= settings.max_accounts_per_node)
+            .is_some_and(|n| *n >= settings.node_limit(pool))
 }
 /// `true` when other accounts and in-progress logins of this pool fill this node.
 fn node_in_use(settings: &Settings, pool: Pool, node: &str, except: Option<&str>) -> bool {
@@ -485,7 +500,7 @@ fn node_in_use(settings: &Settings, pool: Pool, node: &str, except: Option<&str>
         .get(node)
         .copied()
         .unwrap_or(0);
-    bound + held_nodes(pool).get(node).copied().unwrap_or(0) >= settings.max_accounts_per_node
+    bound + held_nodes(pool).get(node).copied().unwrap_or(0) >= settings.node_limit(pool)
 }
 /// One node of this pool that is not full. Tested-alive nodes win, then the least-loaded
 /// node (accounts spread out before any node fills), then lower delay. Nodes whose last
@@ -503,7 +518,7 @@ fn choose(nodes: &[Node], settings: &Settings, pool: Pool) -> Option<String> {
             n.is_subscription_proxy()
                 && n.alive != Some(false)
                 && eligible(&n.name, &include, &exclude)
-                && load(&n.name) < settings.max_accounts_per_node
+                && load(&n.name) < settings.node_limit(pool)
         })
         .min_by_key(|(index, n)| {
             (
@@ -909,6 +924,7 @@ pub async fn view(pool: Pool) -> Result<View, String> {
         .collect();
     let (include, exclude) = filters(&settings);
     let auto_rebind = settings.auto_rebind(pool);
+    let max_accounts_per_node = settings.node_limit(pool);
     let nodes: Vec<NodeView> = nodes
         .into_iter()
         .map(|node| NodeView {
@@ -927,8 +943,9 @@ pub async fn view(pool: Pool) -> Result<View, String> {
         include: settings.include,
         exclude: settings.exclude,
         auto_assign: settings.auto_assign,
-        max_accounts_per_node: settings.max_accounts_per_node,
+        max_accounts_per_node,
         auto_rebind,
+        fixed_node: pool.fixed_node(),
         env_locked: locks.fields(pool),
         running: status.running,
         binary: status.binary,
@@ -939,6 +956,14 @@ pub async fn view(pool: Pool) -> Result<View, String> {
     })
 }
 pub async fn save(pool: Pool, update: Update) -> Result<View, String> {
+    if pool.fixed_node() && update.auto_rebind == Some(true) {
+        return Err(
+            "ChatGPT accounts keep their assigned node; automatic rebinding is unavailable".into(),
+        );
+    }
+    if pool.fixed_node() && update.max_accounts_per_node.is_some() {
+        return Err("ChatGPT nodes support at most 10 accounts".into());
+    }
     let mut probe = stored()?;
     let locked = overrides(&mut probe)?.fields(pool);
     edit(|s| {
@@ -974,7 +999,24 @@ pub async fn save(pool: Pool, update: Update) -> Result<View, String> {
     reconcile().await;
     view(pool).await
 }
+/// Clear the old ChatGPT failover switch on upgrade so the saved configuration
+/// describes the fixed-node behavior, including after a future rollback.
+fn retire_chatgpt_auto_rebind() -> Result<(), String> {
+    let key = Pool::Native(Provider::ChatGpt).key();
+    if stored()?.pools.get(key).is_some_and(|p| p.auto_rebind) {
+        edit(|s| {
+            if let Some(pool) = s.pools.get_mut(key) {
+                pool.auto_rebind = false;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
 async fn reconcile() {
+    if let Err(error) = retire_chatgpt_auto_rebind() {
+        tracing::warn!("Egress: cannot retire ChatGPT automatic rebinding: {error}");
+    }
     match load() {
         Ok(settings) if settings.routing() => mihomo::supervise(&settings).await,
         Ok(_) => mihomo::stop().await,
@@ -1004,7 +1046,7 @@ pub async fn set_account(
             if node_in_use(s, pool, name, Some(&id)) {
                 return Err(format!(
                     "This egress node already serves {} account(s), the per-node limit",
-                    s.max_accounts_per_node
+                    s.node_limit(pool)
                 ));
             }
         }
@@ -1108,6 +1150,9 @@ fn rebind_one(
     id: &str,
     from: &str,
 ) -> Option<String> {
+    if pool.fixed_node() {
+        return None;
+    }
     if settings.bindings(pool).get(id).map(String::as_str) != Some(from) {
         return None;
     }
@@ -1284,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn nodes_are_exclusive_within_a_pool_but_not_across_pools() {
+    fn node_capacity_is_counted_separately_for_each_pool() {
         let nodes = [node("JP 02", Some(40), Some(true))];
         let mut settings = exclusive();
         settings.bindings.insert("wb".into(), "JP 02".into());
@@ -1293,9 +1338,15 @@ mod tests {
         assert!(!node_in_use(&settings, NATIVE, "JP 02", None));
         settings
             .bindings_mut(NATIVE)
-            .insert("q1".into(), "JP 02".into());
-        assert!(node_in_use(&settings, NATIVE, "JP 02", Some("q2")));
-        assert!(!node_in_use(&settings, NATIVE, "JP 02", Some("q1")));
+            .insert("c1".into(), "JP 02".into());
+        assert!(!node_in_use(&settings, NATIVE, "JP 02", Some("c2")));
+        for i in 2..=CHATGPT_MAX_ACCOUNTS_PER_NODE {
+            settings
+                .bindings_mut(NATIVE)
+                .insert(format!("c{i}"), "JP 02".into());
+        }
+        assert!(node_in_use(&settings, NATIVE, "JP 02", Some("new")));
+        assert!(!node_in_use(&settings, NATIVE, "JP 02", Some("c1")));
         assert_eq!(choose(&nodes, &settings, NATIVE), None);
         assert_eq!(settings.bindings(WB).len(), 1);
     }
@@ -1421,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_rebind_is_per_pool_and_only_failing_bound_nodes_count() {
+    fn chatgpt_stays_bound_even_when_a_saved_config_enables_auto_rebind() {
         let mut settings = Settings::default();
         settings.set_enabled(NATIVE, true);
         settings.set_enabled(WB, true);
@@ -1448,24 +1499,42 @@ mod tests {
             "off by default"
         );
         settings.set_auto_rebind(NATIVE, true);
-        assert!(settings.auto_rebind(NATIVE) && !settings.auto_rebind(WB));
-        // WorkBuddy keeps its node: only the ChatGPT account's failing node counts.
+        assert!(!settings.auto_rebind(NATIVE) && !settings.auto_rebind(WB));
+        assert!(failing_bound(&nodes, &settings).is_empty());
+        settings.set_auto_rebind(WB, true);
+        // ChatGPT stays fixed even while WorkBuddy can move off its failing node.
         let failing = failing_bound(&nodes, &settings);
-        assert_eq!(failing, HashSet::from(["dead".to_string()]));
+        assert_eq!(failing, HashSet::from(["dead-wb".to_string()]));
         let value = serde_json::to_value(&settings).unwrap();
         assert_eq!(value["pools"]["chatgpt"]["auto_rebind"], true);
-        assert_eq!(value["auto_rebind"], false);
+        assert_eq!(value["auto_rebind"], true);
+        assert_eq!(
+            rebind_one(&mut settings, NATIVE, &nodes, "c1", "dead"),
+            None
+        );
+        assert_eq!(settings.bindings(NATIVE)["c1"], "dead");
+    }
+
+    #[test]
+    fn upgrade_retires_saved_chatgpt_auto_rebind_without_changing_workbuddy() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        edit(|s| {
+            s.set_auto_rebind(NATIVE, true);
+            s.set_auto_rebind(WB, true);
+            Ok(())
+        })
+        .unwrap();
+        retire_chatgpt_auto_rebind().unwrap();
+        let saved = stored().unwrap();
+        assert!(!saved.pools[NATIVE.key()].auto_rebind);
+        assert!(saved.auto_rebind(WB));
     }
 
     #[test]
     fn a_rebind_moves_to_the_least_loaded_healthy_node_and_respects_concurrent_changes() {
         let mut settings = Settings::default();
-        settings
-            .bindings_mut(NATIVE)
-            .insert("a".into(), "dead".into());
-        settings
-            .bindings_mut(NATIVE)
-            .insert("b".into(), "busy".into());
+        settings.bindings_mut(WB).insert("a".into(), "dead".into());
+        settings.bindings_mut(WB).insert("b".into(), "busy".into());
         let nodes = [
             node("dead", Some(10), Some(false)),
             node("busy", Some(20), Some(true)),
@@ -1473,19 +1542,19 @@ mod tests {
         ];
         // `idle` has no accounts, so it wins over the faster but loaded `busy`.
         assert_eq!(
-            rebind_one(&mut settings, NATIVE, &nodes, "a", "dead").as_deref(),
+            rebind_one(&mut settings, WB, &nodes, "a", "dead").as_deref(),
             Some("idle")
         );
-        assert_eq!(settings.bindings(NATIVE)["a"], "idle");
+        assert_eq!(settings.bindings(WB)["a"], "idle");
         // An account that moved (or was rebound by hand) since the test is left alone.
-        assert_eq!(rebind_one(&mut settings, NATIVE, &nodes, "a", "dead"), None);
+        assert_eq!(rebind_one(&mut settings, WB, &nodes, "a", "dead"), None);
         // Nowhere with room: the account stays on its node.
         let mut full = exclusive();
-        full.bindings_mut(NATIVE).insert("x".into(), "dead".into());
-        full.bindings_mut(NATIVE).insert("y".into(), "busy".into());
-        full.bindings_mut(NATIVE).insert("z".into(), "idle".into());
-        assert_eq!(rebind_one(&mut full, NATIVE, &nodes, "x", "dead"), None);
-        assert_eq!(full.bindings(NATIVE)["x"], "dead");
+        full.bindings_mut(WB).insert("x".into(), "dead".into());
+        full.bindings_mut(WB).insert("y".into(), "busy".into());
+        full.bindings_mut(WB).insert("z".into(), "idle".into());
+        assert_eq!(rebind_one(&mut full, WB, &nodes, "x", "dead"), None);
+        assert_eq!(full.bindings(WB)["x"], "dead");
     }
 
     #[test]
@@ -1568,25 +1637,42 @@ mod tests {
         let mut settings = Settings::default();
         assert_eq!(settings.max_accounts_per_node, 3);
         // Accounts spread out before any node takes a second one.
-        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("fast"));
-        settings
-            .bindings_mut(NATIVE)
-            .insert("a".into(), "fast".into());
-        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("slow"));
-        settings
-            .bindings_mut(NATIVE)
-            .insert("b".into(), "slow".into());
-        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("fast"));
+        assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("fast"));
+        settings.bindings_mut(WB).insert("a".into(), "fast".into());
+        assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("slow"));
+        settings.bindings_mut(WB).insert("b".into(), "slow".into());
+        assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("fast"));
         for (id, node) in [("c", "fast"), ("d", "fast"), ("e", "slow"), ("f", "slow")] {
-            assert!(!node_in_use(&settings, NATIVE, node, None), "{id}");
-            settings.bindings_mut(NATIVE).insert(id.into(), node.into());
+            assert!(!node_in_use(&settings, WB, node, None), "{id}");
+            settings.bindings_mut(WB).insert(id.into(), node.into());
         }
         // Three accounts each: both nodes are full, for new and other accounts alike.
-        assert_eq!(choose(&nodes, &settings, NATIVE), None);
-        assert!(node_in_use(&settings, NATIVE, "fast", Some("new")));
-        assert!(!node_in_use(&settings, NATIVE, "fast", Some("a")));
+        assert_eq!(choose(&nodes, &settings, WB), None);
+        assert!(node_in_use(&settings, WB, "fast", Some("new")));
+        assert!(!node_in_use(&settings, WB, "fast", Some("a")));
         // Pools are counted separately.
-        assert_eq!(choose(&nodes, &settings, WB).as_deref(), Some("fast"));
+        assert_eq!(choose(&nodes, &settings, NATIVE).as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn chatgpt_accepts_ten_bindings_even_with_the_saved_three_account_limit() {
+        let _dir = crate::proxy::monitor::prompt_log_tests::TestDataDir::new();
+        assert_eq!(load().unwrap().max_accounts_per_node, 3);
+        assert_eq!(load().unwrap().node_limit(NATIVE), 10);
+        for i in 0..=10 {
+            adopt(NATIVE, &format!("account-{i}"), Some("same-node"));
+        }
+        let settings = load().unwrap();
+        assert_eq!(bound_counts(&settings, NATIVE, None)["same-node"], 10);
+        assert!(node_in_use(&settings, NATIVE, "same-node", Some("new")));
+        assert!(!node_in_use(
+            &settings,
+            NATIVE,
+            "same-node",
+            Some("account-0")
+        ));
+        assert_eq!(settings.node_limit(WB), 3);
+        assert_eq!(stored().unwrap().max_accounts_per_node, 3);
     }
 
     #[test]

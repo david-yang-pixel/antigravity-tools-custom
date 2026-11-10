@@ -17,7 +17,7 @@
     "authorizationService": "Authorization service",
     "account": "Account",
     "egress": "Egress node",
-    "egressDescription": "When enabled, each {{provider}} account stays on one node of your airport subscription. Chat, renewal, model, quota and authorization traffic all leave through that node. The subscription link, node filters and auto-assign are shared with WorkBuddy; the switch and node bindings are separate: within one source a node serves up to the configured number of accounts (3 by default), while a WorkBuddy account and a {{provider}} account may use the same node. A binding is not moved later; when its node is unusable the account fails instead of falling back to the server address. When off, the upstream proxy setting in API Proxy applies. Requires mihomo on the server (bundled in the Docker image).",
+    "egressDescription": "When enabled, each {{provider}} account uses one subscription node for chat, renewal, models and quota. A node can hold up to 10 {{provider}} accounts, counted separately from WorkBuddy. A bound account never changes nodes automatically; if its node fails, its request fails, and you can rebind it manually. Before a new import is bound, a connection failure on its first candidate may prompt another node. The subscription determines each node's exit IP, so a fixed node name does not guarantee a fixed IP. With egress off, the API Proxy upstream setting applies.",
     "balance": "Official balance",
     "health": "Status",
     "authorization": "Access token expiry",
@@ -2502,7 +2502,8 @@
       "latency": "{{ms}} ms",
       "timeout": "timed out",
       "max_accounts": "Max accounts per node",
-      "max_accounts_hint": "How many accounts of one source a node may serve (1–20); WorkBuddy and ChatGPT accounts are counted separately. Only later assignments are affected; existing bindings stay.",
+      "max_accounts_hint": "How many WorkBuddy accounts a node may serve (1–20); ChatGPT has a separate fixed limit of 10. Only later assignments are affected; existing bindings stay.",
+      "fixed_capacity_hint": "ChatGPT allows up to 10 bound accounts per node. Existing bindings stay in place; WorkBuddy has its own capacity setting.",
       "node_accounts": "{{count}}/{{max}} accounts",
       "auto_rebind": "Move accounts off a node that stays unusable to a working low-latency node (hourly, this source only)",
       "auto_rebind_hint": "Nodes are tested hourly (first about 2 minutes after start). When an account's node fails two tests 30 seconds apart, the account moves to the working node with the fewest accounts and lowest latency, so its exit IP changes. Accounts on working nodes never move; DIRECT accounts are unaffected; with no working node free, the account stays and a warning is logged."

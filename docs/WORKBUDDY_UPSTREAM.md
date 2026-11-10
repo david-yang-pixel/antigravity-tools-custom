@@ -129,10 +129,10 @@ Headless 使用 `gui_config.json` 中 `proxy.scheduling` 和 `circuit_breaker`�
 - 新账号或未绑定账号首次使用时自动分配一个未满的节点：符合 `include`、不符合 `exclude`，测速成功的优先，测速失败的跳过；其中账号最少的节点优先，账号先分散开，再让同一节点接第二个。同一来源内每个节点最多分给 `max_accounts_per_node` 个账号（默认 3，范围 1–20，界面「每个节点最多账号数」），未完成的授权也占一个名额。所有节点都满时分配失败。mihomo 启动（含程序重启）并载入订阅后，会在后台自动测速全部节点一次；分配时若要选的节点还没有测速结果，会先测速全部节点（并发，最多等 20 秒），再按结果选择，避免重启后把新账号分到连不通的节点。测速无法执行时按原来的方式分配，并记录警告日志。账号授权全程使用同一节点，授权完成后账号沿用该节点。授权占用的节点在会话结束时释放；放弃的授权最迟在链接过期时自动释放，不会一直占着节点。
 - 已有账号请在账号行点「重新授权」（或给 start 传 `account_id`）。授权直接走该账号已绑定的节点，节点全部占满时也能完成；未绑定的账号按新账号分配空闲节点。通过「添加账号」登录一个已绑定其他节点的已有账号，或重新授权时登录了另一个账号，都不会导入凭据，避免同一账号的令牌从另一个出口签发。
 - 账号列表可为每个账号手动选择空闲节点、`直连` 或 `自动分配`，并测试该账号出口到其 WorkBuddy 端点的延迟。手动指定同样不能超过每节点账号上限。
-- 绑定节点不可用时请求直接失败并切换账号，**默认不会改绑到别的节点，也不会回退直连**。各来源可单独开启「节点持续不可用时自动换节点」（配置字段 `auto_rebind`，WorkBuddy 在顶层，ChatGPT 在 `pools.chatgpt`；默认关闭）：每小时测速一次（启动约 2 分钟后先查一次），账号所在节点连续两次测速失败（间隔 30 秒）时，自动换到可用、账号最少、延迟最低且未满的节点，出口 IP 随之改变；节点正常的账号、选了直连的账号不动，没有可用节点时保持原样并记录日志。出口地址是该节点当前的地址，由订阅提供；程序不分配公网 IP。节点换地址或几条线路共用一个地址，取决于订阅本身。未启用出口时，账号仍从这台服务器的地址出去。
+- 绑定节点不可用时请求直接失败并切换账号，**不会回退直连**。WorkBuddy 可开启「节点持续不可用时自动换节点」（顶层 `auto_rebind`）；ChatGPT 账号始终固定绑定节点，旧配置中的 `pools.chatgpt.auto_rebind` 会在启动时关闭。WorkBuddy 开启自动改绑后，每小时测速一次（启动约 2 分钟后先查一次），账号所在节点连续两次测速失败（间隔 30 秒）时，自动换到可用、账号最少、延迟最低且未满的节点；没有可用节点时保持原样。出口地址由订阅提供，节点名称固定不保证出口 IP 固定。未启用出口时，账号仍从这台服务器的地址出去。
 - 配置保存在 `workbuddy_egress.json`（含订阅链接和绑定）；mihomo 工作目录为数据目录下 `egress/`（配置、日志 `mihomo.log`、订阅缓存）。
-- 订阅链接、节点筛选和自动分配与 ChatGPT 共用，同一个 mihomo 进程同时服务两个来源；开关和节点绑定按来源独立。每节点账号上限按来源分开计数，WorkBuddy 账号与 ChatGPT 账号可以使用同一节点（上游是不同服务）。ChatGPT 的绑定存于同一文件的 `pools.chatgpt`。
-- 环境变量：`ABV_WORKBUDDY_EGRESS_ENABLED=true|false`、`ABV_EGRESS_SUBSCRIPTION=<订阅链接>`（仍兼容 `ABV_WORKBUDDY_EGRESS_SUBSCRIPTION`；被覆盖字段在界面锁定）、`ABV_MIHOMO_PATH=<可执行文件>`、`ABV_EGRESS_MAX_ACCOUNTS_PER_NODE=<1-20>`（每节点账号上限，覆盖界面与配置文件）。ChatGPT 开关为 `ABV_CHATGPT_EGRESS_ENABLED`。
+- 订阅链接、节点筛选和自动分配与 ChatGPT 共用，同一个 mihomo 进程同时服务两个来源；开关和节点绑定按来源独立。每节点账号上限按来源分开计数：WorkBuddy 可设 1–20 个，ChatGPT 固定最多 10 个。两个来源的账号可以使用同一节点。ChatGPT 的绑定存于同一文件的 `pools.chatgpt`。
+- 环境变量：`ABV_WORKBUDDY_EGRESS_ENABLED=true|false`、`ABV_EGRESS_SUBSCRIPTION=<订阅链接>`（仍兼容 `ABV_WORKBUDDY_EGRESS_SUBSCRIPTION`；被覆盖字段在界面锁定）、`ABV_MIHOMO_PATH=<可执行文件>`、`ABV_EGRESS_MAX_ACCOUNTS_PER_NODE=<1-20>`（WorkBuddy 每节点账号上限，覆盖界面与配置文件）。ChatGPT 开关为 `ABV_CHATGPT_EGRESS_ENABLED`，容量固定为 10，不受 WorkBuddy 容量配置影响。
 - mihomo 查找顺序：`ABV_MIHOMO_PATH` / 配置文件 `mihomo_path` → `<数据目录>/egress/bin/mihomo` → 程序同目录 → `PATH`。Docker 镜像已内置固定版本并校验 sha256；管理接口不能修改可执行文件路径。
 
 headless 授权可通过这些接口发起，然后在任意浏览器打开返回的官方链接，完成后轮询并调用账号同步接口。授权会话最多保留 10 分钟；取消后不能继续导入。公开网站请继续使用现有 HTTPS 和管理员鉴权。
