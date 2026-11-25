@@ -111,8 +111,19 @@ pub async fn refresh(client: &reqwest::Client, a: &mut Account) -> Result<(), Fa
     next.expires_at = number(&json, &["expires_in"])
         .filter(|n| *n > 0.0)
         .map_or(0, |n| now() + n as i64);
-    // Claims missing from the new tokens leave the known identity untouched.
-    let _ = identity::apply(&mut next);
+    if a.credentials.verified_export_workspace {
+        let expiry = identity::workspace_refresh_expiry(&next).ok_or_else(|| {
+            dead("ChatGPT token refresh did not match the verified workspace and user".into())
+        })?;
+        next.expires_at = if next.expires_at > 0 {
+            next.expires_at.min(expiry)
+        } else {
+            expiry
+        };
+    } else {
+        // Claims missing from the new tokens leave the known identity untouched.
+        let _ = identity::apply(&mut next);
+    }
     *a = next;
     Ok(())
 }

@@ -189,6 +189,9 @@ async fn authorize_chatgpt(
                 "This ChatGPT access token has expired and the import carries no refresh token",
             ));
         }
+    } else if chatgpt::identity::verify_exported_workspace(client, a).await? {
+        chatgpt::models::fetch(client, a).await?;
+        return Ok(false);
     }
     if !has_refresh {
         return Err(http::Failure::new(
@@ -339,6 +342,7 @@ fn salvage_chatgpt(a: &Account, pasted: &str, error: String) -> String {
             s.credentials.refresh_token = a.credentials.refresh_token.clone();
             s.credentials.id_token = a.credentials.id_token.clone();
             s.credentials.chatgpt_account_id = a.credentials.chatgpt_account_id.clone();
+            s.credentials.verified_export_workspace = a.credentials.verified_export_workspace;
             s.expires_at = a.expires_at;
             // These are new credentials: like any new authorization they invalidate older
             // operations in flight and revive an account its dead credential turned off,

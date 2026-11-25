@@ -1214,6 +1214,178 @@ fn catalog_and_tokens() -> Value {
     body
 }
 
+const EXPORTED_WORKSPACE: &str = "5b12a5ad-a123-4bef-9ecf-6da1c7b13a92";
+
+fn workspace_access(user: &str, workspace: Option<&str>) -> String {
+    let mut claims = json!({
+        "iss": "https://auth.openai.com",
+        "exp": 4_000_000_000i64,
+        "https://api.openai.com/auth": {"user_id": user},
+        "https://api.openai.com/profile": {"email": "profile@example.com"},
+    });
+    if let Some(workspace) = workspace {
+        claims["https://api.openai.com/auth"]["chatgpt_account_id"] = json!(workspace);
+    }
+    jwt(claims)
+}
+
+fn export_without_workspace_claim() -> Value {
+    json!({
+        "account_id": EXPORTED_WORKSPACE,
+        "access_token": workspace_access("u1", None),
+        "id_token": jwt(json!({"sub": "another-user", "email": "wrong@example.com"})),
+        "refresh_token": "exported-refresh",
+    })
+}
+
+#[tokio::test]
+async fn chatgpt_workspace_export_requires_upstream_confirmation_before_import() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let server = mock(
+        200,
+        &[],
+        json!({
+            "account_ordering": [EXPORTED_WORKSPACE],
+            "accounts": {(EXPORTED_WORKSPACE): {
+                "account": {"account_id": EXPORTED_WORKSPACE, "plan_type": "free"},
+                "can_access_with_session": true,
+            }},
+            "models": [{"slug": "test-model"}],
+        }),
+        false,
+    )
+    .await;
+    let view = login::import(Provider::ChatGpt, export_without_workspace_claim(), None)
+        .await
+        .unwrap();
+    assert_eq!(view.uid, format!("{EXPORTED_WORKSPACE}:u1"));
+    assert_eq!(view.nickname, "profile@example.com");
+    let saved = store::get(Provider::ChatGpt, &view.id).unwrap();
+    assert!(saved.credentials.verified_export_workspace);
+    assert_eq!(saved.credentials.chatgpt_account_id, EXPORTED_WORKSPACE);
+    assert_eq!(saved.credentials.user_type, "free");
+    assert_eq!(saved.credentials.refresh_token, "exported-refresh");
+    assert_eq!(token_requests(&server), 0);
+    let seen = server.seen.lock().unwrap();
+    assert_eq!(seen[0].0, "/backend-api/wham/accounts/check");
+    assert!(!seen[0].1.contains_key("chatgpt-account-id"));
+    assert_eq!(
+        seen[0].1["authorization"],
+        format!("Bearer {}", workspace_access("u1", None))
+    );
+    assert!(seen[1].0.starts_with("/backend-api/codex/models"));
+    assert_eq!(seen[1].1["chatgpt-account-id"], EXPORTED_WORKSPACE);
+}
+
+#[tokio::test]
+async fn chatgpt_workspace_export_rejects_unconfirmed_or_restricted_workspaces() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    for (status, body) in [
+        (403, json!({})),
+        (200, json!({"accounts": [{"id": "another-workspace"}]})),
+        (
+            200,
+            json!({"accounts": [{"id": EXPORTED_WORKSPACE, "can_access_with_session": false}]}),
+        ),
+        (
+            200,
+            json!({"accounts": [{"id": EXPORTED_WORKSPACE, "is_deactivated": true}]}),
+        ),
+        (
+            200,
+            json!({"accounts": [{"id": EXPORTED_WORKSPACE, "is_fedramp_compliant_workspace": true}]}),
+        ),
+        (
+            200,
+            json!({"accounts": [{"id": EXPORTED_WORKSPACE}, {"id": EXPORTED_WORKSPACE}]}),
+        ),
+        (
+            200,
+            json!({"account_ordering": [EXPORTED_WORKSPACE], "accounts": {
+                (EXPORTED_WORKSPACE): {"account": {"account_id": "another-workspace"}},
+            }}),
+        ),
+    ] {
+        let server = mock(status, &[], body, false).await;
+        let error = login::import(Provider::ChatGpt, export_without_workspace_claim(), None)
+            .await
+            .err()
+            .expect("unconfirmed workspace cannot be saved");
+        assert!(error.contains("workspace"), "{error}");
+        assert!(store::all(Provider::ChatGpt).unwrap().is_empty());
+        let seen = server.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "/backend-api/wham/accounts/check");
+    }
+}
+
+#[tokio::test]
+async fn chatgpt_workspace_export_still_requires_a_model_catalog() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let server = mock(
+        200,
+        &[],
+        json!({"accounts": [{"id": EXPORTED_WORKSPACE}]}),
+        false,
+    )
+    .await;
+    let error = login::import(Provider::ChatGpt, export_without_workspace_claim(), None)
+        .await
+        .err()
+        .expect("catalog must succeed before saving");
+    assert!(error.contains("model list"), "{error}");
+    assert!(store::all(Provider::ChatGpt).unwrap().is_empty());
+    assert_eq!(token_requests(&server), 0);
+}
+
+#[tokio::test]
+async fn chatgpt_workspace_export_refresh_preserves_verified_subject_and_workspace() {
+    let _sandbox = Sandbox::new();
+    let mut account = Account::new(Provider::ChatGpt, Realm::Global);
+    account.uid = format!("{EXPORTED_WORKSPACE}:u1");
+    account.credentials.chatgpt_account_id = EXPORTED_WORKSPACE.into();
+    account.credentials.refresh_token = "exported-refresh".into();
+    account.credentials.verified_export_workspace = true;
+    {
+        let _server = mock(
+            200,
+            &[],
+            json!({
+                "access_token": workspace_access("u1", None),
+                "refresh_token": "rotated-refresh",
+            }),
+            false,
+        )
+        .await;
+        auth::refresh(&http(), &mut account).await.unwrap();
+        assert_eq!(account.expires_at, 4_000_000_000);
+        assert_eq!(account.credentials.refresh_token, "rotated-refresh");
+        assert_eq!(account.credentials.chatgpt_account_id, EXPORTED_WORKSPACE);
+    }
+    for access_token in [
+        workspace_access("another-user", None),
+        workspace_access("u1", Some("another-workspace")),
+    ] {
+        let _server = mock(
+            200,
+            &[],
+            json!({
+                "access_token": access_token,
+                "refresh_token": "unexpected-rotation",
+            }),
+            false,
+        )
+        .await;
+        let error = auth::refresh(&http(), &mut account).await.unwrap_err();
+        assert!(matches!(error.penalty, Some(Penalty::Disable { .. })));
+        assert_eq!(account.credentials.refresh_token, "rotated-refresh");
+        assert_eq!(account.credentials.chatgpt_account_id, EXPORTED_WORKSPACE);
+    }
+}
+
 #[tokio::test]
 async fn chatgpt_import_keeps_a_valid_exported_access_token_without_refreshing() {
     use crate::modules::native_providers::login;
@@ -1228,6 +1400,12 @@ async fn chatgpt_import_keeps_a_valid_exported_access_token_without_refreshing()
     // The exported refresh token is not spent: no token exchange, the access token is
     // proven by one catalog request instead.
     assert_eq!(token_requests(&server), 0);
+    assert!(!server
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(path, _, _)| path.contains("/accounts/check")));
     assert!(server
         .seen
         .lock()
