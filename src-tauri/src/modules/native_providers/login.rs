@@ -189,9 +189,35 @@ async fn authorize_chatgpt(
                 "This ChatGPT access token has expired and the import carries no refresh token",
             ));
         }
-    } else if chatgpt::identity::verify_exported_workspace(client, a).await? {
-        chatgpt::models::fetch(client, a).await?;
-        return Ok(false);
+    } else if let Some(workspace) = chatgpt::identity::ExportedWorkspace::from_access(a) {
+        // Keep the original export intact if the access token or its route fails validation.
+        let mut candidate = a.clone();
+        match workspace.verify(client, &mut candidate).await {
+            Ok(()) => match chatgpt::models::fetch(client, &candidate).await {
+                Ok(_) => {
+                    *a = candidate;
+                    return Ok(false);
+                }
+                Err(error) if has_refresh && catalog_auth_rejected(&error) => {}
+                Err(error) => return Err(error),
+            },
+            Err(error) if has_refresh && error.status == 401 => {}
+            Err(error) => return Err(error),
+        }
+
+        chatgpt::auth::refresh(client, a).await?;
+        let recheck = async {
+            workspace.verify(client, a).await?;
+            chatgpt::models::fetch(client, a).await
+        }
+        .await;
+        recheck.map_err(|mut error| {
+            // A connection failure after the exchange must not retry a spent token on another node.
+            error.unreached = false;
+            error.message = consumed_refresh_token(&error);
+            error
+        })?;
+        return Ok(true);
     }
     if !has_refresh {
         return Err(http::Failure::new(
@@ -201,6 +227,11 @@ async fn authorize_chatgpt(
     }
     chatgpt::auth::refresh(client, a).await?;
     Ok(true)
+}
+
+fn catalog_auth_rejected(error: &http::Failure) -> bool {
+    error.status == 401
+        || (error.status == 403 && matches!(error.penalty, Some(http::Penalty::Breaker { .. })))
 }
 
 /// Nodes a new account's import tries when a node cannot reach the upstream.
@@ -294,7 +325,7 @@ async fn import_inner(
         }
     };
     // From a token exchange on, the pasted refresh token is spent.
-    if refreshed {
+    if refreshed && !a.credentials.verified_export_workspace {
         chatgpt::identity::apply(&mut a).map_err(|e| {
             if revision.is_some() || new_login_auto.is_some() {
                 e.to_string()
@@ -369,6 +400,10 @@ fn salvage_chatgpt(a: &Account, pasted: &str, error: String) -> String {
             );
         }
     }
+    consumed_refresh_token(error)
+}
+
+fn consumed_refresh_token(error: impl std::fmt::Display) -> String {
     format!(
         "{error}. The pasted refresh token was consumed; sign in to Codex again to get a new one"
     )

@@ -139,24 +139,65 @@ fn authorized_workspace(response: &Value, id: &str) -> Option<Workspace> {
     .then_some(workspace)
 }
 
-/// The file's account ID is a hint. Only accept it if ChatGPT lists that exact workspace
-/// for the same access token, without asking the upstream to select an account first.
-pub async fn verify_exported_workspace(
+/// The export's intended workspace and user, captured before a refresh can change the claims.
+pub struct ExportedWorkspace {
+    account_id: String,
+    subject: String,
+}
+
+impl ExportedWorkspace {
+    pub fn from_access(a: &Account) -> Option<Self> {
+        let account_id = Uuid::parse_str(&a.credentials.chatgpt_account_id).ok()?;
+        let access = usable_access_claims(&a.credentials.access_token)?;
+        Some(Self {
+            account_id: account_id.to_string(),
+            subject: access.subject()?.to_owned(),
+        })
+    }
+
+    /// Confirm the intended workspace with the current bearer on the ordinary OpenAI route.
+    pub async fn verify(&self, http: &reqwest::Client, a: &mut Account) -> Result<(), Failure> {
+        let access = usable_access_claims(&a.credentials.access_token)
+            .ok_or_else(|| Failure::new(401, "ChatGPT access token is unusable"))?;
+        let wrong_workspace =
+            |claims: &Claims| !claims.account_id.is_empty() && claims.account_id != self.account_id;
+        if access.subject() != Some(self.subject.as_str())
+            || wrong_workspace(&access)
+            || claims(&a.credentials.id_token)
+                .as_ref()
+                .is_some_and(wrong_workspace)
+        {
+            return Err(Failure::new(
+                403,
+                "ChatGPT access token does not match the exported workspace and user",
+            ));
+        }
+        let workspace =
+            check_workspace(http, &a.credentials.access_token, &self.account_id).await?;
+
+        a.uid = format!("{}:{}", self.account_id, self.subject);
+        a.credentials.chatgpt_account_id = self.account_id.clone();
+        a.credentials.verified_export_workspace = true;
+        a.credentials.user_type = workspace.plan_type.unwrap_or_default();
+        a.nickname = if access.email.is_empty() {
+            access.profile_email
+        } else {
+            access.email
+        };
+        a.expires_at = access.exp;
+        Ok(())
+    }
+}
+
+fn usable_access_claims(token: &str) -> Option<Claims> {
+    claims(token).filter(|access| access.issuer == OPENAI_ISSUER && access.exp > now() + 300)
+}
+
+async fn check_workspace(
     http: &reqwest::Client,
-    a: &mut Account,
-) -> Result<bool, Failure> {
-    let Ok(account_id) = Uuid::parse_str(&a.credentials.chatgpt_account_id) else {
-        return Ok(false);
-    };
-    let Some(access) = claims(&a.credentials.access_token)
-        .filter(|access| access.issuer == OPENAI_ISSUER && access.exp > now() + 300)
-    else {
-        return Ok(false);
-    };
-    let Some(subject) = access.subject() else {
-        return Ok(false);
-    };
-    let account_id = account_id.to_string();
+    access_token: &str,
+    account_id: &str,
+) -> Result<Workspace, Failure> {
     let url = endpoints::url(&endpoints::current().backend, "/wham/accounts/check")?;
     let mut request_headers = HeaderMap::new();
     headers::apply_identity(&mut request_headers, true);
@@ -164,7 +205,7 @@ pub async fn verify_exported_workspace(
     let response = http
         .get(url)
         .headers(request_headers)
-        .bearer_auth(&a.credentials.access_token)
+        .bearer_auth(access_token)
         .timeout(Duration::from_secs(20))
         .send()
         .await
@@ -178,24 +219,12 @@ pub async fn verify_exported_workspace(
     }
     let body: Value = serde_json::from_slice(&client::read_bytes(response).await?)
         .map_err(|_| Failure::new(502, "ChatGPT workspace check returned invalid JSON"))?;
-    let workspace = authorized_workspace(&body, &account_id).ok_or_else(|| {
+    authorized_workspace(&body, account_id).ok_or_else(|| {
         Failure::new(
             403,
             "ChatGPT did not confirm access to the exported workspace; sign in to that workspace in Codex and import again",
         )
-    })?;
-
-    a.uid = format!("{account_id}:{subject}");
-    a.credentials.chatgpt_account_id = account_id;
-    a.credentials.verified_export_workspace = true;
-    a.credentials.user_type = workspace.plan_type.unwrap_or_default();
-    a.nickname = if access.email.is_empty() {
-        access.profile_email
-    } else {
-        access.email
-    };
-    a.expires_at = access.exp;
-    Ok(true)
+    })
 }
 
 /// A workspace verified at import remains pinned to the same authenticated user and ID.

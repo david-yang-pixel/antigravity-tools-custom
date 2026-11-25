@@ -787,6 +787,10 @@ async fn mock(status: u16, extra: &[(&str, &str)], body: Value, echo: bool) -> M
             response
         }
     });
+    serve_mock(app, seen).await
+}
+
+async fn serve_mock(app: axum::Router, seen: Seen) -> Mock {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -1339,6 +1343,178 @@ async fn chatgpt_workspace_export_still_requires_a_model_catalog() {
     assert!(error.contains("model list"), "{error}");
     assert!(store::all(Provider::ChatGpt).unwrap().is_empty());
     assert_eq!(token_requests(&server), 0);
+}
+
+type ImportStep = (&'static str, u16, Value);
+const WORKSPACE_CHECK: &str = "/backend-api/wham/accounts/check";
+const MODEL_CATALOG: &str = "/backend-api/codex/models";
+const TOKEN_EXCHANGE: &str = "/oauth/token";
+
+async fn mock_import_steps(steps: Vec<ImportStep>) -> Mock {
+    use axum::{body::Bytes, http::Uri, response::IntoResponse, Router};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    let steps = Arc::new(Mutex::new(VecDeque::from(steps)));
+    let seen: Seen = Default::default();
+    let log = seen.clone();
+    let app = Router::new().fallback(move |uri: Uri, headers: HeaderMap, body: Bytes| {
+        let steps = steps.clone();
+        let log = log.clone();
+        async move {
+            let path = uri.path();
+            log.lock()
+                .unwrap()
+                .push((path.into(), headers, body.to_vec()));
+            let (status, response) = match steps.lock().unwrap().pop_front() {
+                Some((expected, status, response)) if path == expected => (status, response),
+                None if path == MODEL_CATALOG => (200, json!({"models": []})),
+                _ => (500, json!({"error": "unexpected request"})),
+            };
+            (
+                axum::http::StatusCode::from_u16(status).unwrap(),
+                axum::Json(response),
+            )
+                .into_response()
+        }
+    });
+    serve_mock(app, seen).await
+}
+
+#[tokio::test]
+async fn chatgpt_workspace_export_refreshes_after_auth_rejection_and_rechecks() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    for (workspace_status, catalog_status) in [(401, None), (200, Some(401)), (200, Some(403))] {
+        let workspace = json!({"accounts": [{"id": EXPORTED_WORKSPACE}]});
+        let fresh_access = workspace_access("u1", Some(EXPORTED_WORKSPACE));
+        let mut steps = vec![(WORKSPACE_CHECK, workspace_status, workspace.clone())];
+        if let Some(status) = catalog_status {
+            steps.push((MODEL_CATALOG, status, json!({})));
+        }
+        steps.extend([
+            (
+                TOKEN_EXCHANGE,
+                200,
+                json!({"access_token": fresh_access, "refresh_token": "rotated-refresh"}),
+            ),
+            (WORKSPACE_CHECK, 200, workspace),
+            (MODEL_CATALOG, 200, json!({"models": []})),
+        ]);
+        let server = mock_import_steps(steps).await;
+        let view = login::import(Provider::ChatGpt, export_without_workspace_claim(), None)
+            .await
+            .unwrap();
+        let saved = store::get(Provider::ChatGpt, &view.id).unwrap();
+        assert_eq!(saved.uid, format!("{EXPORTED_WORKSPACE}:u1"));
+        assert!(saved.credentials.verified_export_workspace);
+        assert_eq!(saved.credentials.access_token, fresh_access);
+        assert_eq!(saved.credentials.refresh_token, "rotated-refresh");
+        assert_eq!(token_requests(&server), 1);
+        {
+            let seen = server.seen.lock().unwrap();
+            let recheck = 2 + usize::from(catalog_status.is_some());
+            assert_eq!(seen[recheck].0, WORKSPACE_CHECK);
+            assert_eq!(
+                seen[recheck].1["authorization"],
+                format!("Bearer {fresh_access}")
+            );
+            assert_eq!(seen[recheck + 1].0, MODEL_CATALOG);
+        }
+        store::remove(Provider::ChatGpt, &view.id).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn chatgpt_workspace_export_rechecks_permissions_and_identity_after_refresh() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    for (fresh_user, fresh_workspace, recheck_steps, expected) in [
+        (
+            "u1",
+            None,
+            vec![(WORKSPACE_CHECK, 403, json!({}))],
+            "workspace check failed",
+        ),
+        (
+            "u1",
+            None,
+            vec![
+                (
+                    WORKSPACE_CHECK,
+                    200,
+                    json!({"accounts": [{"id": EXPORTED_WORKSPACE}]}),
+                ),
+                (
+                    MODEL_CATALOG,
+                    401,
+                    json!({"error": {"message": "catalog rejected"}}),
+                ),
+            ],
+            "catalog rejected",
+        ),
+        (
+            "another-user",
+            None,
+            Vec::new(),
+            "does not match the exported workspace and user",
+        ),
+        (
+            "u1",
+            Some("another-workspace"),
+            Vec::new(),
+            "does not match the exported workspace and user",
+        ),
+    ] {
+        let mut steps = vec![
+            (WORKSPACE_CHECK, 401, json!({})),
+            (
+                TOKEN_EXCHANGE,
+                200,
+                json!({
+                    "access_token": workspace_access(fresh_user, fresh_workspace),
+                    "refresh_token": "rotated-refresh",
+                }),
+            ),
+        ];
+        steps.extend(recheck_steps);
+        let expected_requests = steps.len();
+        let server = mock_import_steps(steps).await;
+        let error = login::import(Provider::ChatGpt, export_without_workspace_claim(), None)
+            .await
+            .err()
+            .expect("failed revalidation must not save anything");
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains("refresh token was consumed"), "{error}");
+        assert!(store::all(Provider::ChatGpt).unwrap().is_empty());
+        assert_eq!(token_requests(&server), 1);
+        assert_eq!(server.seen.lock().unwrap().len(), expected_requests);
+    }
+}
+
+#[tokio::test]
+async fn chatgpt_workspace_export_does_not_refresh_after_explicit_catalog_denial() {
+    use crate::modules::native_providers::login;
+    let _sandbox = Sandbox::new();
+    let server = mock_import_steps(vec![
+        (
+            WORKSPACE_CHECK,
+            200,
+            json!({"accounts": [{"id": EXPORTED_WORKSPACE}]}),
+        ),
+        (
+            MODEL_CATALOG,
+            403,
+            json!({"error": {"code": "workspace_deactivated", "message": "workspace deactivated"}}),
+        ),
+    ])
+    .await;
+    let error = login::import(Provider::ChatGpt, export_without_workspace_claim(), None)
+        .await
+        .err()
+        .expect("explicitly denied workspace cannot be saved");
+    assert!(error.contains("workspace deactivated"), "{error}");
+    assert_eq!(token_requests(&server), 0);
+    assert!(store::all(Provider::ChatGpt).unwrap().is_empty());
 }
 
 #[tokio::test]
