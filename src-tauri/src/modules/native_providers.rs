@@ -150,6 +150,9 @@ pub struct Credentials {
     pub id_token: String,
     #[serde(default)]
     pub chatgpt_account_id: String,
+    /// The export's workspace was confirmed by ChatGPT because its JWTs omitted the workspace ID.
+    #[serde(default)]
+    pub(super) verified_export_workspace: bool,
     /// SHA-256 (hex) of every refresh token pasted into an import for this account, so a
     /// token that was rotated away cannot be imported (and replayed) again.
     #[serde(default)]
